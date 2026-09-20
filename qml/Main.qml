@@ -8,9 +8,6 @@ ApplicationWindow {
 
     property bool recorderMode: ["recorder", "selecting", "countdown", "recording", "stopping"].includes(backend.phase)
     property int selectedZoom: timeline.selectedZoom
-    property bool choosingFocus: false
-    property real draftFocusX: 0.5
-    property real draftFocusY: 0.5
     property bool cropping: false
     property bool allowClose: false
     property bool closeAfterDiscard: false
@@ -36,28 +33,6 @@ ApplicationWindow {
         backend.updateZoom(selectedZoom, a, b, x, y, amount);
     }
 
-    function beginFocus() {
-        if (!zoomValue())
-            return ;
-
-        timeline.selectZoom(selectedZoom, true);
-        draftFocusX = zoomValue().x;
-        draftFocusY = zoomValue().y;
-        choosingFocus = true;
-        cropping = false;
-    }
-
-    function finishFocus(confirm) {
-        if (!choosingFocus)
-            return ;
-
-        const z = zoomValue();
-        choosingFocus = false;
-        if (confirm && z)
-            changeZoom(z.start, z.end, draftFocusX, draftFocusY, z.amount);
-
-    }
-
     visible: true
     title: "OmaCap"
     flags: recorderMode ? Qt.Dialog : Qt.Window
@@ -80,8 +55,8 @@ ApplicationWindow {
     palette.highlightedText: theme.colors.background
     palette.mid: theme.colors.muted
     onSelectedZoomChanged: {
-        if (choosingFocus)
-            finishFocus(false);
+        if (selectedZoom >= 0)
+            cropping = false;
 
         if (appearanceScroll.contentItem)
             appearanceScroll.contentItem.contentY = 0;
@@ -109,43 +84,33 @@ ApplicationWindow {
         }
     }
 
-    Connections {
-        function onChanged() {
-            if (backend.phase !== "editor")
-                win.finishFocus(false);
-
-        }
-
-        target: backend
-    }
-
     Shortcut {
         sequence: "Space"
-        enabled: backend.phase === "editor" && !exportDialog.opened && !discardDialog.opened && !win.choosingFocus
+        enabled: backend.phase === "editor" && !exportDialog.opened && !discardDialog.opened && !focusPicker.pressed
         onActivated: backend.togglePlay()
     }
 
     Shortcut {
         sequences: [StandardKey.Undo]
-        enabled: backend.phase === "editor"
+        enabled: backend.phase === "editor" && !focusPicker.pressed
         onActivated: backend.undo()
     }
 
     Shortcut {
         sequences: [StandardKey.Redo]
-        enabled: backend.phase === "editor"
+        enabled: backend.phase === "editor" && !focusPicker.pressed
         onActivated: backend.redo()
     }
 
     Shortcut {
         sequence: "Left"
-        enabled: backend.phase === "editor" && !win.choosingFocus && !exportDialog.opened && !discardDialog.opened
+        enabled: backend.phase === "editor" && !focusPicker.pressed && !exportDialog.opened && !discardDialog.opened
         onActivated: backend.seek(backend.position - 1 / 30)
     }
 
     Shortcut {
         sequence: "Right"
-        enabled: backend.phase === "editor" && !win.choosingFocus && !exportDialog.opened && !discardDialog.opened
+        enabled: backend.phase === "editor" && !focusPicker.pressed && !exportDialog.opened && !discardDialog.opened
         onActivated: backend.seek(backend.position + 1 / 30)
     }
 
@@ -153,7 +118,8 @@ ApplicationWindow {
         sequence: "Escape"
         onActivated: {
             win.cropping = false;
-            win.finishFocus(false);
+            backend.endEdit();
+            timeline.selection = "";
             timeline.cutting = false;
         }
     }
@@ -205,7 +171,7 @@ ApplicationWindow {
                 visible: win.editing
                 text: "Export"
                 primary: true
-                enabled: backend.phase === "editor" && backend.duration > 0 && !win.choosingFocus
+                enabled: backend.phase === "editor" && backend.duration > 0 && !focusPicker.pressed
                 onClicked: exportDialog.open()
             }
 
@@ -362,7 +328,6 @@ ApplicationWindow {
                         text: win.cropping ? "Cancel crop" : "Crop"
                         onClicked: {
                             win.cropping = !win.cropping;
-                            win.finishFocus(false);
                             timeline.selection = "";
                         }
                     }
@@ -397,7 +362,6 @@ ApplicationWindow {
                         MouseArea {
                             anchors.fill: parent
                             onClicked: {
-                                win.finishFocus(false);
                                 timeline.selection = "";
                             }
                         }
@@ -415,8 +379,8 @@ ApplicationWindow {
                             cameraSource: backend.duration > 0 ? backend.cameraSource : ""
                             sourceAspect: backend.aspect
                             zoom: win.cropping ? 1 : backend.zoom
-                            focusX: win.choosingFocus ? win.draftFocusX : backend.focusX
-                            focusY: win.choosingFocus ? win.draftFocusY : backend.focusY
+                            focusX: backend.focusX
+                            focusY: backend.focusY
                         }
 
                         Label {
@@ -480,14 +444,13 @@ ApplicationWindow {
                             property real px
                             property real py
 
-                            visible: backend.edit.camera && backend.cameraSource !== "" && !win.choosingFocus && !win.cropping
+                            visible: backend.edit.camera && backend.cameraSource !== "" && !focusPicker.pressed && !win.cropping
                             x: composition.cameraX * fit.width / 1920
                             y: composition.cameraY * fit.width / 1920
                             width: composition.cameraW * fit.width / 1920
                             height: composition.cameraH * fit.width / 1920
                             cursorShape: Qt.SizeAllCursor
                             onPressed: (mouse) => {
-                                win.finishFocus(false);
                                 timeline.selection = "";
                                 px = mouse.x;
                                 py = mouse.y;
@@ -528,7 +491,7 @@ ApplicationWindow {
                     spacing: 10
 
                     ColumnLayout {
-                        visible: win.choosingFocus
+                        visible: win.selectedZoom >= 0
                         Layout.fillWidth: true
 
                         Label {
@@ -559,8 +522,11 @@ ApplicationWindow {
 
                                 function choose(mx, my) {
                                     const z = win.zoomValue(), c = backend.edit.crop;
-                                    win.draftFocusX = c[0] + Math.max(0, Math.min(1, mx / width)) * c[2];
-                                    win.draftFocusY = c[1] + Math.max(0, Math.min(1, my / height)) * c[3];
+                                    if (!z)
+                                        return;
+                                    const x = c[0] + Math.max(0, Math.min(1, mx / width)) * c[2];
+                                    const y = c[1] + Math.max(0, Math.min(1, my / height)) * c[3];
+                                    win.changeZoom(z.start, z.end, x, y, z.amount);
                                 }
 
                                 objectName: "zoomFocusPicker"
@@ -570,10 +536,14 @@ ApplicationWindow {
                                 height: focusPreview.frameH * parent.width / 1920
                                 cursorShape: Qt.CrossCursor
                                 onPressed: (mouse) => {
+                                    timeline.selectZoom(win.selectedZoom, true);
+                                    win.cropping = false;
                                     forceActiveFocus();
+                                    backend.beginEdit();
                                     choose(mouse.x, mouse.y);
                                 }
-                                Keys.onEscapePressed: win.finishFocus(false)
+                                onReleased: backend.endEdit()
+                                onCanceled: backend.endEdit()
                                 onPositionChanged: (mouse) => {
                                     if (pressed)
                                         choose(mouse.x, mouse.y);
@@ -583,8 +553,8 @@ ApplicationWindow {
                                 Rectangle {
                                     property var focusZoom: win.zoomValue()
 
-                                    x: focusZoom ? (win.draftFocusX - backend.edit.crop[0]) / backend.edit.crop[2] * parent.width - 7 : 0
-                                    y: focusZoom ? (win.draftFocusY - backend.edit.crop[1]) / backend.edit.crop[3] * parent.height - 7 : 0
+                                    x: focusZoom ? Math.max(0, Math.min(1, (focusZoom.x - backend.edit.crop[0]) / backend.edit.crop[2])) * parent.width - 7 : 0
+                                    y: focusZoom ? Math.max(0, Math.min(1, (focusZoom.y - backend.edit.crop[1]) / backend.edit.crop[3])) * parent.height - 7 : 0
                                     width: 14
                                     height: 14
                                     radius: 7
@@ -597,18 +567,9 @@ ApplicationWindow {
 
                         }
 
-                        RowLayout {
-                            FlatButton {
-                                objectName: "confirmFocus"
-                                text: "Confirm"
-                                onClicked: win.finishFocus(true)
-                            }
-
-                            FlatButton {
-                                text: "Cancel"
-                                onClicked: win.finishFocus(false)
-                            }
-
+                        Label {
+                            text: "Drag to move the focus."
+                            color: theme.colors.dark_foreground
                         }
 
                     }
@@ -643,25 +604,12 @@ ApplicationWindow {
                             text: amountSlider.value.toFixed(1) + "×"
                         }
 
-                        RowLayout {
-                            FlatButton {
-                                objectName: "chooseFocus"
-                                text: "Choose focus"
-                                enabled: !win.choosingFocus
-                                onClicked: win.beginFocus()
+                        FlatButton {
+                            text: "Delete zoom"
+                            onClicked: {
+                                backend.deleteZoom(win.selectedZoom);
+                                timeline.selection = "";
                             }
-
-                            FlatButton {
-                                text: "Delete zoom"
-                                enabled: !win.choosingFocus
-                                onClicked: {
-                                    win.finishFocus(true);
-                                    backend.deleteZoom(win.selectedZoom);
-                                    timeline.selection = "";
-                                    win.finishFocus(false);
-                                }
-                            }
-
                         }
 
                     }
@@ -871,7 +819,6 @@ ApplicationWindow {
             visible: win.editing
             enabled: backend.phase === "editor"
             Layout.fillWidth: true
-            onInteracting: win.finishFocus(false)
         }
 
         RowLayout {

@@ -52,7 +52,7 @@ Drag across the recording or its audio waveforms to select a range. **Keep range
 
 ### 3. Add a deliberate zoom
 
-Click an empty part of the **Zooms** lane, or use **Add zoom**. Click a zoom block to preview it and show its controls in the sidebar. Use **Choose focus** to pick a point, then **Confirm**. Click the recording or time ruler to return to the normal appearance controls and seek. Drag the zoom block or its ends to adjust its timing. OmaCap eases into and out of each zoom.
+Click an empty part of the **Zooms** lane, or use **Add zoom**. Click a zoom block to preview it and show its focus map in the sidebar. Drag the focus circle or click the map; changes apply immediately, and each drag is one undo step. Click the recording or time ruler to return to the normal appearance controls and seek. Drag the zoom block or its ends to adjust its timing. OmaCap smoothly pans and zooms between views. Touching zoom sections transition directly between their targets without pulling back to the whole window.
 
 ![Choosing a zoom focus in the sidebar while the main preview shows the zoom](docs/images/zoom.webp)
 
@@ -70,7 +70,7 @@ Click **Export**, choose MP4 or GIF, set the output size and frame rate, and pic
 | Step backward / forward | Left / Right |
 | Cut / select mode | C / V, with the timeline focused |
 | Delete selected clip, range or zoom | Delete / Backspace, with the timeline focused |
-| Cancel focus selection or leave cut mode | Escape |
+| Clear zoom selection or leave crop/cut mode | Escape |
 | Undo | Ctrl+Z |
 | Redo | Ctrl+Shift+Z |
 

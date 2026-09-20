@@ -28,16 +28,68 @@ double Edit::editedTime(double t) const {
     }
     return n;
 }
-double Edit::zoomAt(double t, double &x, double &y) const {
-    for (auto z : zooms)
-        if (t >= z.start && t < z.end) {
-            x = z.x;
-            y = z.y;
-            double ramp = std::min(.55, (z.end - z.start) / 3);
-            double p = std::clamp(std::min((t - z.start) / ramp, (z.end - t) / ramp), 0., 1.);
-            return 1 + (z.amount - 1) * p * p * p * (p * (p * 6 - 15) + 10);
-        }
-    return 1;
+// Evaluate complete views in edited time, so cuts cannot skip part of a move.
+// Clamp target centers once; clamping a moving target would kink the pan velocity.
+double Edit::zoomAt(double source, double &x, double &y) const {
+    struct View {
+        double scale = 1, x = .5, y = .5;
+    };
+    struct Section {
+        double start, end;
+        View view;
+    };
+    QVector<Section> sections;
+    for (const auto &z : zooms) {
+        const double start = editedTime(z.start), end = editedTime(z.end);
+        if (end - start <= 1e-6)
+            continue;
+        const double half = .5 / z.amount;
+        sections.append({start,
+                         end,
+                         {z.amount, std::clamp((z.x - crop.x()) / crop.width(), half, 1 - half),
+                          std::clamp((z.y - crop.y()) / crop.height(), half, 1 - half)}});
+    }
+    std::stable_sort(sections.begin(), sections.end(),
+                     [](const Section &a, const Section &b) { return a.start < b.start; });
+    const double t = editedTime(source);
+    auto result = [&](View v) {
+        x = crop.x() + v.x * crop.width();
+        y = crop.y() + v.y * crop.height();
+        return v.scale;
+    };
+    auto blend = [&](View a, View b, double progress) {
+        const double u = std::clamp(progress, 0., 1.);
+        const double ease = u * u * u * (u * (u * 6 - 15) + 10);
+        return result({a.scale == b.scale
+                           ? a.scale
+                           : std::exp(std::lerp(std::log(a.scale), std::log(b.scale), ease)),
+                       std::lerp(a.x, b.x, ease), std::lerp(a.y, b.y, ease)});
+    };
+    auto touching = [&](int i) {
+        return i >= 0 && i + 1 < sections.size() &&
+               std::abs(sections[i].end - sections[i + 1].start) < 1e-6;
+    };
+    // A single handoff replaces both independent out/in ramps at touching sections.
+    for (int i = 0; i + 1 < sections.size(); ++i) {
+        if (!touching(i))
+            continue;
+        const auto &a = sections[i], &b = sections[i + 1];
+        const double half = std::min({.375, (a.end - a.start) / 3, (b.end - b.start) / 3});
+        if (t >= a.end - half && t <= a.end + half)
+            return blend(a.view, b.view, (t - a.end + half) / (2 * half));
+    }
+    for (int i = 0; i < sections.size(); ++i) {
+        const auto &s = sections[i];
+        if (t < s.start || t >= s.end)
+            continue;
+        const double ramp = std::min(.75, (s.end - s.start) / 3);
+        if (!touching(i - 1) && t < s.start + ramp)
+            return blend({}, s.view, (t - s.start) / ramp);
+        if (!touching(i) && t > s.end - ramp)
+            return blend(s.view, {}, (t - s.end + ramp) / ramp);
+        return result(s.view);
+    }
+    return result({});
 }
 // Cuts are represented in source time. Every track and zoom uses this mapping.
 void Edit::remove(double a, double b) {
