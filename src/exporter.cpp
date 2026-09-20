@@ -71,7 +71,7 @@ int exportRecording(const QString &jobPath) {
         double length = edit.length();
         if (gif)
             length = std::min(length, job["seconds"].toDouble(length));
-        int total = std::ceil(length * fps);
+        int total = std::ceil(length * fps - 1e-9);
         QString silent = dir + "/export-silent.mp4", audio = dir + "/export-audio.m4a";
         QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
         QSurfaceFormat fmt;
@@ -145,30 +145,38 @@ int exportRecording(const QString &jobPath) {
         int index = 0;
         // Each cut starts a fresh decoder at the exact source timestamp. Memory
         // stays bounded.
-        for (auto span : edit.spans) {
+        const auto runs = edit.runs();
+        for (auto span : runs) {
             if (index >= total)
                 break;
             int count = std::min(
                 total - index,
-                int(std::round((edit.editedTime(span.start) + span.end - span.start) * fps)) -
+                int(std::ceil((edit.editedTime(span.start) + span.end - span.start) * fps - 1e-9)) -
                     index);
             if (count <= 0)
                 continue;
+            const double runStart = edit.editedTime(span.start);
+            const auto sampleTime = [&](int frame) {
+                return span.start + std::max(0., frame / double(fps) - runStart);
+            };
             QProcess screen, cam;
             auto decode = [&](QProcess &p, const QString &path, int dw, int dh) {
-                start(p, {"-v", "error", "-threads", "2", "-ss",
-                          QString::number(
-                              std::max(0.,
-                                       span.start - job[path.endsWith("camera.mkv") ? "cameraStart"
-                                                                                    : "screenStart"]
-                                                        .toDouble()),
-                              'f', 6),
-                          "-i", path, "-an", "-vf",
-                          QString("fps=%1,scale=%2:%3,tpad=stop_mode=clone:stop_duration=2")
-                              .arg(fps)
-                              .arg(dw)
-                              .arg(dh),
-                          "-threads", "2", "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"});
+                start(p,
+                      {"-v", "error", "-threads", "2", "-ss",
+                       QString::number(
+                           std::max(
+                               0.,
+                               sampleTime(index) -
+                                   job[path.endsWith("camera.mkv") ? "cameraStart" : "screenStart"]
+                                       .toDouble()),
+                           'f', 6),
+                       "-i", path, "-an", "-vf",
+                       QString("fps=%1,scale=%2:%3:force_original_aspect_ratio=increase,crop=%2:%3,"
+                               "tpad=stop_mode=clone:stop_duration=2")
+                           .arg(fps)
+                           .arg(dw)
+                           .arg(dh),
+                       "-threads", "2", "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"});
             };
             decode(screen, dir + "/screen.mkv", sw, sh);
             if (hasCamera)
@@ -177,7 +185,7 @@ int exportRecording(const QString &jobPath) {
                 frames->put(false, readFrame(screen, sw, sh));
                 if (hasCamera)
                     frames->put(true, readFrame(cam, 640, 480));
-                double x = .5, y = .5, z = edit.zoomAt(span.start + i / double(fps), x, y);
+                double x = .5, y = .5, z = edit.zoomAt(sampleTime(index), x, y);
                 root->setProperty("zoom", z);
                 root->setProperty("focusX", x);
                 root->setProperty("focusY", y);
@@ -227,8 +235,8 @@ int exportRecording(const QString &jobPath) {
             QStringList filters, mixes;
             for (int i = 0; i < inputs.size(); i++) {
                 QStringList segments;
-                for (int j = 0; j < edit.spans.size(); j++) {
-                    auto s = edit.spans[j];
+                for (int j = 0; j < runs.size(); j++) {
+                    auto s = runs[j];
                     QString label = QString("a%1_%2").arg(i).arg(j);
                     filters << QString("[%1:a]atrim=start=%2:end=%3,asetpts=PTS-STARTPTS[%4]")
                                    .arg(i)

@@ -6,3 +6,6 @@ SOURCES += src/main.cpp src/model.cpp src/theme.cpp src/backend.cpp src/exporter
 HEADERS += src/model.h src/theme.h src/backend.h src/frames.h src/exporter.h
 RESOURCES += resources.qrc
 QMAKE_CXXFLAGS += -Wall -Wextra
+
+SOURCES += src/waveforms.cpp
+HEADERS += src/waveforms.h
