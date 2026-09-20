@@ -338,12 +338,18 @@ class Integration : public QObject {
         const auto initialFocus = b.state.zooms[0].x;
         auto picker = find(win->contentItem(), "zoomFocusPicker");
         QVERIFY(picker && picker->isVisible());
+        // Selecting a zoom changes the sidebar layout. Hit-test the rendered layout.
+        QSignalSpy laidOut(win, &QQuickWindow::frameSwapped);
+        win->update();
+        QVERIFY(laidOut.wait(3000));
         const auto beforeDrag = b.past.size();
         const auto start = picker->mapToScene(QPointF(picker->width() * .25, picker->height() / 2));
         const auto end = picker->mapToScene(QPointF(picker->width() * .8, picker->height() / 2));
         QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, start.toPoint());
+        QVERIFY(picker->property("pressed").toBool());
         QTest::mouseMove(win, end.toPoint(), 40);
-        QVERIFY(b.state.zooms[0].x > .7); // Applied before release, not a draft.
+        // Observe the live result while the button is still held.
+        QTRY_VERIFY_WITH_TIMEOUT(b.state.zooms[0].x > .7, 1000);
         QCOMPARE(b.past.size(), beforeDrag);
         QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, end.toPoint());
         QCOMPARE(b.past.size(), beforeDrag + 1);
