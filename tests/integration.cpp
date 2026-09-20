@@ -31,6 +31,54 @@ class Integration : public QObject {
         QVERIFY(wallpaper.save(themeRoot.path() + "/background", "PNG"));
         qputenv("OMACAP_THEME_ROOT", themeRoot.path().toUtf8());
     }
+    void sparseRecordingSeek() {
+        Theme theme;
+        Frames frames;
+        Backend b(&theme, &frames);
+        b.loadFile(QDir::current().absoluteFilePath("tests/out/sparse-offset.mkv"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!b.screenSource().isEmpty(), 3000);
+        b.seek(1.75);
+        QTRY_VERIFY_WITH_TIMEOUT(!b.seeking, 3000);
+        QVERIFY2(!b.message().contains("could not reach"), qPrintable(b.message()));
+        QCOMPARE(b.position(), 1.75);
+        b.seek(.5);
+        b.togglePlay();
+        QTRY_VERIFY_WITH_TIMEOUT(b.displayPosition() > 1.25, 2000);
+        const double before = b.displayPosition();
+        QTest::qWait(350);
+        QVERIFY(b.displayPosition() > before + .2);
+        const double pausedAt = b.displayPosition();
+        b.pause();
+        QVERIFY(std::abs(b.displayPosition() - pausedAt) < .03);
+        QTest::qWait(250);
+        b.togglePlay();
+        QVERIFY(std::abs(b.displayPosition() - pausedAt) < .05);
+        b.pause();
+        for (double target : {3.1, 1.5, .2, 2.7, .6}) {
+            b.seek(target);
+            QTest::qWait(40);
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(!b.seeking, 3000);
+        QVERIFY(!b.message().contains("could not reach"));
+        QCOMPARE(b.position(), .6);
+        b.state.spans = {{0, 1.2}, {3, 4}};
+        b.edited();
+        b.seek(.5);
+        b.togglePlay();
+        QTRY_VERIFY_WITH_TIMEOUT(b.position() > 1.5, 2000);
+        QVERIFY(b.presentedSource >= 3);
+        b.pause();
+        b.state.duration = 4.5;
+        b.state.spans = {{0, 4.5}};
+        b.edited();
+        b.seek(4.49);
+        QTRY_VERIFY_WITH_TIMEOUT(!b.seeking, 3000);
+        QVERIFY(!b.message().contains("could not reach"));
+        QVERIFY(b.presentedSource > 3.9);
+        QCOMPARE(b.position(), 4.49);
+        b.discard();
+    }
     void windowModes() {
         Theme theme;
         QQmlApplicationEngine engine;
@@ -209,13 +257,18 @@ class Integration : public QObject {
         QVERIFY(track);
         QVERIFY(zoomLane);
         auto click = [&](QQuickItem *item, double fraction) {
+            QTest::qWait(40); // Let the contextual panel finish its layout before hit testing.
             QTest::mouseClick(
                 win, Qt::LeftButton, Qt::NoModifier,
                 item->mapToScene(QPointF(item->width() * fraction, item->height() / 2)).toPoint());
         };
         click(zoomLane, .1);
         QCOMPARE(b.state.zooms.size(), 1);
-        QVERIFY(win->property("choosingFocus").toBool());
+        QVERIFY(!win->property("choosingFocus").toBool());
+        QVERIFY(timeline->isEnabled());
+        auto choose = find(win->contentItem(), "chooseFocus");
+        QVERIFY(choose);
+        click(choose, .5);
         QTRY_VERIFY(b.zoom() > 1.7);
         const auto initialFocus = b.state.zooms[0].x;
         auto picker = find(win->contentItem(), "zoomFocusPicker");
@@ -223,11 +276,22 @@ class Integration : public QObject {
         click(picker, .8);
         QCOMPARE(b.state.zooms[0].x, initialFocus);
         QVERIFY(win->property("draftFocusX").toDouble() > .7);
-        QTest::keyClick(win, Qt::Key_Escape);
+        // Clicking footage exits focus editing, selects the clip and seeks normally.
+        click(track, .8);
         QTRY_VERIFY(!win->property("choosingFocus").toBool());
+        QCOMPARE(timeline->property("selectedZoom").toInt(), -1);
+        auto appearance = find(win->contentItem(), "appearanceControls");
+        auto controls = find(win->contentItem(), "zoomControls");
+        QVERIFY(appearance && controls);
+        QVERIFY(appearance->isVisible());
+        QVERIFY(!controls->isVisible());
+        QVERIFY(std::abs(b.position() - .8 * b.duration()) < .02);
         QCOMPARE(b.state.zooms[0].x, initialFocus);
-        auto choose = find(win->contentItem(), "chooseFocus");
-        QVERIFY(choose);
+        auto zoomBodyForFocus = find(win->contentItem(), "zoomDrag0");
+        QVERIFY(zoomBodyForFocus);
+        click(zoomBodyForFocus, .5);
+        QVERIFY(controls->isVisible());
+        QVERIFY(!appearance->isVisible());
         click(choose, .5);
         QTRY_VERIFY(win->property("choosingFocus").toBool());
         click(picker, .75);
@@ -239,6 +303,14 @@ class Integration : public QObject {
         QVERIFY(b.state.zooms[0].x > .7);
         b.undo();
         QCOMPARE(b.state.zooms[0].x, initialFocus);
+        click(choose, .5);
+        auto ruler = find(win->contentItem(), "timelineRuler");
+        QVERIFY(ruler);
+        click(ruler, .15);
+        QTRY_VERIFY(!win->property("choosingFocus").toBool());
+        QCOMPARE(timeline->property("selectedZoom").toInt(), -1);
+        QVERIFY(appearance->isVisible());
+        QVERIFY(std::abs(b.position() - .15 * b.duration()) < .02);
         b.seek(0);
         auto zoomBody = find(win->contentItem(), "zoomDrag0");
         QVERIFY(zoomBody);

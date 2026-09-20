@@ -18,13 +18,14 @@ FocusScope {
         }) : -1;
     }
 
-    signal zoomAdded(int index)
+    signal interacting()
 
     function selectZoom(index, reveal) {
         const z = backend.edit.zooms[index];
         if (!z)
             return ;
 
+        interacting();
         selection = "zoom";
         zoomId = z.id;
         forceActiveFocus();
@@ -40,7 +41,6 @@ FocusScope {
             return ;
 
         selectZoom(index, true);
-        zoomAdded(index);
     }
 
     function selectClip(at) {
@@ -210,6 +210,8 @@ FocusScope {
                     objectName: "timelineRuler"
                     anchors.fill: parent
                     onPressed: (mouse) => {
+                        timeline.interacting();
+                        timeline.selection = "";
                         timeline.forceActiveFocus();
                         backend.pause();
                         backend.seek(mouse.x / width * backend.duration);
@@ -351,6 +353,7 @@ FocusScope {
                                 hoverEnabled: timeline.cutting
                                 cursorShape: timeline.cutting ? Qt.CrossCursor : Qt.ArrowCursor
                                 onPressed: (mouse) => {
+                                    timeline.interacting();
                                     timeline.forceActiveFocus();
                                     startX = mouse.x;
                                     dragging = false;
@@ -367,10 +370,13 @@ FocusScope {
                                     }
                                 }
                                 onReleased: (mouse) => {
-                                    if (timeline.cutting)
+                                    if (timeline.cutting) {
                                         backend.split(at(mouse.x));
-                                    else if (!dragging)
+                                    } else if (!dragging) {
                                         timeline.selectClip(at(mouse.x));
+                                        backend.pause();
+                                        backend.seek(at(mouse.x));
+                                    }
                                 }
                             }
 

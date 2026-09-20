@@ -83,6 +83,9 @@ ApplicationWindow {
         if (choosingFocus)
             finishFocus(false);
 
+        if (appearanceScroll.contentItem)
+            appearanceScroll.contentItem.contentY = 0;
+
     }
     onClosing: (event) => {
         if (allowClose)
@@ -360,6 +363,7 @@ ApplicationWindow {
                         onClicked: {
                             win.cropping = !win.cropping;
                             win.finishFocus(false);
+                            timeline.selection = "";
                         }
                     }
 
@@ -389,6 +393,14 @@ ApplicationWindow {
                         width: Math.min(parent.width, parent.height * 16 / 9)
                         height: width * 9 / 16
                         anchors.centerIn: parent
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: {
+                                win.finishFocus(false);
+                                timeline.selection = "";
+                            }
+                        }
 
                         Composition {
                             id: composition
@@ -475,6 +487,8 @@ ApplicationWindow {
                             height: composition.cameraH * fit.width / 1920
                             cursorShape: Qt.SizeAllCursor
                             onPressed: (mouse) => {
+                                win.finishFocus(false);
+                                timeline.selection = "";
                                 px = mouse.x;
                                 py = mouse.y;
                                 backend.beginEdit();
@@ -600,6 +614,7 @@ ApplicationWindow {
                     }
 
                     ColumnLayout {
+                        objectName: "zoomControls"
                         visible: win.selectedZoom >= 0
                         Layout.fillWidth: true
 
@@ -651,153 +666,161 @@ ApplicationWindow {
 
                     }
 
-                    Label {
-                        text: "APPEARANCE"
-                        font.bold: true
-                    }
+                    ColumnLayout {
+                        objectName: "appearanceControls"
+                        visible: win.selectedZoom < 0
+                        Layout.fillWidth: true
+                        spacing: 10
 
-                    RowLayout {
-                        FlatButton {
-                            text: "Wallpaper"
-                            onClicked: backend.useWallpaper()
+                        Label {
+                            text: "APPEARANCE"
+                            font.bold: true
                         }
 
-                        FlatButton {
-                            text: "Image…"
-                            onClicked: backend.chooseBackground()
-                        }
-
-                        FlatButton {
-                            text: "Color"
-                            onClicked: backend.chooseColor()
-                        }
-
-                    }
-
-                    Setting {
-                        Layout.fillWidth: true
-                        label: "Padding"
-                        fieldName: "padding"
-                        to: 0.25
-                        current: backend.edit.padding || 0
-                        suffix: "%"
-                    }
-
-                    Setting {
-                        Layout.fillWidth: true
-                        label: "Corners"
-                        fieldName: "corners"
-                        to: 0.08
-                        current: backend.edit.corners || 0
-                        suffix: "%"
-                    }
-
-                    Setting {
-                        Layout.fillWidth: true
-                        label: "Shadow"
-                        fieldName: "shadow"
-                        current: backend.edit.shadow || 0
-                        suffix: "%"
-                    }
-
-                    Label {
-                        text: "CAMERA"
-                        font.bold: true
-                    }
-
-                    CheckBox {
-                        text: "Show camera"
-                        checked: backend.edit.camera ?? true
-                        enabled: backend.cameraSource !== ""
-                        onToggled: backend.setValue("camera", checked)
-                    }
-
-                    Setting {
-                        Layout.fillWidth: true
-                        label: "Size"
-                        fieldName: "cameraSize"
-                        from: 0.08
-                        to: 0.4
-                        current: backend.edit.cameraSize || 0.18
-                        suffix: "%"
-                    }
-
-                    RowLayout {
-                        FlatButton {
-                            text: "Rectangle"
-                            primary: backend.edit.cameraShape === "rectangle"
-                            onClicked: backend.setValue("cameraShape", "rectangle")
-                        }
-
-                        FlatButton {
-                            text: "Circle"
-                            primary: backend.edit.cameraShape === "circle"
-                            onClicked: backend.setValue("cameraShape", "circle")
-                        }
-
-                    }
-
-                    Setting {
-                        Layout.fillWidth: true
-                        label: "Camera corners"
-                        fieldName: "cameraCorners"
-                        to: 0.5
-                        current: backend.edit.cameraCorners ?? 0.12
-                        suffix: "%"
-                        enabled: backend.edit.cameraShape !== "circle"
-                    }
-
-                    Setting {
-                        Layout.fillWidth: true
-                        label: "Camera shadow"
-                        fieldName: "cameraShadow"
-                        current: backend.edit.cameraShadow ?? 0.45
-                        suffix: "%"
-                    }
-
-                    Label {
-                        text: "Drag the camera in the preview."
-                        wrapMode: Text.Wrap
-                        Layout.fillWidth: true
-                        color: theme.colors.dark_foreground
-                    }
-
-                    RowLayout {
-                        Repeater {
-                            model: ["↖", "↗", "↙", "↘"]
+                        RowLayout {
+                            FlatButton {
+                                text: "Wallpaper"
+                                onClicked: backend.useWallpaper()
+                            }
 
                             FlatButton {
-                                required property int index
-                                required property string modelData
+                                text: "Image…"
+                                onClicked: backend.chooseBackground()
+                            }
 
-                                text: modelData
-                                onClicked: {
-                                    backend.beginEdit();
-                                    backend.setValue("cameraX", index % 2 === 0 ? 0.03 : 0.97 - backend.edit.cameraSize);
-                                    backend.setValue("cameraY", index < 2 ? 0.04 : 0.96 - composition.cameraH / 1080);
-                                    backend.endEdit();
-                                }
+                            FlatButton {
+                                text: "Color"
+                                onClicked: backend.chooseColor()
                             }
 
                         }
 
-                    }
+                        Setting {
+                            Layout.fillWidth: true
+                            label: "Padding"
+                            fieldName: "padding"
+                            to: 0.25
+                            current: backend.edit.padding || 0
+                            suffix: "%"
+                        }
 
-                    Label {
-                        text: "AUDIO"
-                        font.bold: true
-                    }
+                        Setting {
+                            Layout.fillWidth: true
+                            label: "Corners"
+                            fieldName: "corners"
+                            to: 0.08
+                            current: backend.edit.corners || 0
+                            suffix: "%"
+                        }
 
-                    CheckBox {
-                        text: "Microphone / source audio"
-                        checked: backend.edit.mic ?? true
-                        onToggled: backend.setValue("mic", checked)
-                    }
+                        Setting {
+                            Layout.fillWidth: true
+                            label: "Shadow"
+                            fieldName: "shadow"
+                            current: backend.edit.shadow || 0
+                            suffix: "%"
+                        }
 
-                    CheckBox {
-                        text: "Desktop audio"
-                        checked: backend.edit.desktop ?? true
-                        onToggled: backend.setValue("desktop", checked)
+                        Label {
+                            text: "CAMERA"
+                            font.bold: true
+                        }
+
+                        CheckBox {
+                            text: "Show camera"
+                            checked: backend.edit.camera ?? true
+                            enabled: backend.cameraSource !== ""
+                            onToggled: backend.setValue("camera", checked)
+                        }
+
+                        Setting {
+                            Layout.fillWidth: true
+                            label: "Size"
+                            fieldName: "cameraSize"
+                            from: 0.08
+                            to: 0.4
+                            current: backend.edit.cameraSize || 0.18
+                            suffix: "%"
+                        }
+
+                        RowLayout {
+                            FlatButton {
+                                text: "Rectangle"
+                                primary: backend.edit.cameraShape === "rectangle"
+                                onClicked: backend.setValue("cameraShape", "rectangle")
+                            }
+
+                            FlatButton {
+                                text: "Circle"
+                                primary: backend.edit.cameraShape === "circle"
+                                onClicked: backend.setValue("cameraShape", "circle")
+                            }
+
+                        }
+
+                        Setting {
+                            Layout.fillWidth: true
+                            label: "Camera corners"
+                            fieldName: "cameraCorners"
+                            to: 0.5
+                            current: backend.edit.cameraCorners ?? 0.12
+                            suffix: "%"
+                            enabled: backend.edit.cameraShape !== "circle"
+                        }
+
+                        Setting {
+                            Layout.fillWidth: true
+                            label: "Camera shadow"
+                            fieldName: "cameraShadow"
+                            current: backend.edit.cameraShadow ?? 0.45
+                            suffix: "%"
+                        }
+
+                        Label {
+                            text: "Drag the camera in the preview."
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
+                            color: theme.colors.dark_foreground
+                        }
+
+                        RowLayout {
+                            Repeater {
+                                model: ["↖", "↗", "↙", "↘"]
+
+                                FlatButton {
+                                    required property int index
+                                    required property string modelData
+
+                                    text: modelData
+                                    onClicked: {
+                                        backend.beginEdit();
+                                        backend.setValue("cameraX", index % 2 === 0 ? 0.03 : 0.97 - backend.edit.cameraSize);
+                                        backend.setValue("cameraY", index < 2 ? 0.04 : 0.96 - composition.cameraH / 1080);
+                                        backend.endEdit();
+                                    }
+                                }
+
+                            }
+
+                        }
+
+                        Label {
+                            text: "AUDIO"
+                            font.bold: true
+                        }
+
+                        CheckBox {
+                            text: "Microphone / source audio"
+                            checked: backend.edit.mic ?? true
+                            onToggled: backend.setValue("mic", checked)
+                        }
+
+                        CheckBox {
+                            text: "Desktop audio"
+                            checked: backend.edit.desktop ?? true
+                            onToggled: backend.setValue("desktop", checked)
+                        }
+
                     }
 
                 }
@@ -810,11 +833,9 @@ ApplicationWindow {
             id: timeline
 
             visible: win.editing
-            enabled: backend.phase === "editor" && !win.choosingFocus
+            enabled: backend.phase === "editor"
             Layout.fillWidth: true
-            onZoomAdded: (index) => {
-                return win.beginFocus();
-            }
+            onInteracting: win.finishFocus(false)
         }
 
         RowLayout {

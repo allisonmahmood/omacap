@@ -90,3 +90,15 @@ run(
     "-i", str(out / "frames15.mkv"), "-map", "0:v", "-map", "0:v", "-c", "copy",
     str(out / "camera-wide.mkv"),
 )
+
+# Wayland only sends changed frames: a still window can have long timestamp gaps.
+run(
+    "-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=4",
+    "-vf", "select='lt(t,1)+gte(t,3)'", "-fps_mode", "vfr",
+    "-c:v", "libx264", "-preset", "ultrafast", str(out / "sparse.mkv"),
+)
+
+run(
+    "-i", str(out / "sparse.mkv"), "-map", "0:v", "-c", "copy",
+    "-output_ts_offset", "0.023", str(out / "sparse-offset.mkv"),
+)

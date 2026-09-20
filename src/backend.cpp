@@ -44,48 +44,10 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
     mic.setAudioOutput(&micOutput);
     desktop.setAudioOutput(&desktopOutput);
     connect(&peaks, &Waveforms::changed, this, &Backend::waveformsChanged);
-    connect(&screenSink, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame &v) {
-        if (!v.isValid() || state.spans.isEmpty() || seekTimer.isActive())
-            return;
-        double source =
-            (v.startTime() >= 0 ? v.startTime() / 1000000. : screen.position() / 1000.) +
-            screenStart;
-        const double frameEnd =
-            v.endTime() > v.startTime() ? v.endTime() / 1000000. + screenStart : source + .1;
-        const double target = state.sourceTime(pendingSeek);
-        if (seeking && (target < source - .002 || target > frameEnd + .002))
-            return;
-        bool inside = false;
-        for (auto span : state.spans)
-            if (frameEnd > span.start && source < span.end) {
-                source = std::max(source, span.start);
-                inside = true;
-                break;
-            }
-        if (!inside && playing()) {
-            const double next = state.editedTime(source);
-            if (next >= duration() - .001) {
-                pause();
-                seek(duration());
-            } else {
-                seek(next);
-                applySeek();
-            }
-            return;
-        }
-        if (!seeking && playing() && source < presentedSource - .001)
-            return;
-        seeking = false;
-        seekTimeout.stop();
-        presentedSource = source;
-        m_position = state.editedTime(source);
-        presentationClock.restart();
-        updateDisplay();
-        presentCamera();
-        frames->put(false, v.toImage());
-        ++screenRevision;
-        emit frameChanged();
-        emit positionChanged();
+    connect(&screenSink, &QVideoSink::videoFrameChanged, this, &Backend::presentScreen);
+    connect(&screen, &QMediaPlayer::seekableChanged, this, [this](bool seekable) {
+        if (seekable && seeking && !seekTimer.isActive())
+            applySeek();
     });
     connect(&cameraSink, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame &v) {
         if (!v.isValid())
@@ -94,18 +56,42 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
         ++latestCameraSerial;
         presentCamera();
     });
-    connect(&screen, &QMediaPlayer::positionChanged, this, [this] {
-        if (!seeking && !seekTimer.isActive())
-            syncPlayers();
+    connect(&screen, &QMediaPlayer::positionChanged, this, [this](qint64 ms) {
+        if (seeking || seekTimer.isActive() || !playing() || state.spans.isEmpty())
+            return;
+        const double source = ms / 1000. + screenStart;
+        bool inside = false;
+        for (const auto &span : state.spans)
+            if (source >= span.start && source < span.end) {
+                inside = true;
+                break;
+            }
+        if (!inside) {
+            const double next = state.editedTime(source);
+            if (next >= duration() - .001)
+                pause();
+            seek(next);
+            applySeek();
+            return;
+        }
+        m_position = state.editedTime(source);
+        presentationClock.restart();
+        updateDisplay();
+        syncPlayers();
+        emit positionChanged();
     });
     displayTimer.setInterval(16);
     displayTimer.setTimerType(Qt::PreciseTimer);
     connect(&displayTimer, &QTimer::timeout, this, &Backend::updateDisplay);
     connect(&screen, &QMediaPlayer::playbackStateChanged, this, [this] {
-        if (playing())
+        if (playing()) {
+            presentationClock.restart();
             displayTimer.start();
-        else
+        } else {
             displayTimer.stop();
+            if (!seeking)
+                m_position = m_displayPosition;
+        }
         updateDisplay();
         syncPlayers();
         emit positionChanged();
@@ -113,6 +99,11 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
     seekTimeout.setSingleShot(true);
     seekTimeout.setInterval(2000);
     connect(&seekTimeout, &QTimer::timeout, this, [this] {
+        seekInFlight = false;
+        if (pendingSeek != appliedSeek) {
+            applySeek();
+            return;
+        }
         seeking = false;
         pause();
         m_message = "Playback could not reach this frame. Try seeking again.";
@@ -474,6 +465,45 @@ void Backend::prepare(QString path, bool captured) {
     probe->start("ffprobe", {"-v", "error", "-show_format", "-show_streams", "-of", "json", path});
 }
 void Backend::ready() {
+    // Prepared Matroska files retain their original PTS. Qt reports the absolute
+    // container end as duration, but its seek positions start at the first frame.
+    // The audio/camera may also outlast the screen; hold its last frame in that tail.
+    status("preparing");
+    const auto openingSession = session;
+    auto probe = new QProcess(this);
+    connect(probe, &QProcess::errorOccurred, this,
+            [this, openingSession](QProcess::ProcessError error) {
+                if (session == openingSession && error == QProcess::FailedToStart)
+                    status("recorder", "Could not start FFprobe. The recording is retained.");
+            });
+    QTimer::singleShot(10000, probe, [probe] {
+        if (probe->state() != QProcess::NotRunning)
+            probe->kill();
+    });
+    connect(
+        probe, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+        [this, probe, openingSession](int code, QProcess::ExitStatus) {
+            auto metadata = QJsonDocument::fromJson(probe->readAllStandardOutput())
+                                .object()["format"]
+                                .toObject();
+            probe->deleteLater();
+            if (session != openingSession)
+                return;
+            const double length = metadata["duration"].toString().toDouble() -
+                                  metadata["start_time"].toString().toDouble();
+            if (code != 0 || length <= 0) {
+                status(
+                    "recorder",
+                    "Could not read the recording's video timestamps. The recording is retained.");
+                return;
+            }
+            screenSeekEnd = std::max(0LL, qRound64(length * 1000) - 1);
+            openPlayers();
+        });
+    probe->start("ffprobe", {"-v", "error", "-show_entries", "format=start_time,duration", "-of",
+                             "json", session + "/screen.mkv"});
+}
+void Backend::openPlayers() {
     peaks.load(session, state.duration);
     screen.setSource(QUrl::fromLocalFile(session + "/screen.mkv"));
     if (QFile::exists(session + "/camera.mkv"))
@@ -492,6 +522,10 @@ void Backend::ready() {
             screenRevision == 0 && !playing()) {
             screen.play();
             screen.pause();
+            // Seeks issued while Qt was still stopped do not produce a frame.
+            // Reissue the latest target once the preview decoder is primed.
+            seekInFlight = false;
+            seekTimeout.stop();
             seek(m_position);
         }
     });
@@ -513,13 +547,66 @@ void Backend::syncPlayers(bool force) {
     micOutput.setMuted(!state.mic);
     desktopOutput.setMuted(!state.desktop);
 }
+// Qt returns the available frame at a seek, which need not cover the requested
+// timestamp in variable-frame-rate recordings. Serialize requests so old seek
+// completions cannot replace the latest click, rather than rejecting valid gaps.
+void Backend::presentScreen(const QVideoFrame &v) {
+    if (!v.isValid() || state.spans.isEmpty())
+        return;
+    const bool completedSeek = seekInFlight;
+    if (completedSeek) {
+        seekInFlight = false;
+        seekTimeout.stop();
+        if (pendingSeek != appliedSeek || seekTimer.isActive()) {
+            if (!seekTimer.isActive())
+                applySeek();
+            return;
+        }
+        seeking = false;
+        m_position = appliedSeek;
+        presentationClock.restart();
+        updateDisplay();
+        emit positionChanged();
+    } else if (seeking || seekTimer.isActive())
+        return;
+    double source =
+        (v.startTime() >= 0 ? v.startTime() / 1000000. : screen.position() / 1000.) + screenStart;
+    const double frameEnd =
+        v.endTime() > v.startTime() ? v.endTime() / 1000000. + screenStart : source + .1;
+    bool inside = false;
+    for (const auto &span : state.spans)
+        if (frameEnd > span.start && source < span.end) {
+            source = std::max(source, span.start);
+            inside = true;
+            break;
+        }
+    if (!inside && playing() && !completedSeek) {
+        const double next = state.editedTime(source);
+        if (next >= duration() - .001)
+            pause();
+        seek(next);
+        applySeek();
+        return;
+    }
+    if (!completedSeek && playing() && source < presentedSource - .001)
+        return;
+    if (m_message == "Playback could not reach this frame. Try seeking again.") {
+        m_message.clear();
+        emit changed();
+    }
+    presentedSource = source;
+    presentCamera();
+    frames->put(false, v.toImage());
+    ++screenRevision;
+    emit frameChanged();
+}
 void Backend::presentCamera() {
     if (!latestCameraFrame.isValid() || latestCameraSerial == shownCameraSerial || seeking ||
         seekTimer.isActive())
         return;
     const auto stamp = latestCameraFrame.startTime();
     const double source = (stamp >= 0 ? stamp / 1000000. : camera.position() / 1000.) + cameraStart;
-    if (std::abs(source - std::max(cameraStart, presentedSource)) > .12)
+    if (std::abs(source - std::max(cameraStart, state.sourceTime(m_position))) > .12)
         return;
     shownCameraSerial = latestCameraSerial;
     frames->put(true, latestCameraFrame.toImage());
@@ -528,12 +615,19 @@ void Backend::presentCamera() {
 }
 void Backend::updateDisplay() {
     double next = m_position;
-    if (playing() && !seeking && !seekTimer.isActive() && presentationClock.isValid()) {
-        // Extrapolate only a short distance from an accepted video frame. A stalled
-        // decoder cannot send the playhead running ahead of the picture.
-        next =
-            std::min(duration(), m_position + std::min(80LL, presentationClock.elapsed()) / 1000.);
+    if (playing() && !seeking && !seekTimer.isActive() && presentationClock.isValid() &&
+        screen.mediaStatus() == QMediaPlayer::BufferedMedia) {
+        // Video-only VFR playback can have sparse position notifications too.
+        // Buffered playback keeps time while holding a still frame; stalls freeze it.
+        next = std::min(duration(), m_position + presentationClock.elapsed() / 1000.);
         next = std::max(next, m_displayPosition);
+        // Cross removed ranges on the clock even if the recording holds a still frame.
+        const double continuousSource = state.sourceTime(m_position) + next - m_position;
+        if (state.sourceTime(next) > continuousSource + .001) {
+            seek(next);
+            applySeek();
+            return;
+        }
     }
     if (next != m_displayPosition) {
         m_displayPosition = next;
@@ -542,11 +636,18 @@ void Backend::updateDisplay() {
 }
 void Backend::applySeek() {
     seekTimer.stop();
-    if (state.spans.isEmpty())
+    if (state.spans.isEmpty() || seekInFlight || !screen.isSeekable())
         return;
-    seeking = true;
+    seeking = seekInFlight = true;
+    appliedSeek = pendingSeek;
     seekTimeout.start();
-    screen.setPosition(qRound64(std::max(0., state.sourceTime(pendingSeek) - screenStart) * 1000));
+    const auto target =
+        std::clamp(qRound64(std::max(0., state.sourceTime(appliedSeek) - screenStart) * 1000), 0LL,
+                   screenSeekEnd);
+    if (screen.position() == target && screenSink.videoFrame().isValid()) {
+        presentScreen(screenSink.videoFrame());
+    } else
+        screen.setPosition(target);
     syncPlayers(true);
 }
 void Backend::seek(double t) {
@@ -557,7 +658,7 @@ void Backend::seek(double t) {
     if (!state.spans.isEmpty())
         seekTimer.start();
     else {
-        seeking = false;
+        seeking = seekInFlight = false;
         seekTimer.stop();
         seekTimeout.stop();
     }
@@ -584,16 +685,16 @@ void Backend::togglePlay() {
 }
 double Backend::zoom() const {
     double x = .5, y = .5;
-    return state.zoomAt(presentedSource, x, y);
+    return state.zoomAt(state.sourceTime(m_displayPosition), x, y);
 }
 double Backend::focusX() const {
     double x = .5, y = .5;
-    state.zoomAt(presentedSource, x, y);
+    state.zoomAt(state.sourceTime(m_displayPosition), x, y);
     return x;
 }
 double Backend::focusY() const {
     double x = .5, y = .5;
-    state.zoomAt(presentedSource, x, y);
+    state.zoomAt(state.sourceTime(m_displayPosition), x, y);
     return y;
 }
 void Backend::push() {
@@ -639,6 +740,7 @@ void Backend::edited() {
     emit editChanged();
     emit changed();
     emit positionChanged();
+    emit displayPositionChanged();
     if (!grouping)
         checkpoint();
     syncPlayers();
@@ -904,7 +1006,7 @@ void Backend::clearPlayers() {
     seekTimer.stop();
     seekTimeout.stop();
     displayTimer.stop();
-    seeking = false;
+    seeking = seekInFlight = false;
     m_position = m_displayPosition = presentedSource = 0;
     for (auto p : {&screen, &camera, &mic, &desktop}) {
         p->stop();

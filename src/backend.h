@@ -26,9 +26,9 @@ class Backend : public QObject {
     Q_PROPERTY(QString screenSource READ screenSource NOTIFY frameChanged)
     Q_PROPERTY(QString cameraSource READ cameraSource NOTIFY cameraFrameChanged)
     Q_PROPERTY(double aspect READ aspect NOTIFY changed)
-    Q_PROPERTY(double zoom READ zoom NOTIFY positionChanged)
-    Q_PROPERTY(double focusX READ focusX NOTIFY positionChanged)
-    Q_PROPERTY(double focusY READ focusY NOTIFY positionChanged)
+    Q_PROPERTY(double zoom READ zoom NOTIFY displayPositionChanged)
+    Q_PROPERTY(double focusX READ focusX NOTIFY displayPositionChanged)
+    Q_PROPERTY(double focusY READ focusY NOTIFY displayPositionChanged)
     Q_PROPERTY(double progress READ progress NOTIFY changed)
     Q_PROPERTY(int countdown READ countdown NOTIFY changed)
     Q_PROPERTY(bool dirty READ dirty NOTIFY changed)
@@ -134,7 +134,9 @@ class Backend : public QObject {
     QTimer countdownTimer, seekTimer, displayTimer, seekTimeout;
     QElapsedTimer presentationClock;
     double presentedSource = 0, m_displayPosition = 0;
-    bool seeking = false;
+    bool seeking = false, seekInFlight = false;
+    double appliedSeek = 0;
+    void presentScreen(const QVideoFrame &frame);
     QVideoFrame latestCameraFrame;
     quint64 latestCameraSerial = 0, shownCameraSerial = 0;
     void presentCamera();
@@ -149,6 +151,8 @@ class Backend : public QObject {
     void edited();
     void prepare(QString path, bool capture);
     void ready();
+    void openPlayers();
+    qint64 screenSeekEnd = 0;
     void snapshotWallpaper();
     void syncPlayers(bool force = false);
     void parseWorker();

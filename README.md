@@ -50,7 +50,7 @@ Drag across the recording or its audio waveforms to select a range. **Keep range
 
 ### 3. Add a deliberate zoom
 
-Click an empty part of the **Zooms** lane, or use **Add zoom**. Choose a focus point in the small sidebar preview and click **Confirm**. The main preview shows the zoom as you work. Click an existing zoom to preview it; drag the block or its ends to adjust its timing. OmaCap eases into and out of each zoom.
+Click an empty part of the **Zooms** lane, or use **Add zoom**. Click a zoom block to preview it and show its controls in the sidebar. Use **Choose focus** to pick a point, then **Confirm**. Click the recording or time ruler to return to the normal appearance controls and seek. Drag the zoom block or its ends to adjust its timing. OmaCap eases into and out of each zoom.
 
 ![Choosing a zoom focus in the sidebar while the main preview shows the zoom](docs/images/zoom.webp)
 
