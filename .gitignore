@@ -1,0 +1,10 @@
+/build/
+/tests/out/
+*.user
+__pycache__/
+/prototypes/
+/.ruff_cache/
+/.cache/
+/packaging/pkg/
+/packaging/src/
+/packaging/*.pkg.tar.*
