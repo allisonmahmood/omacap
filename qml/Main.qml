@@ -117,7 +117,7 @@ ApplicationWindow {
         RowLayout {
             Layout.fillWidth: true
             Label {
-                text: "O M A D E M O"
+                text: "O M A C A P"
                 font.bold: true
                 font.pixelSize: 14
                 Layout.fillWidth: true
