@@ -104,6 +104,8 @@ QJsonObject Edit::json() const {
             {"padding", padding},
             {"corners", corners},
             {"shadow", shadow},
+            {"windowTransparency", windowTransparency},
+            {"windowOpacity", windowOpacity},
             {"cameraShape", cameraShape},
             {"cameraCorners", cameraCorners},
             {"cameraShadow", cameraShadow},
@@ -155,6 +157,10 @@ Edit Edit::fromJson(const QJsonObject &o) {
     NUM(padding, 0., .25);
     NUM(corners, 0., .08);
     NUM(shadow, 0., 1.);
+    NUM(windowOpacity, 0., 1.);
+    const auto transparency = o["windowTransparency"].toString();
+    if (transparency == "light" || transparency == "custom")
+        e.windowTransparency = transparency;
     NUM(cameraSize, .08, .4);
     NUM(cameraCorners, 0., .5);
     NUM(cameraShadow, 0., 1.);

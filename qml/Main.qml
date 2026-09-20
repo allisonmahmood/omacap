@@ -722,6 +722,42 @@ ApplicationWindow {
                         }
 
                         Label {
+                            text: "Window transparency"
+                        }
+
+                        RowLayout {
+                            spacing: 0
+
+                            Repeater {
+                                model: ["Off", "Light", "Custom"]
+
+                                FlatButton {
+                                    required property string modelData
+                                    objectName: "transparency" + modelData
+                                    text: modelData
+                                    primary: (backend.edit.windowTransparency ?? "off") === modelData.toLowerCase()
+                                    onClicked: backend.setValue("windowTransparency", modelData.toLowerCase())
+                                }
+                            }
+                        }
+
+                        Setting {
+                            objectName: "windowOpacitySetting"
+                            Layout.fillWidth: true
+                            visible: backend.edit.windowTransparency === "custom"
+                            label: "Opacity"
+                            fieldName: "windowOpacity"
+                            stepSize: 0.01
+                            current: backend.edit.windowOpacity ?? 0.96
+                            suffix: "%"
+                        }
+
+                        Label {
+                            text: "Recorded window only"
+                            color: theme.colors.dark_foreground
+                        }
+
+                        Label {
                             text: "CAMERA"
                             font.bold: true
                         }

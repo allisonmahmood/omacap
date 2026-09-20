@@ -19,6 +19,7 @@ Item {
     property real frameH: frameW / ratio
     property real frameX: (width - frameW) / 2
     property real frameY: (height - frameH) / 2
+    property real windowOpacity: edit.windowTransparency === "light" ? 0.96 : edit.windowTransparency === "custom" ? (edit.windowOpacity ?? 0.96) : 1
     property real cameraW: (edit.cameraSize ?? 0.18) * width
     property real cameraH: cameraW * (edit.cameraShape === "circle" ? 1 : 0.75)
     property real cameraX: Math.min(width - cameraW, Math.max(0, (edit.cameraX ?? 0.79) * width))
@@ -41,21 +42,36 @@ Item {
         asynchronous: false
     }
 
-    Rectangle {
-        id: shape
-
-        x: scene.frameX
-        y: scene.frameY
-        width: scene.frameW
-        height: scene.frameH
-        radius: (scene.edit.corners ?? 0.015) * scene.width
-        color: "white"
+    // A padded, inverse mask keeps the shadow outside the window. No opaque
+    // backing may sit behind the recording when its opacity is reduced.
+    Item {
+        id: shadowCaster
+        property real margin: 32 + scene.width * 0.01
+        x: scene.frameX - margin
+        y: scene.frameY - margin
+        width: scene.frameW + 2 * margin
+        height: scene.frameH + 2 * margin
         visible: false
+        layer.enabled: true
+
+        Rectangle {
+            id: shape
+            x: shadowCaster.margin
+            y: shadowCaster.margin
+            width: scene.frameW
+            height: scene.frameH
+            radius: (scene.edit.corners ?? 0.015) * scene.width
+            color: "white"
+        }
     }
 
     MultiEffect {
-        source: shape
-        anchors.fill: shape
+        source: shadowCaster
+        anchors.fill: shadowCaster
+        autoPaddingEnabled: false
+        maskEnabled: true
+        maskSource: shadowCaster
+        maskInverted: true
         shadowEnabled: true
         shadowBlur: 0.6
         shadowOpacity: scene.edit.shadow ?? 0.45
@@ -97,6 +113,7 @@ Item {
     MultiEffect {
         source: viewport
         anchors.fill: viewport
+        opacity: scene.windowOpacity
         maskEnabled: true
         maskSource: mask
         autoPaddingEnabled: false

@@ -9,6 +9,7 @@ ColumnLayout {
     property real from: 0
     property real to: 1
     property real current: 0
+    property real stepSize: 0
     property string suffix: ""
     spacing: 2
     RowLayout {
@@ -27,6 +28,7 @@ ColumnLayout {
         from: field.from
         to: field.to
         value: field.current
+        stepSize: field.stepSize
         onPressedChanged: pressed ? backend.beginEdit() : backend.endEdit()
         onMoved: backend.setValue(field.fieldName, value)
     }
