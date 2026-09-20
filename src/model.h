@@ -19,6 +19,8 @@ struct Edit {
     double padding = .07, corners = .015, shadow = .45, cameraSize = .18, cameraX = .79,
            cameraY = .75, cameraCorners = .12, cameraShadow = .45;
     QString cameraShape = "rectangle";
+    QString windowTransparency = "off";
+    double windowOpacity = .96;
     bool camera = true, mic = true, desktop = true;
     QString background, color = "#182638";
     double length() const;

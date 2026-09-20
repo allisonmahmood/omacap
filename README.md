@@ -6,7 +6,7 @@ Record a window, clean up the take, and give it a background, padding and smooth
 
 [Install](#install) · [How to use it](#record-and-edit) · [MIT license](https://github.com/allisonmahmood/omacap/blob/main/LICENSE)
 
-![OmaCap Studio showing a terminal demo with a wallpaper background, shadow, appearance controls and a zoom section on the timeline](docs/images/studio.webp)
+![OmaCap Studio showing a translucent terminal demo over a wallpaper, custom opacity controls and a zoom section on the timeline](docs/images/studio.webp)
 
 *The real OmaCap editor, shown with a generated terminal demo.*
 
@@ -45,6 +45,8 @@ Choose your microphone, camera and desktop audio options. Click **Select source 
 ### 2. Crop, style and trim
 
 Click **Crop** and drag over the part you want to keep. Set the background, padding, corners and shadow while watching the preview. If you recorded a camera, choose its shape, corners and shadow, then drag it into place.
+
+**Window transparency** reveals the chosen background through the recording. Choose **Off**, **Light** for 96% opacity, or **Custom** to show an opacity slider. The camera stays opaque. The treatment appears in both MP4 and GIF exports and starts off for each new recording.
 
 Drag across the recording or its audio waveforms to select a range. **Keep range** trims the ends; **Delete selection** removes that range. Click **✂ Cut** and click a track to split a clip. Return to **Select**, click a clip, and press Delete to remove it. All recorded tracks stay linked.
 

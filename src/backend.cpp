@@ -748,10 +748,11 @@ void Backend::edited() {
 void Backend::setValue(QString k, QVariant v) {
     if (m_phase != "editor")
         return;
-    static const QStringList allowed{"padding",       "corners",     "shadow", "cameraSize",
-                                     "cameraX",       "cameraY",     "camera", "mic",
-                                     "desktop",       "crop",        "color",  "cameraShape",
-                                     "cameraCorners", "cameraShadow"};
+    static const QStringList allowed{
+        "padding",      "corners",     "shadow",        "cameraSize",   "cameraX",
+        "cameraY",      "camera",      "mic",           "desktop",      "crop",
+        "color",        "cameraShape", "cameraCorners", "cameraShadow", "windowTransparency",
+        "windowOpacity"};
     if (!allowed.contains(k))
         return;
     auto o = state.json();

@@ -451,6 +451,146 @@ class Integration : public QObject {
         QVERIFY2(error < 4, qPrintable(QString::number(error)));
         b.discard();
     }
+    void windowTransparency() {
+        QQmlEngine engine;
+        auto frames = new Frames;
+        QImage screen(640, 360, QImage::Format_RGB32);
+        screen.fill(QColor(200, 40, 20));
+        QImage camera(160, 120, QImage::Format_RGB32);
+        camera.fill(QColor(20, 60, 220));
+        frames->put(false, screen);
+        frames->put(true, camera);
+        engine.addImageProvider("frames", frames);
+        QQmlComponent component(&engine, QUrl("qrc:/qml/Composition.qml"));
+        QQuickWindow win;
+        win.resize(640, 360);
+        auto scene = qobject_cast<QQuickItem *>(component.create());
+        QVERIFY2(scene, qPrintable(component.errorString()));
+        scene->setParentItem(win.contentItem());
+        scene->setSize(QSizeF(640, 360));
+        scene->setProperty("screenSource", "image://frames/screen/test");
+        scene->setProperty("cameraSource", "image://frames/camera/test");
+        win.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&win));
+        Edit edit;
+        edit.color = "#40a060";
+        edit.shadow = .7;
+        edit.corners = .03;
+        QColor originalShadow;
+        const QList<QPair<QString, double>> cases{
+            {"off", 1}, {"light", .96}, {"custom", .4}, {"custom", 0}};
+        for (const auto &[mode, opacity] : cases) {
+            edit.windowTransparency = mode;
+            edit.windowOpacity = opacity;
+            scene->setProperty("edit", edit.json().toVariantMap());
+            QTest::qWait(50);
+            auto grab = scene->grabToImage(QSize(640, 360));
+            QVERIFY(grab);
+            QSignalSpy ready(grab.data(), &QQuickItemGrabResult::ready);
+            QVERIFY(ready.wait(5000));
+            const auto image = grab->image();
+            const auto actual = image.pixelColor(240, 180);
+            const QColor bg(edit.color), source = screen.pixelColor(0, 0);
+            for (auto channel : {&QColor::red, &QColor::green, &QColor::blue}) {
+                const int expected =
+                    qRound((source.*channel)() * opacity + (bg.*channel)() * (1 - opacity));
+                QVERIFY2(std::abs((actual.*channel)() - expected) <= 2,
+                         qPrintable(mode + " expected " + QString::number(expected) + " got " +
+                                    actual.name()));
+            }
+            // Camera pixels and the exterior shadow do not fade with the recording.
+            QCOMPARE(image.pixelColor(560, 310), camera.pixelColor(0, 0));
+            QCOMPARE(image.pixelColor(10, 10), bg);
+            const int belowWindow = qRound(scene->property("frameY").toDouble() +
+                                           scene->property("frameH").toDouble()) +
+                                    8;
+            const auto shadow = image.pixelColor(320, belowWindow);
+            if (mode == "off") {
+                originalShadow = shadow;
+                QVERIFY(shadow.green() < bg.green() - 2);
+            } else
+                QCOMPARE(shadow, originalShadow);
+            image.save("tests/out/preview-transparency-" + mode +
+                       QString::number(qRound(opacity * 100)) + ".png");
+        }
+        delete scene;
+    }
+    void transparencyControls() {
+        Theme theme;
+        QQmlApplicationEngine engine;
+        auto frames = new Frames;
+        engine.addImageProvider("frames", frames);
+        Backend b(&theme, frames);
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &b);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects().value(0));
+        QVERIFY(win);
+        auto cleanup = qScopeGuard([&] { delete win; });
+        QVERIFY(QTest::qWaitForWindowExposed(win));
+        b.newSession();
+        b.status("editor");
+        win->resize(1280, 900);
+        QTest::qWait(100);
+        auto setting = win->findChild<QQuickItem *>("windowOpacitySetting");
+        QVERIFY(setting);
+        auto click = [&](const QString &name) {
+            // Repeater delegates are visual children, not QObject children of the window.
+            std::function<QQuickItem *(QQuickItem *)> find = [&](QQuickItem *item) -> QQuickItem * {
+                if (item->objectName() == name)
+                    return item;
+                for (auto child : item->childItems())
+                    if (auto match = find(child))
+                        return match;
+                return nullptr;
+            };
+            auto button = find(win->contentItem());
+            QVERIFY(button);
+            QTest::mouseClick(
+                win, Qt::LeftButton, Qt::NoModifier,
+                button->mapToScene(QPointF(button->width() / 2, button->height() / 2)).toPoint());
+            QTest::qWait(40);
+        };
+        QCOMPARE(b.state.windowTransparency, QString("off"));
+        QVERIFY(!setting->isVisible());
+        click("transparencyLight");
+        QCOMPARE(b.state.windowTransparency, QString("light"));
+        QVERIFY(!setting->isVisible());
+        click("transparencyCustom");
+        QCOMPARE(b.state.windowTransparency, QString("custom"));
+        QVERIFY(setting->isVisible());
+        QQuickItem *slider = nullptr;
+        for (auto child : setting->childItems())
+            if (child->metaObject()->indexOfProperty("handle") >= 0)
+                slider = child;
+        QVERIFY(slider);
+        const auto start = slider->mapToScene(QPointF(slider->width() * .8, slider->height() / 2));
+        const auto end = slider->mapToScene(QPointF(slider->width() * .4, slider->height() / 2));
+        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, start.toPoint());
+        QTest::mouseMove(win, end.toPoint(), 30);
+        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, end.toPoint());
+        QVERIFY(b.state.windowOpacity > .3 && b.state.windowOpacity < .5);
+        const double custom = b.state.windowOpacity;
+        b.undo();
+        QCOMPARE(b.state.windowOpacity, .96);
+        b.redo();
+        QCOMPARE(b.state.windowOpacity, custom);
+        click("transparencyOff");
+        QVERIFY(!setting->isVisible());
+        click("transparencyCustom");
+        QCOMPARE(b.state.windowOpacity, custom);
+        QCOMPARE(Edit::fromJson(b.state.json()).windowOpacity, custom);
+        QCOMPARE(Edit::fromJson(b.state.json()).windowTransparency, QString("custom"));
+        QCOMPARE(Edit::fromJson({}).windowTransparency, QString("off"));
+        b.setValue("windowOpacity", -1);
+        QCOMPARE(b.state.windowOpacity, 0.);
+        b.setValue("windowOpacity", 2);
+        QCOMPARE(b.state.windowOpacity, 1.);
+        b.discard();
+        b.newSession();
+        QCOMPARE(b.state.windowTransparency, QString("off"));
+        b.discard();
+    }
     void styledPreviewMatchesExport() {
         Theme theme;
         QQmlApplicationEngine engine;
@@ -479,8 +619,19 @@ class Integration : public QObject {
         QTRY_VERIFY_WITH_TIMEOUT(!b.seeking && !b.cameraSource().isEmpty(), 3000);
         auto composition = win->findChild<QQuickItem *>("composition");
         QVERIFY(composition);
-        for (const auto &shape : {QString("rectangle"), QString("circle")}) {
-            b.setValue("cameraShape", shape);
+        struct Style {
+            QString mode, shape;
+            bool gif;
+            int width;
+        };
+        for (const auto &style : QList<Style>{{"off", "rectangle", false, 1920},
+                                              {"light", "circle", false, 3840},
+                                              {"custom", "rectangle", false, 1920},
+                                              {"custom", "circle", true, 640}}) {
+            const auto name = style.mode + "-" + style.shape;
+            b.setValue("cameraShape", style.shape);
+            b.setValue("windowTransparency", style.mode);
+            b.setValue("windowOpacity", .45);
             QTest::qWait(100);
             auto grab = composition->grabToImage(QSize(1920, 1080));
             QVERIFY(grab);
@@ -488,10 +639,10 @@ class Integration : public QObject {
             QVERIFY(ready.wait(5000));
             const auto preview = grab->image();
             QVERIFY(!preview.isNull());
-            const QString output =
-                QDir::current().absoluteFilePath("tests/out/parity-" + shape + ".mp4");
+            const QString output = QDir::current().absoluteFilePath("tests/out/parity-" + name +
+                                                                    (style.gif ? ".gif" : ".mp4"));
             QFile::remove(output);
-            b.startExport(output, false, shape == "circle" ? 3840 : 1920, 30, 18, 0);
+            b.startExport(output, style.gif, style.width, 30, 18, b.duration());
             QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 30000);
             QProcess ffmpeg;
             ffmpeg.start("ffmpeg", {"-v", "error", "-i", output, "-frames:v", "1", "-vf",
@@ -507,9 +658,9 @@ class Integration : public QObject {
                              std::abs(p.blue() - e.blue());
                 }
             error /= preview.width() * preview.height() * 3. / 16;
-            qInfo() << "PREVIEW_EXPORT" << shape << "mean_channel_error=" << error;
-            preview.save("tests/out/preview-" + shape + ".png");
-            exported.save("tests/out/export-" + shape + ".png");
+            qInfo() << "PREVIEW_EXPORT" << name << "mean_channel_error=" << error;
+            preview.save("tests/out/preview-" + name + ".png");
+            exported.save("tests/out/export-" + name + ".png");
             QVERIFY2(error < 5, qPrintable(QString::number(error)));
         }
         b.discard();
@@ -565,6 +716,8 @@ class Integration : public QObject {
             b.loadFile(QDir::current().absoluteFilePath("tests/out/delayed.mkv"));
             QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
             b.setValue("padding", .123);
+            b.setValue("windowTransparency", "custom");
+            b.setValue("windowOpacity", .73);
             saved = b.sessionPath();
         }
         {
@@ -573,6 +726,8 @@ class Integration : public QObject {
             b.recover();
             QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 5000);
             QCOMPARE(b.edit()["padding"].toDouble(), .123);
+            QCOMPARE(b.state.windowTransparency, QString("custom"));
+            QCOMPARE(b.state.windowOpacity, .73);
             QVERIFY(b.dirty());
             b.discard();
             QVERIFY(!QDir(saved).exists());
