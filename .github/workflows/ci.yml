@@ -71,3 +71,5 @@ jobs:
             tests/out/*-sync.json
             tests/out/metrics*.json
             tests/out/studio.png
+            tests/out/preview-*.png
+            tests/out/export-*.png

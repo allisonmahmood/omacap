@@ -2,16 +2,21 @@
 #include "frames.h"
 #include "model.h"
 #include "theme.h"
+#include "waveforms.h"
 #include <QAudioOutput>
+#include <QElapsedTimer>
 #include <QMediaPlayer>
 #include <QObject>
 #include <QProcess>
 #include <QSettings>
 #include <QTimer>
+#include <QVideoFrame>
 #include <QVideoSink>
 #include <memory>
 class Backend : public QObject {
     Q_OBJECT
+    Q_PROPERTY(QVariantMap waveforms READ waveformData NOTIFY waveformsChanged)
+    Q_PROPERTY(double displayPosition READ displayPosition NOTIFY displayPositionChanged)
     Q_PROPERTY(QString phase READ phase NOTIFY changed)
     Q_PROPERTY(QString message READ message NOTIFY changed)
     Q_PROPERTY(QVariantMap edit READ edit NOTIFY editChanged)
@@ -34,6 +39,8 @@ class Backend : public QObject {
   public:
     Backend(Theme *, Frames *, QObject *p = nullptr);
     ~Backend();
+    QVariantMap waveformData() const { return peaks.data; }
+    double displayPosition() const { return m_displayPosition; }
     QString phase() const { return m_phase; }
     QString message() const { return m_message; }
     QVariantMap edit() const { return state.json().toVariantMap(); }
@@ -70,6 +77,9 @@ class Backend : public QObject {
     Q_INVOKABLE void endEdit();
     Q_INVOKABLE void undo();
     Q_INVOKABLE void redo();
+    Q_INVOKABLE void pause();
+    Q_INVOKABLE void split(double at);
+    Q_INVOKABLE void cancelEdit();
     Q_INVOKABLE void removeRange(double a, double b);
     Q_INVOKABLE void trim(double a, double b);
     Q_INVOKABLE int addZoom(double at);
@@ -90,6 +100,8 @@ class Backend : public QObject {
     void startExport(QString path, bool gif, int width, int fps, int quality, double seconds);
     QString sessionPath() const { return session; }
   signals:
+    void waveformsChanged();
+    void displayPositionChanged();
     void changed();
     void editChanged();
     void positionChanged();
@@ -118,7 +130,16 @@ class Backend : public QObject {
     QAudioOutput micOutput, desktopOutput;
     QVideoSink screenSink, cameraSink;
     QProcess worker;
-    QTimer countdownTimer, seekTimer;
+    Waveforms peaks;
+    QTimer countdownTimer, seekTimer, displayTimer, seekTimeout;
+    QElapsedTimer presentationClock;
+    double presentedSource = 0, m_displayPosition = 0;
+    bool seeking = false;
+    QVideoFrame latestCameraFrame;
+    quint64 latestCameraSerial = 0, shownCameraSerial = 0;
+    void presentCamera();
+    void applySeek();
+    void updateDisplay();
     double pendingSeek = 0;
     QSettings settings;
     void status(QString phase, QString message = {});

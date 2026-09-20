@@ -43,47 +43,81 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
     camera.setVideoSink(&cameraSink);
     mic.setAudioOutput(&micOutput);
     desktop.setAudioOutput(&desktopOutput);
+    connect(&peaks, &Waveforms::changed, this, &Backend::waveformsChanged);
     connect(&screenSink, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame &v) {
-        if (v.isValid()) {
-            frames->put(false, v.toImage());
-            ++screenRevision;
-            emit frameChanged();
+        if (!v.isValid() || state.spans.isEmpty() || seekTimer.isActive())
+            return;
+        double source =
+            (v.startTime() >= 0 ? v.startTime() / 1000000. : screen.position() / 1000.) +
+            screenStart;
+        const double frameEnd =
+            v.endTime() > v.startTime() ? v.endTime() / 1000000. + screenStart : source + .1;
+        const double target = state.sourceTime(pendingSeek);
+        if (seeking && (target < source - .002 || target > frameEnd + .002))
+            return;
+        bool inside = false;
+        for (auto span : state.spans)
+            if (frameEnd > span.start && source < span.end) {
+                source = std::max(source, span.start);
+                inside = true;
+                break;
+            }
+        if (!inside && playing()) {
+            const double next = state.editedTime(source);
+            if (next >= duration() - .001) {
+                pause();
+                seek(duration());
+            } else {
+                seek(next);
+                applySeek();
+            }
+            return;
         }
+        if (!seeking && playing() && source < presentedSource - .001)
+            return;
+        seeking = false;
+        seekTimeout.stop();
+        presentedSource = source;
+        m_position = state.editedTime(source);
+        presentationClock.restart();
+        updateDisplay();
+        presentCamera();
+        frames->put(false, v.toImage());
+        ++screenRevision;
+        emit frameChanged();
+        emit positionChanged();
     });
     connect(&cameraSink, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame &v) {
-        if (v.isValid()) {
-            frames->put(true, v.toImage());
-            ++cameraRevision;
-            emit cameraFrameChanged();
-        }
-    });
-    connect(&screen, &QMediaPlayer::positionChanged, this, [this](qint64 ms) {
-        if (m_phase != "editor" && m_phase != "exporting")
+        if (!v.isValid())
             return;
-        double s = ms / 1000. + screenStart;
-        if (playing()) {
-            bool inside = false;
-            for (auto span : state.spans)
-                if (s >= span.start - .03 && s < span.end) {
-                    inside = true;
-                    break;
-                }
-            if (!inside) {
-                double next = state.sourceTime(state.editedTime(s));
-                if (next >= state.spans.last().end - .02) {
-                    togglePlay();
-                    seek(0);
-                    return;
-                }
-                screen.setPosition(qRound64(std::max(0., next - screenStart) * 1000));
-                syncPlayers(true);
-            }
-        }
-        m_position = state.editedTime(screen.position() / 1000. + screenStart);
+        latestCameraFrame = v;
+        ++latestCameraSerial;
+        presentCamera();
+    });
+    connect(&screen, &QMediaPlayer::positionChanged, this, [this] {
+        if (!seeking && !seekTimer.isActive())
+            syncPlayers();
+    });
+    displayTimer.setInterval(16);
+    displayTimer.setTimerType(Qt::PreciseTimer);
+    connect(&displayTimer, &QTimer::timeout, this, &Backend::updateDisplay);
+    connect(&screen, &QMediaPlayer::playbackStateChanged, this, [this] {
+        if (playing())
+            displayTimer.start();
+        else
+            displayTimer.stop();
+        updateDisplay();
         syncPlayers();
         emit positionChanged();
     });
-    connect(&screen, &QMediaPlayer::playbackStateChanged, this, [this] { emit positionChanged(); });
+    seekTimeout.setSingleShot(true);
+    seekTimeout.setInterval(2000);
+    connect(&seekTimeout, &QTimer::timeout, this, [this] {
+        seeking = false;
+        pause();
+        m_message = "Playback could not reach this frame. Try seeking again.";
+        emit changed();
+    });
     connect(&screen, &QMediaPlayer::errorOccurred, this,
             [this](QMediaPlayer::Error, const QString &e) {
                 m_message = "Playback: " + e;
@@ -91,11 +125,7 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
             });
     seekTimer.setInterval(35);
     seekTimer.setSingleShot(true);
-    connect(&seekTimer, &QTimer::timeout, this, [this] {
-        screen.setPosition(
-            qRound64(std::max(0., state.sourceTime(pendingSeek) - screenStart) * 1000));
-        syncPlayers(true);
-    });
+    connect(&seekTimer, &QTimer::timeout, this, &Backend::applySeek);
     countdownTimer.setInterval(1000);
     connect(&countdownTimer, &QTimer::timeout, this, [this] {
         if (--m_countdown <= 0) {
@@ -444,6 +474,7 @@ void Backend::prepare(QString path, bool captured) {
     probe->start("ffprobe", {"-v", "error", "-show_format", "-show_streams", "-of", "json", path});
 }
 void Backend::ready() {
+    peaks.load(session, state.duration);
     screen.setSource(QUrl::fromLocalFile(session + "/screen.mkv"));
     if (QFile::exists(session + "/camera.mkv"))
         camera.setSource(QUrl::fromLocalFile(session + "/camera.mkv"));
@@ -452,12 +483,17 @@ void Backend::ready() {
     if (QFile::exists(session + "/desktop.wav"))
         desktop.setSource(QUrl::fromLocalFile(session + "/desktop.wav"));
     status("editor", captureError);
+    seek(0);
     emit editChanged();
     checkpoint();
-    QTimer::singleShot(200, this, [this] {
-        screen.play();
-        screen.pause();
-        seek(0);
+    const auto openingSession = session;
+    QTimer::singleShot(200, this, [this, openingSession] {
+        if (m_phase == "editor" && session == openingSession && !state.spans.isEmpty() &&
+            screenRevision == 0 && !playing()) {
+            screen.play();
+            screen.pause();
+            seek(m_position);
+        }
     });
 }
 void Backend::syncPlayers(bool force) {
@@ -477,20 +513,70 @@ void Backend::syncPlayers(bool force) {
     micOutput.setMuted(!state.mic);
     desktopOutput.setMuted(!state.desktop);
 }
+void Backend::presentCamera() {
+    if (!latestCameraFrame.isValid() || latestCameraSerial == shownCameraSerial || seeking ||
+        seekTimer.isActive())
+        return;
+    const auto stamp = latestCameraFrame.startTime();
+    const double source = (stamp >= 0 ? stamp / 1000000. : camera.position() / 1000.) + cameraStart;
+    if (std::abs(source - std::max(cameraStart, presentedSource)) > .12)
+        return;
+    shownCameraSerial = latestCameraSerial;
+    frames->put(true, latestCameraFrame.toImage());
+    ++cameraRevision;
+    emit cameraFrameChanged();
+}
+void Backend::updateDisplay() {
+    double next = m_position;
+    if (playing() && !seeking && !seekTimer.isActive() && presentationClock.isValid()) {
+        // Extrapolate only a short distance from an accepted video frame. A stalled
+        // decoder cannot send the playhead running ahead of the picture.
+        next =
+            std::min(duration(), m_position + std::min(80LL, presentationClock.elapsed()) / 1000.);
+        next = std::max(next, m_displayPosition);
+    }
+    if (next != m_displayPosition) {
+        m_displayPosition = next;
+        emit displayPositionChanged();
+    }
+}
+void Backend::applySeek() {
+    seekTimer.stop();
+    if (state.spans.isEmpty())
+        return;
+    seeking = true;
+    seekTimeout.start();
+    screen.setPosition(qRound64(std::max(0., state.sourceTime(pendingSeek) - screenStart) * 1000));
+    syncPlayers(true);
+}
 void Backend::seek(double t) {
     pendingSeek = std::clamp(t, 0., std::max(0., duration() - .001));
+    seeking = true;
     m_position = pendingSeek;
-    seekTimer.start();
+    updateDisplay();
+    if (!state.spans.isEmpty())
+        seekTimer.start();
+    else {
+        seeking = false;
+        seekTimer.stop();
+        seekTimeout.stop();
+    }
     emit positionChanged();
 }
+void Backend::pause() {
+    screen.pause();
+    syncPlayers(true);
+}
 void Backend::togglePlay() {
-    if (playing()) {
-        screen.pause();
-        syncPlayers(true);
-    } else {
-        if (position() >= duration() - .05) {
-            screen.setPosition(qRound64(std::max(0., state.sourceTime(0) - screenStart) * 1000));
-        }
+    if (state.spans.isEmpty())
+        return;
+    if (playing())
+        pause();
+    else {
+        if (screen.mediaStatus() == QMediaPlayer::EndOfMedia || position() >= duration() - .05)
+            seek(0);
+        if (seekTimer.isActive())
+            applySeek();
         screen.play();
         syncPlayers(true);
     }
@@ -498,16 +584,16 @@ void Backend::togglePlay() {
 }
 double Backend::zoom() const {
     double x = .5, y = .5;
-    return state.zoomAt(state.sourceTime(m_position), x, y);
+    return state.zoomAt(presentedSource, x, y);
 }
 double Backend::focusX() const {
     double x = .5, y = .5;
-    state.zoomAt(state.sourceTime(m_position), x, y);
+    state.zoomAt(presentedSource, x, y);
     return x;
 }
 double Backend::focusY() const {
     double x = .5, y = .5;
-    state.zoomAt(state.sourceTime(m_position), x, y);
+    state.zoomAt(presentedSource, x, y);
     return y;
 }
 void Backend::push() {
@@ -521,8 +607,16 @@ void Backend::push() {
 void Backend::beginEdit() {
     if (grouping)
         return;
+    pause();
     groupBefore = state.json();
     grouping = true;
+}
+void Backend::cancelEdit() {
+    if (!grouping)
+        return;
+    state = Edit::fromJson(groupBefore);
+    grouping = false;
+    edited();
 }
 void Backend::endEdit() {
     if (!grouping)
@@ -537,7 +631,8 @@ void Backend::endEdit() {
 void Backend::edited() {
     QVariantMap look;
     auto current = state.json().toVariantMap();
-    for (auto key : QStringList{"padding", "corners", "shadow", "cameraSize", "cameraX", "cameraY"})
+    for (auto key : QStringList{"padding", "corners", "shadow", "cameraSize", "cameraX", "cameraY",
+                                "cameraShape", "cameraCorners", "cameraShadow"})
         look[key] = current[key];
     settings.setValue("appearance", look);
     m_dirty = true;
@@ -551,20 +646,25 @@ void Backend::edited() {
 void Backend::setValue(QString k, QVariant v) {
     if (m_phase != "editor")
         return;
-    static const QStringList allowed{"padding", "corners", "shadow", "cameraSize",
-                                     "cameraX", "cameraY", "camera", "mic",
-                                     "desktop", "crop",    "color"};
+    static const QStringList allowed{"padding",       "corners",     "shadow", "cameraSize",
+                                     "cameraX",       "cameraY",     "camera", "mic",
+                                     "desktop",       "crop",        "color",  "cameraShape",
+                                     "cameraCorners", "cameraShadow"};
     if (!allowed.contains(k))
         return;
-    push();
     auto o = state.json();
     o[k] = QJsonValue::fromVariant(v);
-    state = Edit::fromJson(o);
+    auto next = Edit::fromJson(o);
+    if (next.json() == state.json())
+        return;
+    push();
+    state = next;
     edited();
 }
 void Backend::undo() {
     if (m_phase != "editor")
         return;
+    pause();
     if (past.isEmpty())
         return;
     future.append(state);
@@ -575,6 +675,7 @@ void Backend::undo() {
 void Backend::redo() {
     if (m_phase != "editor")
         return;
+    pause();
     if (future.isEmpty())
         return;
     past.append(state);
@@ -582,11 +683,27 @@ void Backend::redo() {
     edited();
     seek(std::min(m_position, duration()));
 }
+void Backend::split(double at) {
+    if (m_phase != "editor")
+        return;
+    auto next = state;
+    if (!next.split(at))
+        return;
+    pause();
+    push();
+    state = next;
+    edited();
+}
 void Backend::removeRange(double a, double b) {
     if (m_phase != "editor")
         return;
+    auto next = state;
+    next.remove(a, b);
+    if (next.json() == state.json())
+        return;
+    pause();
     push();
-    state.remove(a, b);
+    state = next;
     edited();
     seek(std::min(a, duration()));
 }
@@ -595,26 +712,37 @@ void Backend::trim(double a, double b) {
         return;
     if (b - a < .1)
         return;
+    auto next = state;
+    next.remove(b, duration());
+    next.remove(0, a);
+    if (next.json() == state.json())
+        return;
+    pause();
     push();
-    state.remove(b, duration());
-    state.remove(0, a);
+    state = next;
     edited();
     seek(0);
 }
 int Backend::addZoom(double at) {
     if (m_phase != "editor")
         return -1;
-    double a = state.sourceTime(at), b = std::min(state.duration, a + 3);
-    for (auto z : state.zooms)
-        if (a < z.end && b > z.start) {
-            m_message = "Zoom sections cannot overlap.";
-            emit changed();
-            return -1;
-        }
-    if (b - a < .1)
+    if (state.spans.isEmpty())
         return -1;
+    at = std::clamp(at, 0., duration());
+    double end = std::min(duration(), at + 3);
+    for (const auto &z : state.zooms) {
+        const double lo = state.editedTime(z.start), hi = state.editedTime(z.end);
+        if (at >= lo && at < hi)
+            return -1;
+        if (lo > at)
+            end = std::min(end, lo);
+    }
+    if (end - at < .1)
+        return -1;
+    pause();
     push();
-    state.zooms.append({a, b, .5, .5, 1.8});
+    state.zooms.append({state.sourceTime(at), state.sourceTime(end), state.crop.center().x(),
+                        state.crop.center().y(), 1.8});
     edited();
     return state.zooms.size() - 1;
 }
@@ -630,9 +758,19 @@ void Backend::updateZoom(int i, double a, double b, double x, double y, double a
     for (int j = 0; j < state.zooms.size(); j++)
         if (i != j && a < state.zooms[j].end && b > state.zooms[j].start)
             return;
+    Zoom next{a,
+              b,
+              std::clamp(x, 0., 1.),
+              std::clamp(y, 0., 1.),
+              std::clamp(amount, 1., 4.),
+              state.zooms[i].id};
+    const auto old = state.zooms[i];
+    if (old.start == next.start && old.end == next.end && old.x == next.x && old.y == next.y &&
+        old.amount == next.amount)
+        return;
+    pause();
     push();
-    state.zooms[i] = {a, b, std::clamp(x, 0., 1.), std::clamp(y, 0., 1.),
-                      std::clamp(amount, 1., 4.)};
+    state.zooms[i] = next;
     edited();
 }
 void Backend::deleteZoom(int i) {
@@ -707,7 +845,7 @@ void Backend::exportVideo(bool gif, int w, int fps, int q, double seconds) {
     startExport(path, gif, w, fps, q, seconds);
 }
 void Backend::startExport(QString path, bool gif, int w, int fps, int q, double seconds) {
-    if (m_phase != "editor" || worker.state() != QProcess::NotRunning)
+    if (m_phase != "editor" || state.spans.isEmpty() || worker.state() != QProcess::NotRunning)
         return;
     if (playing())
         togglePlay();
@@ -760,6 +898,14 @@ void Backend::openExport() {
         QDesktopServices::openUrl(QUrl::fromLocalFile(m_lastExport));
 }
 void Backend::clearPlayers() {
+    peaks.clear();
+    latestCameraFrame = {};
+    grouping = false;
+    seekTimer.stop();
+    seekTimeout.stop();
+    displayTimer.stop();
+    seeking = false;
+    m_position = m_displayPosition = presentedSource = 0;
     for (auto p : {&screen, &camera, &mic, &desktop}) {
         p->stop();
         p->setSource({});

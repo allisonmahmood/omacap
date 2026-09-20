@@ -43,7 +43,7 @@ double Edit::zoomAt(double t, double &x, double &y) const {
 void Edit::remove(double a, double b) {
     a = std::clamp(a, 0., length());
     b = std::clamp(b, a, length());
-    if (b - a < .01 || length() - (b - a) < .1)
+    if (b - a < .001)
         return;
     QVector<Span> out;
     double pos = 0;
@@ -51,20 +51,52 @@ void Edit::remove(double a, double b) {
         double len = s.end - s.start;
         double lo = std::clamp(a - pos, 0., len), hi = std::clamp(b - pos, 0., len);
         if (lo > 0)
-            out.append({s.start, s.start + lo});
+            out.append({s.start, s.start + lo, s.id});
         if (hi < len)
-            out.append({s.start + hi, s.end});
+            out.append({s.start + hi, s.end,
+                        lo > 0 ? QUuid::createUuid().toString(QUuid::WithoutBraces) : s.id});
         pos += len;
     }
     spans = out;
+    zooms.removeIf(
+        [this](const Zoom &z) { return editedTime(z.end) - editedTime(z.start) < .001; });
+}
+bool Edit::split(double at) {
+    double pos = 0;
+    for (int i = 0; i < spans.size(); ++i) {
+        const auto s = spans[i];
+        const double offset = at - pos;
+        if (offset > .001 && offset < s.end - s.start - .001) {
+            spans[i].end = s.start + offset;
+            spans.insert(i + 1, {s.start + offset, s.end});
+            return true;
+        }
+        pos += s.end - s.start;
+    }
+    return false;
+}
+// UI boundaries don't restart decoders or change frame sampling.
+QVector<Span> Edit::runs() const {
+    QVector<Span> result;
+    for (auto s : spans) {
+        if (!result.isEmpty() && std::abs(result.last().end - s.start) < 1e-9)
+            result.last().end = s.end;
+        else
+            result.append(s);
+    }
+    return result;
 }
 QJsonObject Edit::json() const {
     QJsonArray ss, zs;
     for (auto s : spans)
-        ss.append(QJsonArray{s.start, s.end});
+        ss.append(QJsonArray{s.start, s.end, s.id});
     for (auto z : zooms)
-        zs.append(QJsonObject{
-            {"start", z.start}, {"end", z.end}, {"x", z.x}, {"y", z.y}, {"amount", z.amount}});
+        zs.append(QJsonObject{{"id", z.id},
+                              {"start", z.start},
+                              {"end", z.end},
+                              {"x", z.x},
+                              {"y", z.y},
+                              {"amount", z.amount}});
     return {{"duration", duration},
             {"spans", ss},
             {"zooms", zs},
@@ -72,6 +104,9 @@ QJsonObject Edit::json() const {
             {"padding", padding},
             {"corners", corners},
             {"shadow", shadow},
+            {"cameraShape", cameraShape},
+            {"cameraCorners", cameraCorners},
+            {"cameraShadow", cameraShadow},
             {"cameraSize", cameraSize},
             {"cameraX", cameraX},
             {"cameraY", cameraY},
@@ -91,19 +126,24 @@ Edit Edit::fromJson(const QJsonObject &o) {
                t = std::clamp(a[1].toDouble(), s, e.duration);
         if (t > s) {
             e.spans.append({s, t});
+            if (a.size() > 2 && !a[2].toString().isEmpty())
+                e.spans.last().id = a[2].toString();
             last = t;
         }
     }
-    if (e.spans.isEmpty() && e.duration > 0)
+    if (!o.contains("spans") && e.duration > 0)
         e.spans.append({0, e.duration});
     for (auto v : o["zooms"].toArray()) {
         auto z = v.toObject();
         double s = std::clamp(z["start"].toDouble(), 0., e.duration),
                t = std::clamp(z["end"].toDouble(), s, e.duration);
-        if (t - s > .05)
+        if (t - s > .05) {
             e.zooms.append({s, t, std::clamp(z["x"].toDouble(.5), 0., 1.),
                             std::clamp(z["y"].toDouble(.5), 0., 1.),
                             std::clamp(z["amount"].toDouble(1.8), 1., 4.)});
+            if (!z["id"].toString().isEmpty())
+                e.zooms.last().id = z["id"].toString();
+        }
     }
     auto c = o["crop"].toArray();
     if (c.size() == 4) {
@@ -116,6 +156,9 @@ Edit Edit::fromJson(const QJsonObject &o) {
     NUM(corners, 0., .08);
     NUM(shadow, 0., 1.);
     NUM(cameraSize, .08, .4);
+    NUM(cameraCorners, 0., .5);
+    NUM(cameraShadow, 0., 1.);
+    e.cameraShape = o["cameraShape"] == "circle" ? "circle" : "rectangle";
     NUM(cameraX, 0., 1.);
     NUM(cameraY, 0., 1.);
 #undef NUM

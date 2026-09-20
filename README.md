@@ -15,7 +15,7 @@ Record a window, clean up the take, and give it a background, padding and smooth
 - **Make it look right.** Crop the recording, add padding, soften the corners and set a shadow. Your current Omarchy wallpaper is the default background; you can choose another image or a solid color.
 - **Keep the useful parts.** Trim the start and end, remove mistakes in the middle, and undo an edit when you change your mind.
 - **Zoom on purpose.** Keep the whole window visible by default. Add a zoom section, choose its focus, and adjust its timing on the timeline.
-- **Include yourself when you want.** Record your microphone, desktop audio and camera. Move the camera overlay and mute audio tracks in the editor.
+- **Include yourself when you want.** Record your microphone, desktop audio and camera. Move the camera overlay, choose rounded corners or a circle, add a shadow, and mute either audio track.
 - **Take the file anywhere.** Export MP4 or GIF with your chosen size and frame rate. No account, upload or project library.
 
 The controls follow your Omarchy theme. Changing themes updates the app without changing the video you're editing.
@@ -44,15 +44,15 @@ Choose your microphone, camera and desktop audio options. Click **Select source 
 
 ### 2. Crop, style and trim
 
-Click **Crop** and drag over the part you want to keep. Set the background, padding, corners and shadow while watching the preview. If you recorded a camera, drag its overlay into place.
+Click **Crop** and drag over the part you want to keep. Set the background, padding, corners and shadow while watching the preview. If you recorded a camera, choose its shape, corners and shadow, then drag it into place.
 
-Drag the timeline's selection handles. **Keep selection** trims the ends; **Delete selection** removes a section in the middle.
+Drag across the recording or its audio waveforms to select a range. **Keep range** trims the ends; **Delete selection** removes that range. Click **✂ Cut** and click a track to split a clip. Return to **Select**, click a clip, and press Delete to remove it. All recorded tracks stay linked.
 
 ### 3. Add a deliberate zoom
 
-Move the playhead to the moment you want to emphasize and click **Add zoom**. Use **Choose focus**, click the point in the preview, then **Confirm focus**. Drag the zoom block or its ends to set when it starts and stops. OmaCap eases into and out of the zoom.
+Click an empty part of the **Zooms** lane, or use **Add zoom**. Choose a focus point in the small sidebar preview and click **Confirm**. The main preview shows the zoom as you work. Click an existing zoom to preview it; drag the block or its ends to adjust its timing. OmaCap eases into and out of each zoom.
 
-![Choosing the zoom focus with the circular marker in OmaCap's preview](docs/images/zoom.webp)
+![Choosing a zoom focus in the sidebar while the main preview shows the zoom](docs/images/zoom.webp)
 
 ### 4. Export and share
 
@@ -66,6 +66,9 @@ Click **Export**, choose MP4 or GIF, set the output size and frame rate, and pic
 | --- | --- |
 | Play / pause | Space |
 | Step backward / forward | Left / Right |
+| Cut / select mode | C / V, with the timeline focused |
+| Delete selected clip, range or zoom | Delete / Backspace, with the timeline focused |
+| Cancel focus selection or leave cut mode | Escape |
 | Undo | Ctrl+Z |
 | Redo | Ctrl+Shift+Z |
 
@@ -87,7 +90,7 @@ C++20 and Qt Quick power the editor. Python/GStreamer handles capture; system FF
 ./scripts/test.sh
 ```
 
-Tests also need `python-numpy`. CI builds on Arch Linux and checks synthetic capture, editing, recovery, export, cancellation and audio/video timing under a virtual display. Real portal capture remains a manual check.
+Tests also need `python-numpy`. CI builds on Arch Linux and checks synthetic capture, timeline gestures, waveforms, recovery, preview/export consistency, cancellation and audio/video timing under a virtual display. Split-only exports are compared frame by frame at 15, 30 and 60 fps. Real portal capture remains a manual check.
 
 For a per-user install after building, run `./scripts/install-local.sh` instead of installing the Arch package.
 

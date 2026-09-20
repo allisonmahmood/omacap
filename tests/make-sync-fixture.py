@@ -80,3 +80,13 @@ run(
     "5",
     str(out / "delayed-origin.mkv"),
 )
+
+# Identifiable frame content for cut-boundary and low-frame-rate replay checks.
+run(
+    "-f", "lavfi", "-i", "testsrc2=s=640x360:r=15:d=2",
+    "-c:v", "libx264", "-preset", "ultrafast", str(out / "frames15.mkv"),
+)
+run(
+    "-i", str(out / "frames15.mkv"), "-map", "0:v", "-map", "0:v", "-c", "copy",
+    str(out / "camera-wide.mkv"),
+)

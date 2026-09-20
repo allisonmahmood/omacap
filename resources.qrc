@@ -1,1 +1,1 @@
-<RCC><qresource prefix="/"><file>qml/Main.qml</file><file>qml/Composition.qml</file><file>qml/FlatButton.qml</file><file>qml/Setting.qml</file><file>qml/FlatSlider.qml</file><file>scripts/capture.py</file></qresource></RCC>
+<RCC><qresource prefix="/"><file>qml/Main.qml</file><file>qml/Timeline.qml</file><file>qml/Composition.qml</file><file>qml/FlatButton.qml</file><file>qml/Setting.qml</file><file>qml/FlatSlider.qml</file><file>scripts/capture.py</file></qresource></RCC>
