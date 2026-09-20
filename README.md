@@ -1,21 +1,28 @@
 # OmaCap
 
-[![CI](https://github.com/allisonmahmood/omacap/actions/workflows/ci.yml/badge.svg)](https://github.com/allisonmahmood/omacap/actions/workflows/ci.yml)
+Screen recordings worth sharing. Made for Omarchy.
 
-A local screen recorder and quick video editor for Omarchy. Record a window or display, clean up a demo, and export an MP4 or GIF.
+Record a window, clean up the take, and give it a background, padding and smooth zooms. Export an MP4 or GIF for a demo, tutorial or product update. Everything stays on your computer.
 
-- Optional microphone, desktop audio and camera recording, with separate audio mute controls.
-- Crop, wallpaper or solid backgrounds, padding, rounded video corners and shadows.
-- A movable camera overlay, trimming, cuts and deliberate zoom sections.
-- One preview for editing and visual treatment. No project library, account or cloud upload.
+[Install](#install) · [How to use it](#record-and-edit) · [MIT license](https://github.com/allisonmahmood/omacap/blob/main/LICENSE)
 
-The controls follow your Omarchy theme. New recordings use your current wallpaper as the video background. Each recording keeps its own copy, so switching themes does not change an edit in progress.
+![OmaCap Studio showing a terminal demo with a wallpaper background, shadow, appearance controls and a zoom section on the timeline](docs/images/studio.webp)
+
+*The real OmaCap editor, shown with a generated terminal demo.*
+
+## A short edit, then you're done
+
+- **Make it look right.** Crop the recording, add padding, soften the corners and set a shadow. Your current Omarchy wallpaper is the default background; you can choose another image or a solid color.
+- **Keep the useful parts.** Trim the start and end, remove mistakes in the middle, and undo an edit when you change your mind.
+- **Zoom on purpose.** Keep the whole window visible by default. Add a zoom section, choose its focus, and adjust its timing on the timeline.
+- **Include yourself when you want.** Record your microphone, desktop audio and camera. Move the camera overlay and mute audio tracks in the editor.
+- **Take the file anywhere.** Export MP4 or GIF with your chosen size and frame rate. No account, upload or project library.
+
+The controls follow your Omarchy theme. Changing themes updates the app without changing the video you're editing.
 
 ## Install
 
-OmaCap targets current Omarchy on Arch Linux with Hyprland, PipeWire and the Hyprland desktop portal. It requires Qt 6.5 or newer and a working OpenGL driver. Other desktops and distributions are not tested.
-
-Clone the repository and build an Arch package from the checkout:
+On current Omarchy, with Arch's `base-devel` and `git` installed:
 
 ```sh
 git clone https://github.com/allisonmahmood/omacap.git
@@ -23,55 +30,67 @@ cd omacap/packaging
 makepkg -si
 ```
 
-Arch's `base-devel` and `git` packages are needed to build. `makepkg -si` installs the dependencies listed in [packaging/PKGBUILD](packaging/PKGBUILD). The recipe builds the parent checkout; it is not a standalone AUR package.
+Open **OmaCap** from your application launcher, or run `omacap`. Already have a recording? Open it with `omacap /path/to/video.mp4`.
 
-Launch **OmaCap** from the application launcher or run `omacap`. Open an existing video with `omacap /path/to/video.mp4`.
+The package builds from the checkout and installs its dependencies. OmaCap targets Hyprland and PipeWire on current Omarchy. Other desktops and distributions are not tested.
 
-For a local development build, after installing the same dependencies:
+## Record and edit
+
+### 1. Record a window or display
+
+Choose your microphone, camera and desktop audio options. Click **Select source and record**, choose a window or display in the system picker, and wait for the three-second countdown. Stop recording to open the editor.
+
+<img src="docs/images/recorder.webp" alt="OmaCap recorder with microphone, camera and desktop audio options" width="360">
+
+### 2. Crop, style and trim
+
+Click **Crop** and drag over the part you want to keep. Set the background, padding, corners and shadow while watching the preview. If you recorded a camera, drag its overlay into place.
+
+Drag the timeline's selection handles. **Keep selection** trims the ends; **Delete selection** removes a section in the middle.
+
+### 3. Add a deliberate zoom
+
+Move the playhead to the moment you want to emphasize and click **Add zoom**. Use **Choose focus**, click the point in the preview, then **Confirm focus**. Drag the zoom block or its ends to set when it starts and stops. OmaCap eases into and out of the zoom.
+
+![Choosing the zoom focus with the circular marker in OmaCap's preview](docs/images/zoom.webp)
+
+### 4. Export and share
+
+Click **Export**, choose MP4 or GIF, set the output size and frame rate, and pick a local destination. MP4 supports audio; GIF is a silent loop.
+
+![OmaCap's local export dialog with MP4, output width, frame rate and quality settings](docs/images/export.webp)
+
+### Keyboard shortcuts
+
+| Action | Shortcut |
+| --- | --- |
+| Play / pause | Space |
+| Step backward / forward | Left / Right |
+| Undo | Ctrl+Z |
+| Redo | Ctrl+Shift+Z |
+
+There is no saved-project format. An interrupted edit has a recovery checkpoint. Export leaves the editor open so you can export again. Closing or discarding clears the temporary session; imported originals and exported files are kept.
+
+## Before you record
+
+Keep a selected window at a fixed size. Resizing it or moving it between monitors with different scales can interrupt the Hyprland portal stream. Use display capture when your demo needs window resizing.
+
+This version targets short SDR demos on a 16:9 canvas. Zooms are manual, GIF size estimates are approximate, and real camera/microphone synchronization should be checked with your own devices.
+
+## Development
+
+C++20 and Qt Quick power the editor. Python/GStreamer handles capture; system FFmpeg encodes exports. Qt 6.5+ and OpenGL are required. See [the package recipe](https://github.com/allisonmahmood/omacap/blob/main/packaging/PKGBUILD) for dependencies.
 
 ```sh
 ./scripts/build.sh
 ./build/omacap
-```
-
-`./scripts/install-local.sh` installs the binary and launcher for your user under `~/.local`. Use either the package installation or the local installation to avoid competing copies.
-
-## Record and edit
-
-1. Choose your microphone, camera and desktop audio options, then start recording. Select a window or display in the system sharing picker.
-2. Stop recording to open the editor. Crop the picture, adjust its background and padding, and place the camera overlay.
-3. Drag the timeline selection handles. **Keep selection** trims the ends; **Delete selection** removes an internal section.
-4. Add a zoom at the playhead, choose its focus in the preview, and confirm. Drag its timeline block or handles to change its timing. Zoom sections cannot overlap.
-5. Export to a local file. Choose MP4 or GIF, resolution, frame rate and quality. GIF has no audio.
-
-Space plays or pauses. Left and Right seek by a frame. Ctrl+Z undoes and Ctrl+Shift+Z redoes.
-
-There is no saved-project format. An unfinished edit has a recovery checkpoint. Export leaves the editor open for another export; closing or discarding removes the temporary session media. Imported originals and exported files are kept.
-
-## Known limitations
-
-- Keep a selected window at a fixed size while recording. Resizing it or moving it between monitors with different scales can interrupt the Hyprland portal stream. OmaCap reports the failure and retains readable partial media. Use display capture when your demo needs window resizing.
-- Output uses a landscape 16:9 canvas and targets SDR footage and short demos. There is no cursor tracking or automatic zoom.
-- GIF file size estimates are approximate.
-- Automated tests use generated camera and audio tracks. Physical-device synchronization and portal capture still need testing on the target desktop.
-
-The app does not restart desktop services or modify desktop configuration.
-
-## Development and tests
-
-The app uses C++20 and Qt Quick for the editor. A Python/GStreamer worker captures through the desktop portal. Exports render the same QML composition in a separate process and encode through system FFmpeg.
-
-```sh
-./scripts/build.sh
 ./scripts/test.sh
 ```
 
-Tests additionally require `python-numpy`. They generate their own media and theme, and use isolated application data. The suite covers editing, recovery, theme changes, capture with synthetic tracks, MP4/GIF export, cancellation and audio/video timing after cuts. Outputs are written under `tests/out`.
+Tests also need `python-numpy`. CI builds on Arch Linux and checks synthetic capture, editing, recovery, export, cancellation and audio/video timing under a virtual display. Real portal capture remains a manual check.
 
-GitHub Actions builds on Arch Linux and runs the suite with a virtual display and software OpenGL. This checks the application without requiring a camera, microphone or sharing picker. It does not certify hardware capture or real-time GPU performance. See [.github/workflows/ci.yml](.github/workflows/ci.yml) for the CI environment.
-
-For desktop validation, record a test window with the microphone and camera you intend to use, then play and export the result. Keep recordings containing private information out of issues and pull requests.
+For a per-user install after building, run `./scripts/install-local.sh` instead of installing the Arch package.
 
 ## License
 
-[MIT](LICENSE). Installed Qt and multimedia dependencies retain their own licenses. OmaCap is an independent project and contains no Cap code or assets.
+[MIT](https://github.com/allisonmahmood/omacap/blob/main/LICENSE). Multimedia dependencies retain their own licenses. OmaCap is independent and contains no Cap code or assets.
