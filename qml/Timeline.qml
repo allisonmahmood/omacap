@@ -18,14 +18,11 @@ FocusScope {
         }) : -1;
     }
 
-    signal interacting()
-
     function selectZoom(index, reveal) {
         const z = backend.edit.zooms[index];
         if (!z)
             return ;
 
-        interacting();
         selection = "zoom";
         zoomId = z.id;
         forceActiveFocus();
@@ -210,7 +207,6 @@ FocusScope {
                     objectName: "timelineRuler"
                     anchors.fill: parent
                     onPressed: (mouse) => {
-                        timeline.interacting();
                         timeline.selection = "";
                         timeline.forceActiveFocus();
                         backend.pause();
@@ -353,7 +349,6 @@ FocusScope {
                                 hoverEnabled: timeline.cutting
                                 cursorShape: timeline.cutting ? Qt.CrossCursor : Qt.ArrowCursor
                                 onPressed: (mouse) => {
-                                    timeline.interacting();
                                     timeline.forceActiveFocus();
                                     startX = mouse.x;
                                     dragging = false;

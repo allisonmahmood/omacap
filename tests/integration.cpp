@@ -123,6 +123,75 @@ class Integration : public QObject {
         QCOMPARE(e.length(), 0.);
         QCOMPARE(Edit::fromJson(e.json()).length(), 0.);
     }
+    void smoothZoomMotion() {
+        Edit e;
+        e.duration = 7;
+        e.spans = {{0, 7}};
+        e.zooms = {{1, 3, .6, .4, 1.8}, {3, 5, .3, .7, 2.2}};
+        double x, y;
+        const double join = e.zoomAt(3, x, y);
+        QVERIFY(join >= 1.8 && join <= 2.2);
+        // Validate the rendered transform, including the composition's edge guard.
+        auto view = [](const Edit &edit, double time) {
+            double x, y;
+            const double z = edit.zoomAt(edit.sourceTime(time), x, y);
+            const double cx = (x - edit.crop.x()) / edit.crop.width();
+            const double cy = (y - edit.crop.y()) / edit.crop.height();
+            return QVector3D(z, std::clamp(cx * z - .5, 0., z - 1),
+                             std::clamp(cy * z - .5, 0., z - 1));
+        };
+        // Same-size views pan without widening; identical views hold exactly.
+        e.zooms[1].amount = 1.8;
+        double previousX = 2;
+        for (double t = 2.6; t <= 3.4; t += .01) {
+            const auto v = view(e, t);
+            QVERIFY(std::abs(v.x() - 1.8) < 1e-6);
+            QVERIFY(v.y() <= previousX + 1e-6);
+            previousX = v.y();
+        }
+        e.zooms[1].x = e.zooms[0].x;
+        e.zooms[1].y = e.zooms[0].y;
+        QCOMPARE(view(e, 2.7), view(e, 3.3));
+        e.zooms = {{1, 5, .6, .4, 1.8}};
+        // At this time the old per-frame clamp abruptly dropped pan speed by 40%.
+        const double t = 1.218424, h = .0005;
+        const auto left = (view(e, t - h) - view(e, t - 2 * h)) / h;
+        const auto right = (view(e, t + 2 * h) - view(e, t + h)) / h;
+        QVERIFY((left - right).length() < .04);
+        for (double edge : {1., 1.75, 4.25, 5.}) {
+            QVERIFY((view(e, edge) - view(e, edge - h)).length() / h < .01);
+            QVERIFY((view(e, edge + h) - view(e, edge)).length() / h < .01);
+        }
+        // A split is invisible to motion, and deleted time never advances the curve.
+        const Edit uncut = e;
+        QVERIFY(e.split(1.3));
+        QCOMPARE(view(e, 1.4), view(uncut, 1.4));
+        e.remove(1.3, 2.3);
+        const auto beforeCut = view(e, 1.3 - h), afterCut = view(e, 1.3 + h);
+        QVERIFY((afterCut - beforeCut).length() < .01);
+        // Near-edge targets stay inside a nontrivial crop throughout the move.
+        e.crop = {.2, .1, .6, .7};
+        e.zooms = {{0, 3, 0, 1, 4}};
+        for (int i = 0; i <= 600; ++i) {
+            const double z = e.zoomAt(e.sourceTime(i / 100.), x, y);
+            const double cx = (x - e.crop.x()) / e.crop.width();
+            const double cy = (y - e.crop.y()) / e.crop.height();
+            QVERIFY(std::isfinite(z) && z >= 1 && z <= 4);
+            QVERIFY(cx >= .5 / z - 1e-9 && cx <= 1 - .5 / z + 1e-9);
+            QVERIFY(cy >= .5 / z - 1e-9 && cy <= 1 - .5 / z + 1e-9);
+        }
+        e = uncut;
+        e.zooms = {{1, 1.1, .2, .8, 2}, {1.1, 1.2, .8, .2, 3}};
+        for (double time : {1., 1.03, 1.08, 1.1, 1.12, 1.17, 1.2})
+            QVERIFY(std::isfinite(view(e, time).x()));
+        QVERIFY(view(e, 1.1).x() >= 2);
+        e.zooms[1].start = 1.15;
+        QCOMPARE(view(e, 1.125), QVector3D(1, 0, 0));
+        // Source sections brought together by a cut use the same direct handoff.
+        e.zooms = {{1, 2, .6, .4, 1.8}, {3, 5, .3, .7, 2.2}};
+        e.remove(2, 3);
+        QVERIFY(view(e, 2).x() >= 1.8);
+    }
     void splitModel() {
         Edit e;
         e.duration = 1.01;
@@ -264,21 +333,34 @@ class Integration : public QObject {
         };
         click(zoomLane, .1);
         QCOMPARE(b.state.zooms.size(), 1);
-        QVERIFY(!win->property("choosingFocus").toBool());
         QVERIFY(timeline->isEnabled());
-        auto choose = find(win->contentItem(), "chooseFocus");
-        QVERIFY(choose);
-        click(choose, .5);
         QTRY_VERIFY(b.zoom() > 1.7);
         const auto initialFocus = b.state.zooms[0].x;
         auto picker = find(win->contentItem(), "zoomFocusPicker");
-        QVERIFY(picker);
-        click(picker, .8);
+        QVERIFY(picker && picker->isVisible());
+        // Selecting a zoom changes the sidebar layout. Hit-test the rendered layout.
+        QSignalSpy laidOut(win, &QQuickWindow::frameSwapped);
+        win->update();
+        QVERIFY(laidOut.wait(3000));
+        const auto beforeDrag = b.past.size();
+        const auto start = picker->mapToScene(QPointF(picker->width() * .25, picker->height() / 2));
+        const auto end = picker->mapToScene(QPointF(picker->width() * .8, picker->height() / 2));
+        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, start.toPoint());
+        QVERIFY(picker->property("pressed").toBool());
+        QTest::mouseMove(win, end.toPoint(), 40);
+        // Observe the live result while the button is still held.
+        QTRY_VERIFY_WITH_TIMEOUT(b.state.zooms[0].x > .7, 1000);
+        QCOMPARE(b.past.size(), beforeDrag);
+        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, end.toPoint());
+        QCOMPARE(b.past.size(), beforeDrag + 1);
+        const auto movedFocus = b.state.zooms[0].x;
+        b.undo();
         QCOMPARE(b.state.zooms[0].x, initialFocus);
-        QVERIFY(win->property("draftFocusX").toDouble() > .7);
-        // Clicking footage exits focus editing, selects the clip and seeks normally.
+        b.redo();
+        QCOMPARE(b.state.zooms[0].x, movedFocus);
+        // Clicking footage keeps the focus edit and restores normal controls/seeking.
         click(track, .8);
-        QTRY_VERIFY(!win->property("choosingFocus").toBool());
+        QVERIFY(!picker->isVisible());
         QCOMPARE(timeline->property("selectedZoom").toInt(), -1);
         auto appearance = find(win->contentItem(), "appearanceControls");
         auto controls = find(win->contentItem(), "zoomControls");
@@ -286,28 +368,17 @@ class Integration : public QObject {
         QVERIFY(appearance->isVisible());
         QVERIFY(!controls->isVisible());
         QVERIFY(std::abs(b.position() - .8 * b.duration()) < .02);
-        QCOMPARE(b.state.zooms[0].x, initialFocus);
+        QCOMPARE(b.state.zooms[0].x, movedFocus);
         auto zoomBodyForFocus = find(win->contentItem(), "zoomDrag0");
         QVERIFY(zoomBodyForFocus);
         click(zoomBodyForFocus, .5);
-        QVERIFY(controls->isVisible());
+        QVERIFY(controls->isVisible() && picker->isVisible());
         QVERIFY(!appearance->isVisible());
-        click(choose, .5);
-        QTRY_VERIFY(win->property("choosingFocus").toBool());
-        click(picker, .75);
-        const auto beforeConfirm = b.past.size();
-        auto confirm = find(win->contentItem(), "confirmFocus");
-        QVERIFY(confirm);
-        click(confirm, .5);
-        QCOMPARE(b.past.size(), beforeConfirm + 1);
-        QVERIFY(b.state.zooms[0].x > .7);
-        b.undo();
-        QCOMPARE(b.state.zooms[0].x, initialFocus);
-        click(choose, .5);
+        click(picker, .6);
+        QVERIFY(std::abs(b.state.zooms[0].x - .6) < .02);
         auto ruler = find(win->contentItem(), "timelineRuler");
         QVERIFY(ruler);
         click(ruler, .15);
-        QTRY_VERIFY(!win->property("choosingFocus").toBool());
         QCOMPARE(timeline->property("selectedZoom").toInt(), -1);
         QVERIFY(appearance->isVisible());
         QVERIFY(std::abs(b.position() - .15 * b.duration()) < .02);
@@ -609,8 +680,8 @@ class Integration : public QObject {
         b.prepare(QDir::current().absoluteFilePath("tests/out/camera-wide.mkv"), true);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
         QTest::qWait(300);
-        b.state.spans = {{.6, .7}};
-        b.state.zooms = {{0, 2, .7, .3, 1.8}};
+        b.state.spans = {{0, 1.8}};
+        b.state.zooms = {{0, .8, .6, .4, 1.8}, {.8, 1.8, .3, .7, 2.2}};
         b.state.crop = {.05, .05, .9, .9};
         b.state.cameraShadow = .7;
         b.state.cameraCorners = .3;
@@ -623,15 +694,19 @@ class Integration : public QObject {
             QString mode, shape;
             bool gif;
             int width;
+            double sample;
         };
-        for (const auto &style : QList<Style>{{"off", "rectangle", false, 1920},
-                                              {"light", "circle", false, 3840},
-                                              {"custom", "rectangle", false, 1920},
-                                              {"custom", "circle", true, 640}}) {
+        // Entry, shared boundary, pan handoff and exit, aligned to source frames.
+        for (const auto &style : QList<Style>{{"off", "rectangle", false, 1920, .2},
+                                              {"light", "circle", false, 3840, .8},
+                                              {"custom", "rectangle", false, 1920, 1.0},
+                                              {"custom", "circle", true, 640, 1.6}}) {
             const auto name = style.mode + "-" + style.shape;
             b.setValue("cameraShape", style.shape);
             b.setValue("windowTransparency", style.mode);
             b.setValue("windowOpacity", .45);
+            b.seek(style.sample);
+            QTRY_VERIFY_WITH_TIMEOUT(!b.seeking, 3000);
             QTest::qWait(100);
             auto grab = composition->grabToImage(QSize(1920, 1080));
             QVERIFY(grab);
@@ -645,8 +720,9 @@ class Integration : public QObject {
             b.startExport(output, style.gif, style.width, 30, 18, b.duration());
             QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 30000);
             QProcess ffmpeg;
-            ffmpeg.start("ffmpeg", {"-v", "error", "-i", output, "-frames:v", "1", "-vf",
-                                    "scale=1920:1080", "-f", "image2pipe", "-c:v", "png", "-"});
+            ffmpeg.start("ffmpeg", {"-v", "error", "-ss", QString::number(style.sample), "-i",
+                                    output, "-frames:v", "1", "-vf", "scale=1920:1080", "-f",
+                                    "image2pipe", "-c:v", "png", "-"});
             QVERIFY(ffmpeg.waitForFinished(15000));
             const auto exported = QImage::fromData(ffmpeg.readAllStandardOutput());
             QCOMPARE(exported.size(), preview.size());
