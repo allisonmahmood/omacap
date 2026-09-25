@@ -1,22 +1,25 @@
 pkgname=omacap
-pkgver=0.1.0
+pkgver=@VERSION@
 pkgrel=1
 pkgdesc='Local screen recorder and quick demo editor for Omarchy'
 url='https://github.com/allisonmahmood/omacap'
-arch=('x86_64' 'aarch64')
+arch=('x86_64')
 license=('MIT')
-depends=('qt6-base' 'qt6-declarative' 'qt6-imageformats' 'qt6-multimedia' 'qt6-multimedia-ffmpeg' 'ffmpeg' 'python' 'python-dbus' 'python-gobject' 'gstreamer' 'gst-plugins-base' 'gst-plugins-good' 'gst-plugins-bad-libs' 'gst-plugin-pipewire' 'xdg-desktop-portal' 'xdg-desktop-portal-hyprland' 'libpulse')
+depends=('qt6-base' 'qt6-declarative' 'qt6-imageformats' 'qt6-multimedia' 'qt6-multimedia-ffmpeg' 'qt6-wayland' 'ffmpeg' 'python' 'python-dbus' 'python-gobject' 'gstreamer' 'gst-plugins-base' 'gst-plugins-good' 'gst-plugins-bad-libs' 'gst-plugin-pipewire' 'xdg-desktop-portal' 'xdg-desktop-portal-hyprland' 'libpulse')
 makedepends=('gcc' 'make')
-# Build from the source checkout; no bundled multimedia binaries or Cap assets.
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('@SHA256@')
+options=('!debug')
+
 build() {
-  cd "$startdir/.."
+  cd "$srcdir/$pkgname-$pkgver"
   mkdir -p build/package
   cd build/package
   qmake6 ../../omacap.pro
   make
 }
 package() {
-  cd "$startdir/.."
+  cd "$srcdir/$pkgname-$pkgver"
   install -Dm755 build/package/omacap "$pkgdir/usr/bin/omacap"
   install -Dm644 packaging/omacap.desktop "$pkgdir/usr/share/applications/omacap.desktop"
   install -Dm644 packaging/omacap.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/omacap.svg"
