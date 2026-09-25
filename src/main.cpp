@@ -7,11 +7,16 @@
 #include <QQmlContext>
 #include <QQuickStyle>
 #include <QStandardPaths>
+#include <QTextStream>
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
     app.setApplicationName("omacap");
     app.setOrganizationName("OmaCap");
-    app.setApplicationVersion("0.1.0");
+    app.setApplicationVersion(QStringLiteral(OMACAP_VERSION));
+    if (app.arguments() == QStringList{app.arguments().first(), "--version"}) {
+        QTextStream(stdout) << app.applicationVersion() << Qt::endl;
+        return 0;
+    }
     if (app.arguments().contains("--export")) {
         int i = app.arguments().indexOf("--export");
         return i + 1 < argc ? exportRecording(app.arguments()[i + 1]) : 2;

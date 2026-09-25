@@ -22,17 +22,30 @@ The controls follow your Omarchy theme. Changing themes updates the app without 
 
 ## Install
 
+Download the x86_64 `.pkg.tar.zst` file and `SHA256SUMS` from the [latest GitHub release](https://github.com/allisonmahmood/omacap/releases/latest). In the download directory, verify and install the package:
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS
+sudo pacman -U ./omacap-*.pkg.tar.zst
+```
+
+Keep only the package version you want to install in that directory. Pacman installs its dependencies. Release binaries target current Omarchy stable on x86_64. Update Omarchy through its normal update menu before installing a new OmaCap release.
+
+Open **OmaCap** from your application launcher, or run `omacap`. Already have a recording? Open it with `omacap /path/to/video.mp4`.
+
+For updates, download and install the newer package using the same steps. GitHub releases do not update through Omarchy or `yay`; you can subscribe with **Watch > Custom > Releases** on this repository. AUR distribution is not available yet. Uninstall with `sudo pacman -R omacap`.
+
+### Build from source
+
 On current Omarchy, with Arch's `base-devel` and `git` installed:
 
 ```sh
 git clone https://github.com/allisonmahmood/omacap.git
-cd omacap/packaging
-makepkg -si
+cd omacap
+./scripts/package.sh -si
 ```
 
-Open **OmaCap** from your application launcher, or run `omacap`. Already have a recording? Open it with `omacap /path/to/video.mp4`.
-
-The package builds from the checkout and installs its dependencies. OmaCap targets Hyprland and PipeWire on current Omarchy. Other desktops and distributions are not tested.
+This builds the committed checkout and installs its dependencies. OmaCap targets Hyprland and PipeWire on current Omarchy. Other desktops and distributions are not tested.
 
 ## Record and edit
 
@@ -84,7 +97,7 @@ This version targets short SDR demos on a 16:9 canvas. Zooms are manual, GIF siz
 
 ## Development
 
-C++20 and Qt Quick power the editor. Python/GStreamer handles capture; system FFmpeg encodes exports. Qt 6.5+ and OpenGL are required. See [the package recipe](https://github.com/allisonmahmood/omacap/blob/main/packaging/PKGBUILD) for dependencies.
+C++20 and Qt Quick power the editor. Python/GStreamer handles capture; system FFmpeg encodes exports. Qt 6.5+ and OpenGL are required. See [the package recipe](packaging/PKGBUILD.in) for dependencies.
 
 ```sh
 ./scripts/build.sh
@@ -92,9 +105,13 @@ C++20 and Qt Quick power the editor. Python/GStreamer handles capture; system FF
 ./scripts/test.sh
 ```
 
-Tests also need `python-numpy`. CI builds on Arch Linux and checks synthetic capture, timeline gestures, waveforms, recovery, preview/export consistency, cancellation and audio/video timing under a virtual display. Split-only exports are compared frame by frame at 15, 30 and 60 fps. Real portal capture remains a manual check.
+Tests also need `python-numpy`. CI builds packages against Omarchy stable and latest Arch, runs the integration suite, and installs and launches each package in a fresh container. The suite checks synthetic capture, timeline gestures, waveforms, recovery, preview/export consistency, cancellation and audio/video timing under a virtual display. Split-only exports are compared frame by frame at 15, 30 and 60 fps. Real portal capture remains a manual check.
 
 For a per-user install after building, run `./scripts/install-local.sh` instead of installing the Arch package.
+
+If you previously used the per-user install, its `~/.local/bin/omacap` and desktop entry can take precedence over the package. Remove those earlier OmaCap files when switching to the package installation.
+
+See [Releasing OmaCap](docs/releasing.md) for preparing a draft release and publishing it on GitHub.
 
 ## License
 

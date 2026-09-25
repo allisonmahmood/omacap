@@ -14,62 +14,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  build:
+    name: ${{ matrix.channel }}
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [omarchy-stable, arch]
+    uses: ./.github/workflows/build.yml
+    with:
+      channel: ${{ matrix.channel }}
+
+  required:
+    # Preserve the check name required by main's branch protection.
     name: Build and test on Arch Linux
+    needs: build
+    if: always()
     runs-on: ubuntu-24.04
-    container: archlinux:base
-    timeout-minutes: 20
-    defaults:
-      run:
-        shell: bash
-    env:
-      JOBS: "2"
-      QT_QPA_PLATFORM: xcb
-      QSG_RHI_BACKEND: opengl
-      QT_MEDIA_BACKEND: ffmpeg
-      LIBGL_ALWAYS_SOFTWARE: "1"
-      GALLIUM_DRIVER: llvmpipe
-      LP_NUM_THREADS: "2"
     steps:
-      # Omarchy follows Arch; exercise the same Qt and media packages users install.
-      - name: Install build and test dependencies
-        run: |
-          pacman -Syu --noconfirm --needed \
-            git gcc make qt6-base qt6-declarative qt6-multimedia qt6-multimedia-ffmpeg qt6-imageformats \
-            ffmpeg python python-dbus python-gobject python-numpy \
-            gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad-libs \
-            gst-plugin-pipewire dbus libpulse mesa xorg-server-xvfb xorg-xauth ttf-dejavu desktop-file-utils
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Build application
-        run: |
-          mkdir -p tests/out
-          pacman -Q > tests/out/packages.txt
-          for script in scripts/*.sh; do bash -n "$script"; done
-          python -m compileall -q scripts tests
-          desktop-file-validate packaging/omacap.desktop
-          ./scripts/build.sh 2>&1 | tee tests/out/build.log
-      - name: Test capture, editing and exports
-        run: |
-          export XDG_RUNTIME_DIR="$(mktemp -d)"
-          chmod 700 "$XDG_RUNTIME_DIR"
-          trap 'rm -rf -- "$XDG_RUNTIME_DIR"' EXIT
-          dbus-run-session -- xvfb-run -a -s '-screen 0 1920x1080x24 -nolisten tcp' \
-            ./scripts/test.sh 2>&1 | tee tests/out/test.log
-      - name: Upload test evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: test-results
-          retention-days: 7
-          if-no-files-found: ignore
-          path: |
-            tests/out/*.log
-            tests/out/*.txt
-            tests/out/results.xml
-            tests/out/*-sync.json
-            tests/out/metrics*.json
-            tests/out/studio.png
-            tests/out/preview-*.png
-            tests/out/export-*.png
+      - name: Require every build and installation check
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: test "$BUILD_RESULT" = success

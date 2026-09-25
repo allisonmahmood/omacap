@@ -1,0 +1,147 @@
+name: Build and verify package
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        required: true
+    outputs:
+      version:
+        value: ${{ jobs.package.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    container: archlinux:base
+    timeout-minutes: 25
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      JOBS: "2"
+      MAKEFLAGS: -j2
+      QT_QPA_PLATFORM: xcb
+      QSG_RHI_BACKEND: opengl
+      QT_MEDIA_BACKEND: ffmpeg
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      GALLIUM_DRIVER: llvmpipe
+      LP_NUM_THREADS: "2"
+      PACKAGE_CHANNEL: ${{ inputs.channel }}
+    steps:
+      - name: Set up clean build environment
+        run: |
+          case "$PACKAGE_CHANNEL" in
+            omarchy-stable)
+              echo 'Server = https://stable-mirror.omarchy.org/$repo/os/$arch' > /etc/pacman.d/mirrorlist
+              ;;
+            arch) ;;
+            *) exit 1 ;;
+          esac
+          # Downgrade the container's base packages too when using the stable mirror.
+          pacman -Syyuu --noconfirm --needed base-devel git
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install application and test dependencies
+        run: |
+          source packaging/PKGBUILD.in
+          pacman -S --noconfirm --needed "${depends[@]}" \
+            python-numpy mesa xorg-server-xvfb xorg-xauth ttf-dejavu desktop-file-utils
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+      - name: Build release package
+        id: version
+        run: |
+          runuser -u builder -- ./scripts/package.sh --noconfirm
+          echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+          {
+            echo "Commit: $(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)"
+            echo "Channel: $PACKAGE_CHANNEL"
+            echo "Built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "Runner: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            cat /etc/pacman.d/mirrorlist
+            pacman -Q
+          } > dist/BUILD-INFO.txt
+      - name: Test capture, editing and exports
+        run: |
+          for script in scripts/*.sh; do bash -n "$script"; done
+          python -m compileall -q scripts tests
+          desktop-file-validate packaging/omacap.desktop
+          mkdir -p tests/out
+          chown -R builder:builder tests/out
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          chown builder:builder "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          trap 'rm -rf -- "$XDG_RUNTIME_DIR"' EXIT
+          runuser -u builder -- dbus-run-session -- xvfb-run -a -s '-screen 0 1920x1080x24 -nolisten tcp' \
+            ./scripts/test.sh 2>&1 | tee tests/out/test.log
+      - name: Checksum release files
+        run: |
+          cd dist
+          sha256sum -- *.pkg.tar.zst *.tar.gz PKGBUILD BUILD-INFO.txt > SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets-${{ inputs.channel }}
+          if-no-files-found: error
+          path: dist/
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results-${{ inputs.channel }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            tests/out/*.log
+            tests/out/*.txt
+            tests/out/results.xml
+            tests/out/*-sync.json
+            tests/out/metrics*.json
+            tests/out/studio.png
+            tests/out/preview-*.png
+            tests/out/export-*.png
+
+  install:
+    name: Install and launch in a fresh container
+    needs: package
+    runs-on: ubuntu-24.04
+    container: archlinux:base
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      PACKAGE_CHANNEL: ${{ inputs.channel }}
+      EXPECTED_VERSION: ${{ needs.package.outputs.version }}
+    steps:
+      - name: Set up runtime environment
+        run: |
+          if [[ "$PACKAGE_CHANNEL" == omarchy-stable ]]; then
+            echo 'Server = https://stable-mirror.omarchy.org/$repo/os/$arch' > /etc/pacman.d/mirrorlist
+          fi
+          pacman -Syyuu --noconfirm --needed git
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-assets-${{ inputs.channel }}
+          path: dist
+      - name: Install only declared runtime dependencies
+        run: |
+          cd dist
+          sha256sum --check SHA256SUMS
+          pacman -U --noconfirm ./*.pkg.tar.zst
+      - name: Verify packaged application
+        run: |
+          pacman -S --noconfirm --needed xorg-server-xvfb xorg-xauth mesa ttf-dejavu desktop-file-utils
+          ./scripts/check-package.sh "$EXPECTED_VERSION"

@@ -1,0 +1,53 @@
+name: Prepare release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require main
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: test "$RELEASE_REF" = refs/heads/main
+  build:
+    needs: validate
+    uses: ./.github/workflows/build.yml
+    with:
+      channel: omarchy-stable
+  draft:
+    name: Prepare draft for publication
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-assets-omarchy-stable
+          path: dist
+      - name: Stage release and assets
+        run: |
+          test -f "releases/$VERSION.md"
+          existing_tag=$(git ls-remote --tags origin "refs/tags/v$VERSION")
+          test -z "$existing_tag"
+          (cd dist && sha256sum --check SHA256SUMS)
+          gh release create "v$VERSION" dist/* \
+            --draft --target "$GITHUB_SHA" --title "OmaCap $VERSION" \
+            --notes-file "releases/$VERSION.md"
+          url=$(gh release view "v$VERSION" --json url --jq .url)
+          echo "Draft ready: $url. Review it and click Publish release." >> "$GITHUB_STEP_SUMMARY"

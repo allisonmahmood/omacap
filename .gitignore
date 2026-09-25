@@ -1,4 +1,5 @@
 /build/
+/dist/
 /tests/out/
 *.user
 __pycache__/
