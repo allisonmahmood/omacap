@@ -23,3 +23,15 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       channel: ${{ matrix.channel }}
+
+  required:
+    # Preserve the check name required by main's branch protection.
+    name: Build and test on Arch Linux
+    needs: build
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every build and installation check
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: test "$BUILD_RESULT" = success
