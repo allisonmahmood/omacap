@@ -389,6 +389,34 @@ void Backend::prepare(QString path, bool captured) {
                 if (s["codec_type"] == "audio")
                     audioCount++;
             }
+            const QString repaired = session + "/recovered.mkv";
+            if (code == 0 && !video.isEmpty() && dur <= .1 && path != repaired) {
+                // An interrupted Matroska file can contain valid packets but no
+                // duration or seek index. Rebuild those in a separate file.
+                auto remux = new QProcess(this);
+                remux->setChildProcessModifier([] { prctl(PR_SET_PDEATHSIG, SIGKILL); });
+                connect(remux, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) {
+                    if (e == QProcess::FailedToStart)
+                        status("recorder", "Could not start FFmpeg to recover the recording.");
+                });
+                QTimer::singleShot(120000, remux, [remux] {
+                    if (remux->state() != QProcess::NotRunning)
+                        remux->kill();
+                });
+                connect(
+                    remux, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+                    [this, remux, repaired, captured](int result, QProcess::ExitStatus) {
+                        remux->deleteLater();
+                        if (result == 0 && QFileInfo(repaired).size() > 1024)
+                            prepare(repaired, captured);
+                        else
+                            status("recorder",
+                                   "Could not recover the recording. Original media was retained.");
+                    });
+                remux->start("ffmpeg", {"-v", "error", "-y", "-i", path, "-map", "0", "-c", "copy",
+                                        repaired});
+                return;
+            }
             if (code != 0 || video.isEmpty() || dur <= .1) {
                 status("recorder", "The recording could not be opened. Original "
                                    "media was retained.");
@@ -537,7 +565,10 @@ void Backend::syncPlayers(bool force) {
             continue;
         qint64 t =
             std::max(qint64(0), commonTime - (p == &camera ? qRound64(cameraStart * 1000) : 0));
-        if (force || std::abs(p->position() - t) > 60)
+        // Position notifications are sampled independently by each decoder.
+        // Treating their jitter as drift repeatedly seeks and repeats audio.
+        // Align tracks on transport changes; let their clocks run between them.
+        if (force)
             p->setPosition(t);
         if (playing() && p->playbackState() != QMediaPlayer::PlayingState)
             p->play();
@@ -678,8 +709,8 @@ void Backend::togglePlay() {
             seek(0);
         if (seekTimer.isActive())
             applySeek();
-        screen.play();
         syncPlayers(true);
+        screen.play();
     }
     emit positionChanged();
 }

@@ -9,6 +9,7 @@ cd "$repo"
 # Exports from an earlier run must never satisfy an assertion after a failed export.
 rm -f -- "$repo/tests/out/"{delayed-export.mp4,demo.mp4,demo60.mp4,demo.gif,cancelled.mp4,after-cancel.mp4,portal-export.mp4,metrics30.json,metrics60.json,studio.png}
 /usr/bin/python "$repo/tests/make-sync-fixture.py"
+/usr/bin/python "$repo/tests/capture-pipewire.py"
 # A fresh state directory prevents recovery/preferences from affecting later runs.
 test_state=$(mktemp -d)
 trap 'rm -rf -- "$test_state"' EXIT

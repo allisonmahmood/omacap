@@ -15,6 +15,10 @@
 #include <QtTest>
 #include <cmath>
 #include <ctime>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+#include <QAudioBuffer>
+#include <QAudioBufferOutput>
+#endif
 class Integration : public QObject {
     Q_OBJECT
     QTemporaryDir themeRoot;
@@ -30,6 +34,73 @@ class Integration : public QObject {
         wallpaper.fill(QColor("#223344"));
         QVERIFY(wallpaper.save(themeRoot.path() + "/background", "PNG"));
         qputenv("OMACAP_THEME_ROOT", themeRoot.path().toUtf8());
+    }
+    void unfinishedRecording() {
+        Theme theme;
+        Frames frames;
+        Backend b(&theme, &frames);
+        b.loadFile(QDir::current().absoluteFilePath("tests/out/unfinished.mkv"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QVERIFY(b.duration() > 7.9);
+        QTRY_VERIFY_WITH_TIMEOUT(!b.seeking, 3000);
+        b.seek(7);
+        QTRY_VERIFY_WITH_TIMEOUT(!b.seeking, 3000);
+        QVERIFY(b.presentedSource > 6.9);
+        QVERIFY(QFile::exists("tests/out/unfinished.mkv"));
+        b.discard();
+    }
+    void continuousPreviewAudio_data() {
+        QTest::addColumn<QString>("fixture");
+        QTest::addColumn<double>("playUntil");
+        QTest::newRow("still-window")
+            << QDir::current().absoluteFilePath("tests/out/sparse-audio.mkv") << 6.5;
+        const auto longCapture = qEnvironmentVariable("OMACAP_LONG_CAPTURE");
+        if (!longCapture.isEmpty())
+            QTest::newRow("long-capture") << longCapture << 90.;
+    }
+    void continuousPreviewAudio() {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+        QFETCH(QString, fixture);
+        QFETCH(double, playUntil);
+        Theme theme;
+        Frames frames;
+        Backend b(&theme, &frames);
+        QAudioBufferOutput audio;
+        b.mic.setAudioBufferOutput(&audio);
+        b.micOutput.setVolume(0);
+        b.loadFile(fixture);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!b.seeking, 3000);
+        qint64 previousEnd = -1, largestGap = 0;
+        int buffers = 0;
+        const auto connection =
+            connect(&audio, &QAudioBufferOutput::audioBufferReceived, &audio,
+                    [&](const QAudioBuffer &buffer) {
+                        if (!buffer.isValid())
+                            return;
+                        if (previousEnd >= 0)
+                            largestGap =
+                                std::max(largestGap, std::abs(buffer.startTime() - previousEnd));
+                        previousEnd = buffer.startTime() + buffer.duration();
+                        ++buffers;
+                    });
+        const auto cleanup = qScopeGuard([&] {
+            disconnect(connection);
+            b.mic.setAudioBufferOutput(nullptr);
+        });
+        b.togglePlay();
+        QTRY_VERIFY_WITH_TIMEOUT(b.displayPosition() > playUntil, int((playUntil + 3) * 1000));
+        const auto drift =
+            std::abs(b.mic.position() - b.screen.position() - qRound64(b.screenStart * 1000));
+        b.pause();
+        qInfo() << "AUDIO_CONTINUITY buffers=" << buffers << "largest_gap_us=" << largestGap;
+        QVERIFY(buffers > 30);
+        QVERIFY2(largestGap < 25000, qPrintable(QString::number(largestGap)));
+        QVERIFY2(drift < 200, qPrintable(QString::number(drift)));
+        b.discard();
+#else
+        QSKIP("Decoded audio continuity requires Qt 6.8");
+#endif
     }
     void sparseRecordingSeek() {
         Theme theme;

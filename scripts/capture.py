@@ -17,7 +17,6 @@ p.add_argument("--camera", default="")
 p.add_argument("--synthetic", action="store_true")
 p.add_argument("--seconds", type=int, default=0)
 p.add_argument("--probe", action="store_true")
-a = p.parse_args()
 Gst.init(None)
 dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
 loop = GLib.MainLoop()
@@ -31,13 +30,10 @@ request_path = None
 finished = False
 stopping = False
 first = {}
-last_frame = time.monotonic()
 ready = False
 count = 0
 exitcode = 0
 timeout_id = None
-output = Path(a.output)
-output.parent.mkdir(parents=True, exist_ok=True)
 
 
 def emit(event, **data):
@@ -177,13 +173,12 @@ def message(_, msg):
 
 
 def buffer_probe(pad, info, name):
-    global last_frame, ready, count
+    global ready, count
     buf = info.get_buffer()
     if buf:
         if name not in first:
             first[name] = buf.pts / Gst.SECOND
         if name == "screen":
-            last_frame = time.monotonic()
             count += 1
         expected = 1 + bool(a.camera) + bool(a.mic) + bool(a.desktop)
         if len(first) == expected and not ready:
@@ -198,16 +193,13 @@ def watchdog():
             "A selected audio or camera device did not become ready. Check the device and try again."
         )
         return False
-    if not stopping and time.monotonic() - last_frame > 12:
-        finish(
-            "The selected source stopped supplying frames. The partial recording was kept. Keep the window open and at a fixed size while recording."
-        )
-        return False
+    # Wayland sends damage, not a continuous stream. A still window is healthy;
+    # actual source loss arrives as a PipeWire error or a closed portal session.
     return not finished
 
 
 def start(result=None):
-    global pipeline, fd, last_frame, capture_started
+    global pipeline, fd, capture_started
     width, height = 1280, 720
     if a.synthetic:
         source = "videotestsrc name=screen is-live=true pattern=smpte ! video/x-raw,width=1280,height=720,framerate=30/1"
@@ -225,7 +217,7 @@ def start(result=None):
             if "pipewire-serial" in props
             else f"path={int(node)}"
         )
-        source = f"pipewiresrc name=screen fd={fd} {target} do-timestamp=true use-bufferpool=false always-copy=true min-buffers=8 max-buffers=16 on-disconnect=error"
+        source = f"pipewiresrc name=screen fd={fd} {target} do-timestamp=true use-bufferpool=false always-copy=true min-buffers=8 max-buffers=16 on-disconnect=error keepalive-time=100 resend-last=true"
     # Element properties are assigned below; device names and output paths never enter pipeline syntax.
     enc = (
         "nvh264enc preset=p1 bitrate=12000 gop-size=60 ! h264parse"
@@ -263,7 +255,6 @@ def start(result=None):
         gstbus.connect("message", message)
         capture_started = time.monotonic()
         pipeline.set_state(Gst.State.PLAYING)
-        last_frame = time.monotonic()
         GLib.timeout_add_seconds(2, watchdog)
         if a.seconds:
             GLib.timeout_add_seconds(a.seconds, stop)
@@ -271,23 +262,34 @@ def start(result=None):
         finish(str(e))
 
 
-try:
-    if a.synthetic:
-        start()
-    else:
-        bus = dbus.SessionBus()
-        portal = dbus.Interface(
-            bus.get_object("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop"),
-            "org.freedesktop.portal.ScreenCast",
-        )
-        request(
-            "CreateSession",
-            [],
-            {"session_handle_token": f"omacap_session_{os.getpid()}"},
-            created,
-        )
-    if not finished:
-        loop.run()
-except Exception as e:
-    finish(str(e))
-sys.exit(exitcode)
+def main():
+    global a, output, bus, portal
+    a = p.parse_args()
+    output = Path(a.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if a.synthetic:
+            start()
+        else:
+            bus = dbus.SessionBus()
+            portal = dbus.Interface(
+                bus.get_object(
+                    "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop"
+                ),
+                "org.freedesktop.portal.ScreenCast",
+            )
+            request(
+                "CreateSession",
+                [],
+                {"session_handle_token": f"omacap_session_{os.getpid()}"},
+                created,
+            )
+        if not finished:
+            loop.run()
+    except Exception as e:
+        finish(str(e))
+    return exitcode
+
+
+if __name__ == "__main__":
+    sys.exit(main())
