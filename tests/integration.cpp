@@ -69,6 +69,12 @@ class Integration : public QObject {
         QTRY_VERIFY_WITH_TIMEOUT(b.position() > 4.7, 2000);
         b.pause();
         QVERIFY(b.mic.position() > 7600);
+        b.trim(4, 5);
+        const QString output = QDir::current().absoluteFilePath("tests/out/recovered-tail.mp4");
+        QFile::remove(output);
+        b.startExport(output, false, 640, 30, 20, 0);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
+        QVERIFY2(QFileInfo(output).size() > 1000, qPrintable(b.message()));
         b.discard();
     }
     void continuousPreviewAudio_data() {

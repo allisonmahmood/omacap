@@ -162,7 +162,7 @@ int exportRecording(const QString &jobPath) {
             QProcess screen, cam;
             auto decode = [&](QProcess &p, const QString &path, int dw, int dh) {
                 start(p,
-                      {"-v", "error", "-threads", "2", "-ss",
+                      {"-v", "error", "-threads", "2", "-noaccurate_seek", "-ss",
                        QString::number(
                            std::max(
                                0.,
@@ -171,7 +171,10 @@ int exportRecording(const QString &jobPath) {
                                        .toDouble()),
                            'f', 6),
                        "-i", path, "-an", "-vf",
-                       QString("fps=%1,scale=%2:%3:force_original_aspect_ratio=increase,crop=%2:%3,"
+                       // Retain the frame covering a seek into a still section.
+                       // The fps filter trims preroll and samples from the requested time.
+                       QString("fps=%1:start_time=0,scale=%2:%3:force_original_aspect_ratio="
+                               "increase,crop=%2:%3,"
                                "tpad=stop_mode=clone:stop_duration=2")
                            .arg(fps)
                            .arg(dw)
