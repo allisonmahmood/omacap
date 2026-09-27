@@ -86,31 +86,31 @@ ApplicationWindow {
 
     Shortcut {
         sequence: "Space"
-        enabled: backend.phase === "editor" && !exportDialog.opened && !discardDialog.opened && !focusPicker.pressed
+        enabled: backend.phase === "editor" && !win.cropping && !exportDialog.opened && !discardDialog.opened && !focusPicker.pressed
         onActivated: backend.togglePlay()
     }
 
     Shortcut {
         sequences: [StandardKey.Undo]
-        enabled: backend.phase === "editor" && !focusPicker.pressed
+        enabled: backend.phase === "editor" && !win.cropping && !focusPicker.pressed
         onActivated: backend.undo()
     }
 
     Shortcut {
         sequences: [StandardKey.Redo]
-        enabled: backend.phase === "editor" && !focusPicker.pressed
+        enabled: backend.phase === "editor" && !win.cropping && !focusPicker.pressed
         onActivated: backend.redo()
     }
 
     Shortcut {
         sequence: "Left"
-        enabled: backend.phase === "editor" && !focusPicker.pressed && !exportDialog.opened && !discardDialog.opened
+        enabled: backend.phase === "editor" && !win.cropping && !focusPicker.pressed && !exportDialog.opened && !discardDialog.opened
         onActivated: backend.seek(backend.position - 1 / 30)
     }
 
     Shortcut {
         sequence: "Right"
-        enabled: backend.phase === "editor" && !focusPicker.pressed && !exportDialog.opened && !discardDialog.opened
+        enabled: backend.phase === "editor" && !win.cropping && !focusPicker.pressed && !exportDialog.opened && !discardDialog.opened
         onActivated: backend.seek(backend.position + 1 / 30)
     }
 
@@ -124,7 +124,23 @@ ApplicationWindow {
         }
     }
 
+    CropView {
+        id: cropView
+        objectName: "cropView"
+        anchors.fill: parent
+        anchors.margins: 16
+        visible: win.cropping && backend.phase === "editor"
+        source: backend.screenSource
+        sourceAspect: backend.aspect
+        onAccepted: (crop) => {
+            backend.setValue("crop", crop);
+            win.cropping = false;
+        }
+        onCanceled: win.cropping = false
+    }
+
     ColumnLayout {
+        visible: !win.cropping
         anchors.fill: parent
         anchors.margins: 16
         spacing: 12
@@ -325,10 +341,13 @@ ApplicationWindow {
 
                 RowLayout {
                     FlatButton {
-                        text: win.cropping ? "Cancel crop" : "Crop"
+                        text: "Crop"
+                        enabled: backend.duration > 0
                         onClicked: {
-                            win.cropping = !win.cropping;
+                            backend.pause();
                             timeline.selection = "";
+                            win.cropping = true;
+                            cropView.begin(backend.edit.crop);
                         }
                     }
 
@@ -338,7 +357,7 @@ ApplicationWindow {
                     }
 
                     Label {
-                        text: win.cropping ? "Drag over the picture to crop" : "16:9 · styled preview"
+                        text: "16:9 · styled preview"
                         color: theme.colors.dark_foreground
                         Layout.fillWidth: true
                         horizontalAlignment: Text.AlignRight
@@ -378,7 +397,7 @@ ApplicationWindow {
                             screenSource: backend.duration > 0 ? backend.screenSource : ""
                             cameraSource: backend.duration > 0 ? backend.cameraSource : ""
                             sourceAspect: backend.aspect
-                            zoom: win.cropping ? 1 : backend.zoom
+                            zoom: backend.zoom
                             focusX: backend.focusX
                             focusY: backend.focusY
                         }
@@ -396,55 +415,10 @@ ApplicationWindow {
                         }
 
                         MouseArea {
-                            id: picture
-
-                            property real sx: 0
-                            property real sy: 0
-                            property real ex: 0
-                            property real ey: 0
-
-                            x: composition.frameX * fit.width / 1920
-                            y: composition.frameY * fit.width / 1920
-                            width: composition.frameW * fit.width / 1920
-                            height: composition.frameH * fit.width / 1920
-                            enabled: win.cropping
-                            cursorShape: Qt.CrossCursor
-                            onPressed: (mouse) => {
-                                sx = ex = mouse.x;
-                                sy = ey = mouse.y;
-                            }
-                            onPositionChanged: (mouse) => {
-                                if (pressed) {
-                                    ex = Math.max(0, Math.min(width, mouse.x));
-                                    ey = Math.max(0, Math.min(height, mouse.y));
-                                }
-                            }
-                            onReleased: (mouse) => {
-                                let c = backend.edit.crop;
-                                if (win.cropping && Math.abs(ex - sx) > 8 && Math.abs(ey - sy) > 8) {
-                                    backend.setValue("crop", [c[0] + Math.min(sx, ex) / width * c[2], c[1] + Math.min(sy, ey) / height * c[3], Math.abs(ex - sx) / width * c[2], Math.abs(ey - sy) / height * c[3]]);
-                                    win.cropping = false;
-                                }
-                            }
-
-                            Rectangle {
-                                visible: picture.pressed && win.cropping
-                                x: Math.min(picture.sx, picture.ex)
-                                y: Math.min(picture.sy, picture.ey)
-                                width: Math.abs(picture.ex - picture.sx)
-                                height: Math.abs(picture.ey - picture.sy)
-                                color: "#304694e4"
-                                border.width: 1
-                                border.color: "white"
-                            }
-
-                        }
-
-                        MouseArea {
                             property real px
                             property real py
 
-                            visible: backend.edit.camera && backend.cameraSource !== "" && !focusPicker.pressed && !win.cropping
+                            visible: backend.edit.camera && backend.cameraSource !== "" && !focusPicker.pressed
                             x: composition.cameraX * fit.width / 1920
                             y: composition.cameraY * fit.width / 1920
                             width: composition.cameraW * fit.width / 1920

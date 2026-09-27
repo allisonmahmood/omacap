@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QImageReader>
+#include <QJSValue>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QMediaDevices>
@@ -808,6 +809,9 @@ void Backend::edited() {
     syncPlayers();
 }
 void Backend::setValue(QString k, QVariant v) {
+    // QML arrays reach QVariant as QJSValue; unwrap them before JSON conversion.
+    if (v.metaType() == QMetaType::fromType<QJSValue>())
+        v = v.value<QJSValue>().toVariant();
     if (m_phase != "editor")
         return;
     static const QStringList allowed{

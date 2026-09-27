@@ -57,7 +57,7 @@ Choose your microphone, camera and desktop audio options. Click **Select source 
 
 ### 2. Crop, style and trim
 
-Click **Crop** and drag over the part you want to keep. Set the background, padding, corners and shadow while watching the preview. If you recorded a camera, choose its shape, corners and shadow, then drag it into place.
+Click **Crop** to open the full recording in a dedicated crop view. Drag the corners to resize the selection, or drag inside it to move it. Click **Confirm crop** to apply it to the preview, **Cancel** to keep the previous crop, or **Reset** to select the full recording before confirming. Reopening Crop always shows the full source, so you can expand an earlier selection. Set the background, padding, corners and shadow while watching the preview. If you recorded a camera, choose its shape, corners and shadow, then drag it into place.
 
 **Window transparency** reveals the chosen background through the recording. Choose **Off**, **Light** for 96% opacity, or **Custom** to show an opacity slider. The camera stays opaque. The treatment appears in both MP4 and GIF exports and starts off for each new recording.
 

@@ -809,6 +809,136 @@ class Integration : public QObject {
         QCOMPARE(b.state.windowTransparency, QString("off"));
         b.discard();
     }
+    void cropEditor_data() {
+        QTest::addColumn<double>("aspect");
+        QTest::newRow("landscape") << 16. / 9;
+        QTest::newRow("portrait") << 9. / 16;
+    }
+    void cropEditor() {
+        QFETCH(double, aspect);
+        Theme theme;
+        QQmlApplicationEngine engine;
+        auto frames = new Frames;
+        engine.addImageProvider("frames", frames);
+        Backend b(&theme, frames);
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &b);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
+        auto cleanup = qScopeGuard([&] { delete win; });
+        QVERIFY(QTest::qWaitForWindowExposed(win));
+        b.loadFile(QDir::current().absoluteFilePath("tests/out/frames15.mkv"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(!b.seeking && !b.screenSource().isEmpty(), 3000);
+        // Exercise the same source-coordinate mapping in both display orientations.
+        b.m_aspect = aspect;
+        emit b.changed();
+        std::function<QQuickItem *(QQuickItem *, const QString &)> findText =
+            [&](QQuickItem *item, const QString &text) -> QQuickItem * {
+            if (item->isVisible() &&
+                (item->property("text").toString() == text || item->objectName() == text))
+                return item;
+            for (auto child : item->childItems())
+                if (auto found = findText(child, text))
+                    return found;
+            return nullptr;
+        };
+        auto click = [&](const QString &text) {
+            auto item = findText(win->contentItem(), text);
+            if (!item)
+                return false;
+            QTest::mouseClick(
+                win, Qt::LeftButton, Qt::NoModifier,
+                item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint());
+            return true;
+        };
+        win->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(win));
+        b.togglePlay();
+        QTRY_VERIFY(b.playing());
+        QVERIFY(click("Crop"));
+        QVERIFY(!b.playing());
+        auto view = win->findChild<QQuickItem *>("cropView");
+        QVERIFY2(view && view->isVisible(), "Crop must open a dedicated full-source editor");
+        auto image = win->findChild<QQuickItem *>("cropImage");
+        auto selection = win->findChild<QQuickItem *>("cropSelection");
+        QVERIFY(image && selection);
+        QTRY_VERIFY(image->width() > 100 && image->height() > 100);
+        QVERIFY(std::abs(image->width() / image->height() - aspect) < .001);
+        auto drag = [&](const QString &name, QPoint delta) {
+            auto item = findText(win->contentItem(), name);
+            if (!item || !item->isVisible())
+                return false;
+            const auto start =
+                item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint();
+            QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, start);
+            QTest::mouseMove(win, start + delta / 2, 20);
+            QTest::mouseMove(win, start + delta, 20);
+            QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, start + delta);
+            return true;
+        };
+        const auto undoCount = b.past.size();
+        const QRectF full(0, 0, 1, 1);
+        const QPoint inset(qRound(image->width() * .2), qRound(image->height() * .2));
+        QVERIFY(drag("cropCorner0", inset));
+        QVERIFY(drag("cropCorner3", -inset));
+        QCOMPARE(b.state.crop, full); // A drag must not commit the edit.
+        QVERIFY(selection->width() < image->width() * .65);
+        QVERIFY(win->grabWindow().save(aspect > 1 ? "tests/out/crop-landscape.png"
+                                                  : "tests/out/crop-portrait.png"));
+        QVERIFY(click("Confirm crop"));
+        QTRY_VERIFY(!view->isVisible());
+        QCOMPARE(b.past.size(), undoCount + 1);
+        const auto cropped = b.state.crop;
+        QVERIFY(std::abs(cropped.x() - .2) < .01);
+        QVERIFY(std::abs(cropped.y() - .2) < .01);
+        QVERIFY(std::abs(cropped.width() - .6) < .01);
+        auto composition = win->findChild<QQuickItem *>("composition");
+        QVERIFY(composition);
+        QCOMPARE(composition->property("crop").toList(), b.edit()["crop"].toList());
+        b.undo();
+        QCOMPARE(b.state.crop, full);
+        b.redo();
+        QCOMPARE(b.state.crop, cropped);
+        QVERIFY(click("Crop"));
+        QTRY_VERIFY(view->isVisible());
+        QVERIFY(selection->width() < image->width() * .65);
+        QVERIFY(drag("cropCorner0", -inset));
+        QVERIFY(selection->width() > image->width() * .75); // Expand beyond the old crop.
+        QVERIFY(click("Cancel"));
+        QCOMPARE(b.state.crop, cropped);
+        QVERIFY(click("Crop"));
+        QTRY_VERIFY(view->isVisible());
+        QVERIFY(drag("cropSelection",
+                     QPoint(qRound(image->width() * .45), qRound(image->height() * .45))));
+        QVERIFY(selection->x() >= 0 && selection->y() >= 0);
+        QVERIFY(selection->x() + selection->width() <= image->width() + .01);
+        QVERIFY(selection->y() + selection->height() <= image->height() + .01);
+        QVERIFY(click("Reset"));
+        QCOMPARE(b.state.crop, cropped);
+        QVERIFY(click("Confirm crop"));
+        QCOMPARE(b.state.crop, full);
+        b.undo();
+        QCOMPARE(b.state.crop, cropped);
+        QVERIFY(click("Crop"));
+        QTRY_VERIFY(view->isVisible());
+        QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(b.state.crop, cropped);
+        QVERIFY(drag("cropCorner1",
+                     QPoint(qRound(-image->width() * .7), qRound(image->height() * .7))));
+        QVERIFY(std::abs(selection->width() / image->width() - .05) < .001);
+        QVERIFY(std::abs(selection->height() / image->height() - .05) < .001);
+        QVERIFY(click("Reset"));
+        QVERIFY(drag("cropCorner2",
+                     QPoint(qRound(image->width() * .97), qRound(-image->height() * .97))));
+        QVERIFY(std::abs(selection->width() / image->width() - .05) < .001);
+        QVERIFY(std::abs(selection->height() / image->height() - .05) < .001);
+        QTest::keyClick(win, Qt::Key_Escape);
+        QTRY_VERIFY(!view->isVisible());
+        QCOMPARE(b.state.crop, cropped);
+        b.discard();
+    }
     void styledPreviewMatchesExport() {
         Theme theme;
         QQmlApplicationEngine engine;
