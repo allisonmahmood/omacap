@@ -102,3 +102,54 @@ run(
     "-i", str(out / "sparse.mkv"), "-map", "0:v", "-c", "copy",
     "-output_ts_offset", "0.023", str(out / "sparse-offset.mkv"),
 )
+
+# A still desktop between moving sections, with continuous sound throughout.
+run(
+    "-f",
+    "lavfi",
+    "-i",
+    "testsrc2=s=640x360:r=30:d=8",
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=frequency=440:sample_rate=48000:duration=8",
+    "-vf",
+    "select='lt(t,1)+gte(t,6)'",
+    "-fps_mode",
+    "vfr",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "ultrafast",
+    "-c:a",
+    "pcm_s16le",
+    str(out / "sparse-audio.mkv"),
+)
+
+# No duration or cues, as when capture exits before Matroska receives EOS.
+run(
+    "-i",
+    str(out / "sparse-audio.mkv"),
+    "-map",
+    "0",
+    "-c",
+    "copy",
+    "-live",
+    "1",
+    str(out / "unfinished.mkv"),
+)
+
+# The captured-recording path retains camera and desktop audio as separate tracks.
+run(
+    "-i", str(out / "sparse-audio.mkv"),
+    "-map", "0:v", "-map", "0:v", "-map", "0:a", "-map", "0:a",
+    "-c", "copy", str(out / "sparse-tracks.mkv"),
+)
+
+# Capture was interrupted during a still tail while audio kept arriving.
+run(
+    "-i", str(out / "sparse-audio.mkv"),
+    "-vf", "select='lt(t,1)'", "-fps_mode", "vfr",
+    "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "copy", "-live", "1",
+    str(out / "unfinished-tail.mkv"),
+)
