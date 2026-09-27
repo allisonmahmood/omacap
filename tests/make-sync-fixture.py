@@ -138,3 +138,18 @@ run(
     "1",
     str(out / "unfinished.mkv"),
 )
+
+# The captured-recording path retains camera and desktop audio as separate tracks.
+run(
+    "-i", str(out / "sparse-audio.mkv"),
+    "-map", "0:v", "-map", "0:v", "-map", "0:a", "-map", "0:a",
+    "-c", "copy", str(out / "sparse-tracks.mkv"),
+)
+
+# Capture was interrupted during a still tail while audio kept arriving.
+run(
+    "-i", str(out / "sparse-audio.mkv"),
+    "-vf", "select='lt(t,1)'", "-fps_mode", "vfr",
+    "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "copy", "-live", "1",
+    str(out / "unfinished-tail.mkv"),
+)

@@ -77,6 +77,7 @@ def finish(error=""):
         os.close(fd)
     emit("finished", frames=count, first=first)
     loop.quit()
+    guard.cancel()
     return False
 
 

@@ -104,8 +104,8 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
             applySeek();
             return;
         }
-        seeking = false;
         pause();
+        seeking = false;
         m_message = "Playback could not reach this frame. Try seeking again.";
         emit changed();
     });
@@ -425,6 +425,7 @@ void Backend::prepare(QString path, bool captured) {
             sourceWidth = video["width"].toInt();
             m_aspect = double(sourceWidth) / std::max(1, video["height"].toInt());
             double origin = o["format"].toObject()["start_time"].toString().toDouble();
+            const double recordingEnd = dur;
             screenStart = std::max(0., video["start_time"].toString().toDouble() - origin);
             const double streamDuration = video["duration"].toString().toDouble();
             const auto endTag = video["tags"].toObject()["DURATION"].toString().split(':');
@@ -435,12 +436,18 @@ void Backend::prepare(QString path, bool captured) {
                       endTag[2].toDouble() - origin;
             else
                 dur = std::max(.1, dur - origin);
+            const bool recoverTail =
+                captured && path == repaired && video["has_b_frames"].toInt() == 0;
+            if (recoverTail)
+                dur = std::max(dur, recordingEnd - origin);
             cameraStart = 0;
+            bool cameraReordersFrames = false;
             bool seenVideo = false;
             for (auto v : streams) {
                 auto stream = v.toObject();
                 if (stream["codec_type"] == "video") {
                     if (seenVideo) {
+                        cameraReordersFrames = stream["has_b_frames"].toInt() > 0;
                         cameraStart =
                             std::max(0., stream["start_time"].toString().toDouble() - origin);
                         break;
@@ -456,10 +463,25 @@ void Backend::prepare(QString path, bool captured) {
                 hasDesktop = false;
             }
             hasCamera = hasCamera && videoCount > 1;
-            QStringList args{"-v",   "error", "-y",  "-copyts", "-i",   path,
-                             "-map", "0:v:0", "-an", "-c:v",    "copy", session + "/screen.mkv"};
-            if (hasCamera)
-                args << "-map" << "0:v:1" << "-an" << "-c:v" << "copy" << session + "/camera.mkv";
+            // A still frame lasts until the next update, not the nominal frame
+            // interval. Preserve that duration so Qt can seek within the hold.
+            // Packet order only matches presentation order without B-frames.
+            const QString lastDuration =
+                recoverTail ? QString("max(DURATION,%1/TB-PTS)").arg(recordingEnd, 0, 'f', 9)
+                            : QString("DURATION");
+            const QString frameDurations =
+                "setts=duration='if(gt(NEXT_PTS,PTS),NEXT_PTS-PTS," + lastDuration + ")'";
+            QStringList args{"-v",   "error", "-y",  "-copyts", "-i",  path,
+                             "-map", "0:v:0", "-an", "-c:v",    "copy"};
+            if (video["has_b_frames"].toInt() == 0)
+                args << "-bsf:v" << frameDurations;
+            args << session + "/screen.mkv";
+            if (hasCamera) {
+                args << "-map" << "0:v:1" << "-an" << "-c:v" << "copy";
+                if (!cameraReordersFrames)
+                    args << "-bsf:v" << frameDurations;
+                args << session + "/camera.mkv";
+            }
             int ai = 0;
             for (auto name : QStringList{"mic", "desktop"})
                 if (name == "mic" ? hasMic : hasDesktop)
@@ -559,7 +581,7 @@ void Backend::openPlayers() {
     });
 }
 void Backend::syncPlayers(bool force) {
-    qint64 commonTime = screen.position() + qRound64(screenStart * 1000);
+    const qint64 commonTime = qRound64(state.sourceTime(m_position) * 1000);
     for (auto p : {&camera, &mic, &desktop}) {
         if (p->source().isEmpty())
             continue;
@@ -637,7 +659,11 @@ void Backend::presentCamera() {
         return;
     const auto stamp = latestCameraFrame.startTime();
     const double source = (stamp >= 0 ? stamp / 1000000. : camera.position() / 1000.) + cameraStart;
-    if (std::abs(source - std::max(cameraStart, state.sourceTime(m_position))) > .12)
+    const double end = latestCameraFrame.endTime() > stamp
+                           ? latestCameraFrame.endTime() / 1000000. + cameraStart
+                           : source;
+    const double target = std::max(cameraStart, state.sourceTime(m_position));
+    if (source > target + .12 || end < target - .12)
         return;
     shownCameraSerial = latestCameraSerial;
     frames->put(true, latestCameraFrame.toImage());
@@ -696,7 +722,12 @@ void Backend::seek(double t) {
     emit positionChanged();
 }
 void Backend::pause() {
+    const bool wasPlaying = playing();
     screen.pause();
+    // A sparse video can hold a frame while its position notification stands
+    // still. Resume at the displayed time rather than replaying that interval.
+    if (wasPlaying && !seeking)
+        seek(m_position);
     syncPlayers(true);
 }
 void Backend::togglePlay() {

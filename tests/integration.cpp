@@ -49,54 +49,124 @@ class Integration : public QObject {
         QVERIFY(QFile::exists("tests/out/unfinished.mkv"));
         b.discard();
     }
+    void unfinishedStillTail() {
+        Theme theme;
+        Frames frames;
+        Backend b(&theme, &frames);
+        b.newSession();
+        b.hasMic = true;
+        b.lead = 3;
+        b.prepare(QDir::current().absoluteFilePath("tests/out/unfinished-tail.mkv"), true);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QVERIFY(b.duration() > 4.9);
+        b.seek(4.5);
+        QTRY_VERIFY_WITH_TIMEOUT(!b.seeking, 3000);
+        QVERIFY(b.screenSink.videoFrame().startTime() < 1000000);
+        QVERIFY(b.screenSink.videoFrame().endTime() >= 7990000);
+        QCOMPARE(b.position(), 4.5);
+        b.micOutput.setVolume(0);
+        b.togglePlay();
+        QTRY_VERIFY_WITH_TIMEOUT(b.position() > 4.7, 2000);
+        b.pause();
+        QVERIFY(b.mic.position() > 7600);
+        b.discard();
+    }
     void continuousPreviewAudio_data() {
         QTest::addColumn<QString>("fixture");
         QTest::addColumn<double>("playUntil");
+        QTest::addColumn<bool>("captured");
+        QTest::addColumn<bool>("cut");
         QTest::newRow("still-window")
-            << QDir::current().absoluteFilePath("tests/out/sparse-audio.mkv") << 6.5;
+            << QDir::current().absoluteFilePath("tests/out/sparse-audio.mkv") << 6.5 << false
+            << false;
+        QTest::newRow("all-tracks")
+            << QDir::current().absoluteFilePath("tests/out/sparse-tracks.mkv") << 6.5 << true
+            << false;
+        QTest::newRow("all-tracks-cut")
+            << QDir::current().absoluteFilePath("tests/out/sparse-tracks.mkv") << 6.5 << true
+            << true;
         const auto longCapture = qEnvironmentVariable("OMACAP_LONG_CAPTURE");
         if (!longCapture.isEmpty())
-            QTest::newRow("long-capture") << longCapture << 90.;
+            QTest::newRow("long-capture") << longCapture << 90. << true << true;
     }
     void continuousPreviewAudio() {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
         QFETCH(QString, fixture);
         QFETCH(double, playUntil);
+        QFETCH(bool, captured);
+        QFETCH(bool, cut);
         Theme theme;
         Frames frames;
+        QAudioBufferOutput audio[2];
         Backend b(&theme, &frames);
-        QAudioBufferOutput audio;
-        b.mic.setAudioBufferOutput(&audio);
+        b.mic.setAudioBufferOutput(&audio[0]);
+        b.desktop.setAudioBufferOutput(&audio[1]);
         b.micOutput.setVolume(0);
-        b.loadFile(fixture);
+        b.desktopOutput.setVolume(0);
+        if (captured) {
+            b.newSession();
+            b.hasMic = b.hasDesktop = b.hasCamera = true;
+            b.prepare(fixture, true);
+        } else
+            b.loadFile(fixture);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 5000);
         QTRY_VERIFY_WITH_TIMEOUT(!b.seeking, 3000);
-        qint64 previousEnd = -1, largestGap = 0;
-        int buffers = 0;
-        const auto connection =
-            connect(&audio, &QAudioBufferOutput::audioBufferReceived, &audio,
-                    [&](const QAudioBuffer &buffer) {
-                        if (!buffer.isValid())
-                            return;
-                        if (previousEnd >= 0)
-                            largestGap =
-                                std::max(largestGap, std::abs(buffer.startTime() - previousEnd));
-                        previousEnd = buffer.startTime() + buffer.duration();
-                        ++buffers;
-                    });
+        if (cut) {
+            b.removeRange(2, 3);
+            b.seek(0);
+            QTRY_VERIFY_WITH_TIMEOUT(!b.seeking, 3000);
+        }
+        struct Timing {
+            double previousEnd = -1, largestGap = 0;
+            int buffers = 0;
+        } timing[2];
+        QMetaObject::Connection connections[2];
+        for (int i = 0; i < 2; ++i)
+            connections[i] =
+                connect(&audio[i], &QAudioBufferOutput::audioBufferReceived, &audio[i],
+                        [&, i](const QAudioBuffer &buffer) {
+                            if (!buffer.isValid())
+                                return;
+                            auto &track = timing[i];
+                            const double start = b.state.editedTime(buffer.startTime() / 1000000.);
+                            const double end = b.state.editedTime(
+                                (buffer.startTime() + buffer.duration()) / 1000000.);
+                            if (track.previousEnd >= 0)
+                                track.largestGap =
+                                    std::max(track.largestGap, std::abs(start - track.previousEnd));
+                            track.previousEnd = end;
+                            ++track.buffers;
+                        });
         const auto cleanup = qScopeGuard([&] {
-            disconnect(connection);
+            for (auto connection : connections)
+                disconnect(connection);
             b.mic.setAudioBufferOutput(nullptr);
+            b.desktop.setAudioBufferOutput(nullptr);
         });
         b.togglePlay();
         QTRY_VERIFY_WITH_TIMEOUT(b.displayPosition() > playUntil, int((playUntil + 3) * 1000));
-        const auto drift =
-            std::abs(b.mic.position() - b.screen.position() - qRound64(b.screenStart * 1000));
+        for (auto player : {&b.mic, &b.desktop, &b.camera}) {
+            if (player->source().isEmpty())
+                continue;
+            const auto offset = player == &b.camera ? b.cameraStart : 0.;
+            const auto drift = std::abs(player->position() - b.screen.position() +
+                                        qRound64((offset - b.screenStart) * 1000));
+            qInfo() << "TRACK_SYNC" << player->source().fileName() << "drift_ms=" << drift;
+            QVERIFY2(drift < 200, qPrintable(QString::number(drift)));
+        }
         b.pause();
-        qInfo() << "AUDIO_CONTINUITY buffers=" << buffers << "largest_gap_us=" << largestGap;
-        QVERIFY(buffers > 30);
-        QVERIFY2(largestGap < 25000, qPrintable(QString::number(largestGap)));
-        QVERIFY2(drift < 200, qPrintable(QString::number(drift)));
+        for (int i = 0; i < (captured ? 2 : 1); ++i) {
+            const auto &track = timing[i];
+            qInfo() << "AUDIO_CONTINUITY track=" << i << "buffers=" << track.buffers
+                    << "largest_gap_s=" << track.largestGap;
+            QVERIFY(track.buffers > 30);
+            QVERIFY2(track.largestGap < .025, qPrintable(QString::number(track.largestGap)));
+        }
+        if (captured) {
+            QVERIFY(!frames.camera.isNull());
+            QVERIFY(std::abs(b.latestCameraFrame.startTime() / 1000000. + b.cameraStart -
+                             b.presentedSource) < .2);
+        }
         b.discard();
 #else
         QSKIP("Decoded audio continuity requires Qt 6.8");
