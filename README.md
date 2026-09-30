@@ -71,7 +71,7 @@ Click an empty part of the **Zooms** lane, or use **Add zoom**. Click a zoom blo
 
 ### 4. Export and share
 
-Click **Export**, choose MP4 or GIF, set the output size and frame rate, and pick a local destination. MP4 supports audio; GIF is a silent loop.
+Click **Export**, choose MP4 or GIF, set the output size and frame rate, and pick a local destination. MP4 supports audio; GIF is a silent loop of the whole edit. OmaCap shows the file size when the export finishes and warns when a GIF is over the 10 MB limit that GitHub and Discord apply.
 
 ![OmaCap's local export dialog with MP4, output width, frame rate and quality settings](docs/images/export.webp)
 
@@ -93,7 +93,7 @@ There is no saved-project format. An interrupted edit has a recovery checkpoint.
 
 Keep a selected window at a fixed size. Resizing it or moving it between monitors with different scales can interrupt the Hyprland portal stream. Use display capture when your demo needs window resizing.
 
-This version targets short SDR demos on a 16:9 canvas. Zooms are manual, GIF size estimates are approximate, and real camera/microphone synchronization should be checked with your own devices.
+This version targets short SDR demos on a 16:9 canvas. Zooms are manual, and real camera/microphone synchronization should be checked with your own devices.
 
 ## Development
 

@@ -29,8 +29,10 @@ void start(QProcess &p, const QStringList &args) {
     if (!p.waitForStarted(5000))
         throw std::runtime_error("Could not start FFmpeg");
 }
+// No timeout: long exports take as long as they take, and cancelling terminates
+// this worker, which kills FFmpeg through PDEATHSIG.
 void finish(QProcess &p) {
-    if (!p.waitForFinished(120000) || p.exitStatus() != QProcess::NormalExit || p.exitCode() != 0)
+    if (!p.waitForFinished(-1) || p.exitStatus() != QProcess::NormalExit || p.exitCode() != 0)
         throw std::runtime_error(("FFmpeg: " + p.readAllStandardError().right(3000)).toStdString());
 }
 QImage readFrame(QProcess &p, int w, int h) {
@@ -69,10 +71,12 @@ int exportRecording(const QString &jobPath) {
         if (w < 320 || w > 3840 || fps < 1 || fps > 60 || edit.length() <= 0)
             throw std::runtime_error("Invalid export settings");
         double length = edit.length();
-        if (gif)
-            length = std::min(length, job["seconds"].toDouble(length));
         int total = std::ceil(length * fps - 1e-9);
-        QString silent = dir + "/export-silent.mp4", audio = dir + "/export-audio.m4a";
+        // MP4 renders to a silent video, then gains audio. GIF renders to a lossless
+        // video plus a palette built from every frame as it passes, so memory stays flat
+        // for any length.
+        QString video = dir + (gif ? "/export-frames.mkv" : "/export-silent.mp4"),
+                palette = dir + "/export-palette.png", audio = dir + "/export-audio.m4a";
         QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
         QSurfaceFormat fmt;
         fmt.setDepthBufferSize(24);
@@ -121,20 +125,15 @@ int exportRecording(const QString &jobPath) {
                            QString::number(fps),
                            "-i",
                            "pipe:0",
-                           "-an",
-                           "-c:v",
-                           "libx264",
-                           "-threads",
-                           "4",
-                           "-preset",
-                           "veryfast",
-                           "-crf",
-                           QString::number(job["crf"].toInt(20)),
-                           "-pix_fmt",
-                           "yuv420p",
-                           "-movflags",
-                           "+faststart",
-                           silent};
+                           "-an"};
+        if (gif)
+            enc << "-filter_complex" << "split[a][b];[a]palettegen=stats_mode=diff[p]"
+                << "-map" << "[b]" << "-c:v" << "ffv1" << "-pix_fmt" << "bgr0" << video << "-map"
+                << "[p]" << "-update" << "1" << "-frames:v" << "1" << palette;
+        else
+            enc << "-c:v" << "libx264" << "-threads" << "4" << "-preset" << "veryfast" << "-crf"
+                << QString::number(job["crf"].toInt(20)) << "-pix_fmt" << "yuv420p"
+                << "-movflags" << "+faststart" << video;
         start(encoder, enc);
         int sw = std::min(3840, job["sourceWidth"].toInt(1920));
         int sh = std::max(2, int(std::round(sw / aspect)));
@@ -265,12 +264,13 @@ int exportRecording(const QString &jobPath) {
         }
         event({{"event", "progress"}, {"value", .9}});
         QProcess final;
-        QStringList args = {"-v", "error", "-y", "-i", silent};
+        QStringList args = {"-v", "error", "-y", "-i", video};
         if (gif) {
-            args << "-filter_complex"
-                 << "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse="
-                    "dither=sierra2_4a"
-                 << "-loop" << "0" << "-f" << "gif" << dest;
+            // diff_mode redraws only the changed rectangle of each frame, which keeps
+            // still parts of the screen from shimmering and makes this pass much faster.
+            args << "-i" << palette << "-lavfi"
+                 << "[0:v][1:v]paletteuse=dither=sierra2_4a:diff_mode=rectangle" << "-loop"
+                 << "0" << "-f" << "gif" << dest;
         } else {
             if (!inputs.isEmpty())
                 args << "-i" << audio << "-map" << "0:v:0" << "-map" << "1:a:0";
@@ -282,7 +282,8 @@ int exportRecording(const QString &jobPath) {
                {"frames", index},
                {"wallMs", timer.elapsed()},
                {"renderMsPerFrame", renderMs / std::max(1, index)}});
-        QFile::remove(silent);
+        QFile::remove(video);
+        QFile::remove(palette);
         QFile::remove(audio);
         return 0;
     } catch (const std::exception &e) {

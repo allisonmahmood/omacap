@@ -927,7 +927,8 @@ ApplicationWindow {
             }
 
             Label {
-                text: format.currentIndex === 0 ? "Quality" : "Duration in seconds"
+                visible: format.currentIndex === 0
+                text: "Quality"
             }
 
             ComboBox {
@@ -940,19 +941,8 @@ ApplicationWindow {
                 onActivated: backend.remember("export/quality", currentIndex)
             }
 
-            SpinBox {
-                id: gifLength
-
-                visible: format.currentIndex === 1
-                from: 1
-                to: Math.max(1, Math.ceil(backend.duration))
-                value: Math.min(backend.preference("export/gifSeconds", 10), to)
-                onValueModified: backend.remember("export/gifSeconds", value)
-                editable: true
-            }
-
             Label {
-                text: format.currentIndex === 1 ? "Silent loop. Rough estimate: " + (parseInt(outputWidth.currentText) * parseInt(outputWidth.currentText) * 9 / 16 * parseInt(outputFps.currentText) * gifLength.value * 0.03 / 1e+06).toFixed(1) + "–" + (parseInt(outputWidth.currentText) * parseInt(outputWidth.currentText) * 9 / 16 * parseInt(outputFps.currentText) * gifLength.value * 0.2 / 1e+06).toFixed(1) + " MB. Motion and detail affect the final size." : "H.264 video + AAC audio"
+                text: format.currentIndex === 1 ? "Silent loop of the whole edit. Busy motion makes large files." : "H.264 video + AAC audio"
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
                 color: theme.colors.dark_foreground
@@ -971,7 +961,7 @@ ApplicationWindow {
                 primary: true
                 onClicked: {
                     exportDialog.close();
-                    backend.exportVideo(format.currentIndex === 1, parseInt(outputWidth.currentText), parseInt(outputFps.currentText), [18, 23, 28][quality.currentIndex], gifLength.value);
+                    backend.exportVideo(format.currentIndex === 1, parseInt(outputWidth.currentText), parseInt(outputFps.currentText), [18, 23, 28][quality.currentIndex]);
                 }
             }
 

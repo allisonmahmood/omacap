@@ -10,6 +10,7 @@
 #include <QJSValue>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QLocale>
 #include <QMediaDevices>
 #include <QSaveFile>
 #include <QStandardPaths>
@@ -33,6 +34,17 @@ void writeJson(const QString &path, const QJsonObject &o) {
         f.write(QJsonDocument(o).toJson());
         f.commit();
     }
+}
+// The status shown after an export: its size, plus a warning when a GIF is too big to
+// attach on GitHub or Discord.
+QString exportedMessage(const QString &path) {
+    const qint64 bytes = QFileInfo(path).size();
+    QString message = "Export complete. " +
+                      QLocale().formattedDataSize(bytes, 1, QLocale::DataSizeSIFormat) + ".";
+    if (path.endsWith(".gif", Qt::CaseInsensitive) && bytes > 10'000'000)
+        message += " GitHub and Discord reject GIFs over 10 MB. A smaller width or frame rate "
+                   "makes a smaller file.";
+    return message;
 }
 } // namespace
 Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames(f) {
@@ -144,7 +156,7 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
                             m_lastExport = pendingExport;
                             m_dirty = state.json() != exportedEdit;
                             checkpoint();
-                            status("editor", "Export complete.");
+                            status("editor", exportedMessage(pendingExport));
                         } else
                             status("editor", "Export finished but could not move into place. "
                                              "The temporary output is retained at " +
@@ -996,7 +1008,7 @@ void Backend::useWallpaper() {
     snapshotWallpaper();
     edited();
 }
-void Backend::exportVideo(bool gif, int w, int fps, int q, double seconds) {
+void Backend::exportVideo(bool gif, int w, int fps, int q) {
     if (m_phase != "editor")
         return;
     if (playing())
@@ -1011,9 +1023,9 @@ void Backend::exportVideo(bool gif, int w, int fps, int q, double seconds) {
     if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty())
         return;
     QString path = dialog.selectedFiles().first();
-    startExport(path, gif, w, fps, q, seconds);
+    startExport(path, gif, w, fps, q);
 }
-void Backend::startExport(QString path, bool gif, int w, int fps, int q, double seconds) {
+void Backend::startExport(QString path, bool gif, int w, int fps, int q) {
     if (m_phase != "editor" || state.spans.isEmpty() || worker.state() != QProcess::NotRunning)
         return;
     if (playing())
@@ -1034,8 +1046,7 @@ void Backend::startExport(QString path, bool gif, int w, int fps, int q, double 
                     {"width", w},
                     {"fps", fps},
                     {"crf", q},
-                    {"gif", gif},
-                    {"seconds", seconds}});
+                    {"gif", gif}});
     captureError.clear();
     workerBuffer.clear();
     exportCancelled = false;

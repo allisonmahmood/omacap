@@ -88,7 +88,7 @@ class Backend : public QObject {
     Q_INVOKABLE void chooseBackground();
     Q_INVOKABLE void chooseColor();
     Q_INVOKABLE void useWallpaper();
-    Q_INVOKABLE void exportVideo(bool gif, int width, int fps, int quality, double seconds);
+    Q_INVOKABLE void exportVideo(bool gif, int width, int fps, int quality);
     Q_INVOKABLE void cancelExport();
     Q_INVOKABLE void revealExport();
     Q_INVOKABLE void openExport();
@@ -97,7 +97,7 @@ class Backend : public QObject {
     Q_INVOKABLE QVariant preference(QString key, QVariant fallback = QVariant()) const;
     Q_INVOKABLE void remember(QString key, QVariant value);
     void testLoad(QString path);
-    void startExport(QString path, bool gif, int width, int fps, int quality, double seconds);
+    void startExport(QString path, bool gif, int width, int fps, int quality);
     QString sessionPath() const { return session; }
   signals:
     void waveformsChanged();
