@@ -72,7 +72,7 @@ class Integration : public QObject {
         b.trim(4, 5);
         const QString output = QDir::current().absoluteFilePath("tests/out/recovered-tail.mp4");
         QFile::remove(output);
-        b.startExport(output, false, 640, 30, 20, 0);
+        b.startExport(output, false, 640, 30, 20);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
         QVERIFY2(QFileInfo(output).size() > 1000, qPrintable(b.message()));
         b.discard();
@@ -415,11 +415,11 @@ class Integration : public QObject {
                 QDir::current().absoluteFilePath(QString("tests/out/split-%1.mp4").arg(fps));
             QFile::remove(before);
             QFile::remove(after);
-            b.startExport(before, false, 640, fps, 18, 0);
+            b.startExport(before, false, 640, fps, 18);
             QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 30000);
             QVERIFY(b.state.split(.337));
             QVERIFY(b.state.split(.723));
-            b.startExport(after, false, 640, fps, 18, 0);
+            b.startExport(after, false, 640, fps, 18);
             QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 30000);
             const auto original = hashes(before);
             QVERIFY(!original.isEmpty());
@@ -644,7 +644,7 @@ class Integration : public QObject {
         b.edited();
         const QString output = QDir::current().absoluteFilePath("tests/out/boundary.mp4");
         QFile::remove(output);
-        b.startExport(output, false, 640, 30, 18, 0);
+        b.startExport(output, false, 640, 30, 18);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 30000);
         auto frame = [](const QString &path, int n) {
             QProcess ffmpeg;
@@ -994,7 +994,7 @@ class Integration : public QObject {
             const QString output = QDir::current().absoluteFilePath("tests/out/parity-" + name +
                                                                     (style.gif ? ".gif" : ".mp4"));
             QFile::remove(output);
-            b.startExport(output, style.gif, style.width, 30, 18, b.duration());
+            b.startExport(output, style.gif, style.width, 30, 18);
             QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 30000);
             QProcess ffmpeg;
             ffmpeg.start("ffmpeg", {"-v", "error", "-ss", QString::number(style.sample), "-i",
@@ -1055,7 +1055,7 @@ class Integration : public QObject {
         b.state.cameraSize = .18;
         b.edited();
         b.startExport(QDir::current().absoluteFilePath("tests/out/delayed-export.mp4"), false, 640,
-                      30, 18, 0);
+                      30, 18);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 30000);
         QVERIFY2(QFileInfo("tests/out/delayed-export.mp4").size() > 1000, qPrintable(b.message()));
         b.discard();
@@ -1099,7 +1099,7 @@ class Integration : public QObject {
         QVERIFY(b.aspect() < 1.0);
         b.trim(1, 3);
         b.startExport(QDir::current().absoluteFilePath("tests/out/portal-export.mp4"), false, 1920,
-                      30, 18, 0);
+                      30, 18);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 30000);
         QVERIFY2(QFileInfo("tests/out/portal-export.mp4").size() > 10000, qPrintable(b.message()));
         b.discard();
@@ -1189,7 +1189,7 @@ class Integration : public QObject {
         QVERIFY(playback.count() > 30);
         QString out = QDir::current().absoluteFilePath("tests/out/demo.mp4");
         auto beforeExport = b.edit();
-        b.startExport(out, false, 1920, 30, 20, 0);
+        b.startExport(out, false, 1920, 30, 20);
         b.undo();
         b.setValue("padding", .2);
         b.removeRange(.1, .2);
@@ -1210,25 +1210,36 @@ class Integration : public QObject {
         QCOMPARE(video["r_frame_rate"].toString(), QString("30/1"));
         QVERIFY(std::abs(metadata["format"].toObject()["duration"].toString().toDouble() -
                          b.duration()) < .06);
-        b.startExport(QDir::current().absoluteFilePath("tests/out/demo60.mp4"), false, 1920, 60, 20,
-                      0);
+        b.startExport(QDir::current().absoluteFilePath("tests/out/demo60.mp4"), false, 1920, 60,
+                      20);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 60000);
         QVERIFY2(QFileInfo("tests/out/demo60.mp4").size() > 10000, qPrintable(b.message()));
         QFile::remove("tests/out/metrics60.json");
         QFile::copy(b.sessionPath() + "/last-export-metrics.json", "tests/out/metrics60.json");
-        b.startExport(QDir::current().absoluteFilePath("tests/out/demo.gif"), true, 640, 15, 20, 2);
+        b.startExport(QDir::current().absoluteFilePath("tests/out/demo.gif"), true, 640, 15, 20);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 60000);
         QVERIFY2(QFileInfo("tests/out/demo.gif").size() > 10000, qPrintable(b.message()));
+        // A GIF covers the whole edit, like an MP4.
+        probe.start("ffprobe",
+                    {"-v", "error", "-show_format", "-of", "json", "tests/out/demo.gif"});
+        QVERIFY(probe.waitForFinished(10000));
+        const double gifSeconds = QJsonDocument::fromJson(probe.readAllStandardOutput())
+                                      .object()["format"]
+                                      .toObject()["duration"]
+                                      .toString()
+                                      .toDouble();
+        QVERIFY2(std::abs(gifSeconds - b.duration()) < .1,
+                 qPrintable(QString("%1 vs %2").arg(gifSeconds).arg(b.duration())));
         b.setValue("shadow", .6);
         QString session = b.sessionPath();
         b.startExport(QDir::current().absoluteFilePath("tests/out/cancelled.mp4"), false, 3840, 60,
-                      18, 0);
+                      18);
         b.cancelExport();
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 6000);
         QVERIFY(!QFile::exists("tests/out/cancelled.mp4"));
         QVERIFY(b.dirty());
         b.startExport(QDir::current().absoluteFilePath("tests/out/after-cancel.mp4"), false, 3840,
-                      60, 20, 0);
+                      60, 20);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 90000);
         QVERIFY2(QFileInfo("tests/out/after-cancel.mp4").size() > 10000, qPrintable(b.message()));
         QVERIFY(QFile::exists(session + "/screen.mkv"));
