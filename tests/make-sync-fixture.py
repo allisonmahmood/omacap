@@ -139,11 +139,20 @@ run(
     str(out / "unfinished.mkv"),
 )
 
-# The captured-recording path retains camera and desktop audio as separate tracks.
+# The captured-recording path retains camera and desktop audio as separate tracks,
+# titled like capture.py's.
 run(
     "-i", str(out / "sparse-audio.mkv"),
     "-map", "0:v", "-map", "0:v", "-map", "0:a", "-map", "0:a",
+    "-metadata:s:a:0", "title=Microphone", "-metadata:s:a:1", "title=Desktop",
     "-c", "copy", str(out / "sparse-tracks.mkv"),
+)
+
+# A video with an alternative audio track, such as a second language.
+run(
+    "-i", str(out / "sparse-audio.mkv"),
+    "-map", "0:v", "-map", "0:a", "-map", "0:a",
+    "-c", "copy", str(out / "alternate-audio.mkv"),
 )
 
 # Capture was interrupted during a still tail while audio kept arriving.

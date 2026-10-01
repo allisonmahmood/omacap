@@ -34,6 +34,9 @@ ready = False
 count = 0
 exitcode = 0
 timeout_id = None
+# Reopening a saved recording finds its audio tracks by these titles. Keep them
+# single words: matroskamux stores tag values containing spaces escaped and quoted.
+TRACK_TITLES = {"mic": "Microphone", "desktop": "Desktop"}
 
 
 def emit(event, **data):
@@ -239,7 +242,7 @@ def start(result=None):
             if a.synthetic
             else f"pulsesrc name={name} do-timestamp=true"
         )
-        desc += f"{source} ! queue ! audioconvert ! audioresample ! audio/x-raw,rate=48000 ! opusenc ! queue ! mux.audio_{i} "
+        desc += f"{source} ! queue ! audioconvert ! audioresample ! audio/x-raw,rate=48000 ! opusenc ! taginject name={name}_title ! queue ! mux.audio_{i} "
     try:
         pipeline = Gst.parse_launch(desc)
         pipeline.get_by_name("output").set_property("location", str(output))
@@ -251,6 +254,10 @@ def start(result=None):
                 element.get_static_pad("src").add_probe(
                     Gst.PadProbeType.BUFFER, buffer_probe, name
                 )
+        for name, title in TRACK_TITLES.items():
+            element = pipeline.get_by_name(f"{name}_title")
+            if element:
+                element.set_property("tags", f'title="{title}"')
         gstbus = pipeline.get_bus()
         gstbus.add_signal_watch()
         gstbus.connect("message", message)

@@ -419,7 +419,8 @@ void Backend::prepare(QString path, bool captured) {
             double dur = o["format"].toObject()["duration"].toString().toDouble();
             QJsonArray streams = o["streams"].toArray();
             QJsonObject video;
-            int audioCount = 0, videoCount = 0;
+            int videoCount = 0;
+            QStringList audioTitles;
             for (auto v : streams) {
                 auto s = v.toObject();
                 if (s["codec_type"] == "video") {
@@ -427,8 +428,11 @@ void Backend::prepare(QString path, bool captured) {
                         video = s;
                     videoCount++;
                 }
-                if (s["codec_type"] == "audio")
-                    audioCount++;
+                if (s["codec_type"] == "audio") {
+                    // FFmpeg reports Matroska track names as "title", tags as "TITLE".
+                    const auto tags = s["tags"].toObject();
+                    audioTitles << tags["title"].toString(tags["TITLE"].toString());
+                }
             }
             const QString repaired = session + "/recovered.mkv";
             if (code == 0 && !video.isEmpty() && dur <= .1 && path != repaired) {
@@ -498,12 +502,12 @@ void Backend::prepare(QString path, bool captured) {
             }
             state.duration = dur;
             state.spans = {{std::min(lead, std::max(0., dur - .2)), dur}};
-            // An OmaCap recording stores the microphone and desktop audio as its
-            // first two audio tracks.
+            // OmaCap titles its capture tracks (see capture.py). In other files a second
+            // track may be another language or commentary, so only the first is used.
             if (!captured) {
                 hasCamera = false;
-                hasMic = audioCount > 0;
-                hasDesktop = audioCount > 1;
+                hasDesktop = audioTitles.contains("Desktop");
+                hasMic = hasDesktop ? audioTitles.contains("Microphone") : !audioTitles.isEmpty();
             }
             hasCamera = hasCamera && videoCount > 1;
             // A still frame lasts until the next update, not the nominal frame
@@ -1154,14 +1158,16 @@ void Backend::recover() {
             if (capture.isEmpty() || QFileInfo(recording).size() <= 1024)
                 continue;
             session = d.filePath();
-            m_original = recording;
+            // Older versions kept the capture inside the session, which discard removes.
+            if (!recording.startsWith(session + "/"))
+                m_original = recording;
             state = Edit::fromJson(capture["edit"].toObject());
             hasMic = capture["mic"].toBool();
             hasDesktop = capture["desktop"].toBool();
             hasCamera = capture["camera"].toBool();
             lead = capture["lead"].toDouble();
             m_dirty = true;
-            prepare(m_original, true);
+            prepare(recording, true);
             return;
         }
         session = d.filePath();
