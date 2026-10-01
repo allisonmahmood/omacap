@@ -851,7 +851,7 @@ ApplicationWindow {
         width: 420
 
         contentItem: Label {
-            text: "This session has unexported changes. Discard removes its temporary media."
+            text: "This session has unexported changes. " + (backend.original ? "The recording stays at " + backend.original + "." : "Discard removes its temporary media.")
             wrapMode: Text.Wrap
         }
 

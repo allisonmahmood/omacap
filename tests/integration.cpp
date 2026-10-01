@@ -11,6 +11,7 @@
 #include <QQuickItemGrabResult>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QtTest>
 #include <cmath>
@@ -177,6 +178,16 @@ class Integration : public QObject {
 #else
         QSKIP("Decoded audio continuity requires Qt 6.8");
 #endif
+    }
+    void importKeepsDesktopAudio() {
+        Theme theme;
+        Frames frames;
+        Backend b(&theme, &frames);
+        b.loadFile(QDir::current().absoluteFilePath("tests/out/sparse-tracks.mkv"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QVERIFY(!b.mic.source().isEmpty());
+        QVERIFY(!b.desktop.source().isEmpty());
+        b.discard();
     }
     void sparseRecordingSeek() {
         Theme theme;
@@ -1082,9 +1093,34 @@ class Integration : public QObject {
             QCOMPARE(b.state.windowTransparency, QString("custom"));
             QCOMPARE(b.state.windowOpacity, .73);
             QVERIFY(b.dirty());
+            QCOMPARE(b.original(), QDir::current().absoluteFilePath("tests/out/delayed.mkv"));
             b.discard();
             QVERIFY(!QDir(saved).exists());
         }
+    }
+    void interruptedCapture() {
+        Theme t;
+        Frames f;
+        const QString recording = QDir::current().absoluteFilePath("tests/out/delayed.mkv");
+        QString saved;
+        {
+            Backend b(&t, &f);
+            b.newSession();
+            saved = b.sessionPath();
+        }
+        // The editor never opened, so only the capture's own record remains.
+        QFile capture(saved + "/capture.json");
+        QVERIFY(capture.open(QIODevice::WriteOnly));
+        capture.write(QJsonDocument(QJsonObject{{"mic", true}, {"recording", recording}}).toJson());
+        capture.close();
+        Backend b(&t, &f);
+        QVERIFY(b.recoverable());
+        b.recover();
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QCOMPARE(b.original(), recording);
+        b.discard();
+        QVERIFY(!QDir(saved).exists());
+        QVERIFY(QFile::exists(recording));
     }
     void portalFixture() {
         const auto fixture = qEnvironmentVariable("OMACAP_PORTAL_FIXTURE");
@@ -1124,6 +1160,10 @@ class Integration : public QObject {
         b.stop();
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 20000);
         QVERIFY2(b.duration() > 3, qPrintable(b.message()));
+        const QString recording = b.original();
+        QCOMPARE(QFileInfo(recording).absolutePath(),
+                 QStandardPaths::writableLocation(QStandardPaths::MoviesLocation));
+        QVERIFY(QFileInfo(recording).size() > 1024);
         QTRY_VERIFY_WITH_TIMEOUT(!b.screenSource().isEmpty(), 5000);
         QTRY_VERIFY_WITH_TIMEOUT(!b.cameraSource().isEmpty(), 5000);
         QTRY_COMPARE(b.waveformData()["mic"].toMap()["status"].toString(), QString("ready"));
@@ -1246,6 +1286,7 @@ class Integration : public QObject {
         QVERIFY(b.recoverable());
         b.discard();
         QVERIFY(!QDir(session).exists());
+        QVERIFY(QFileInfo(recording).size() > 1024);
         QCOMPARE(b.phase(), QString("recorder"));
     }
 };

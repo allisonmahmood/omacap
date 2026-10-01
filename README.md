@@ -51,7 +51,7 @@ This builds the committed checkout and installs its dependencies. OmaCap targets
 
 ### 1. Record a window or display
 
-Choose your microphone, camera and desktop audio options. Click **Select source and record**, choose a window or display in the system picker, and wait for the three-second countdown. Stop recording to open the editor.
+Choose your microphone, camera and desktop audio options. Click **Select source and record**, choose a window or display in the system picker, and wait for the three-second countdown. Stop recording to open the editor. The recording is saved in your Videos folder as `omacap-<date>_<time>.mkv`.
 
 <img src="docs/images/recorder.webp" alt="OmaCap recorder with microphone, camera and desktop audio options" width="360">
 
@@ -87,7 +87,7 @@ Click **Export**, choose MP4 or GIF, set the output size and frame rate, and pic
 | Undo | Ctrl+Z |
 | Redo | Ctrl+Shift+Z |
 
-There is no saved-project format. An interrupted edit has a recovery checkpoint. Export leaves the editor open so you can export again. Closing or discarding clears the temporary session; imported originals and exported files are kept.
+There is no saved-project format. An interrupted edit has a recovery checkpoint. Export leaves the editor open so you can export again. Closing or discarding clears the edit; recordings, imported originals and exported files are kept.
 
 ## Before you record
 
