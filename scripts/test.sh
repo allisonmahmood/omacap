@@ -13,7 +13,10 @@ rm -f -- "$repo/tests/out/"{delayed-export.mp4,demo.mp4,demo60.mp4,demo.gif,canc
 # A fresh state directory prevents recovery/preferences from affecting later runs.
 test_state=$(mktemp -d)
 trap 'rm -rf -- "$test_state"' EXIT
-mkdir -p "$test_state/data" "$test_state/config" "$test_state/cache" "$test_state/tmp"
+mkdir -p "$test_state/data" "$test_state/config" "$test_state/cache" "$test_state/tmp" \
+    "$test_state/videos"
+# Recordings are saved to the Videos folder; keep test captures out of the real one.
+echo "XDG_VIDEOS_DIR=\"$test_state/videos\"" >"$test_state/config/user-dirs.dirs"
 # Synthetic audio/video and a generated wallpaper; no desktop devices are opened.
 XDG_DATA_HOME="$test_state/data" XDG_CONFIG_HOME="$test_state/config" \
     XDG_CACHE_HOME="$test_state/cache" TMPDIR="$test_state/tmp" QT_FORCE_STDERR_LOGGING=1 \

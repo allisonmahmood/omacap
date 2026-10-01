@@ -35,6 +35,10 @@ void writeJson(const QString &path, const QJsonObject &o) {
         f.commit();
     }
 }
+// Where a session's capture was written. Older sessions kept it inside the session.
+QString capturedRecording(const QString &session) {
+    return readJson(session + "/capture.json")["recording"].toString(session + "/recording.mkv");
+}
 // The status shown after an export: its size, plus a warning when a GIF is too big to
 // attach on GitHub or Discord.
 QString exportedMessage(const QString &path) {
@@ -56,6 +60,13 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
     camera.setVideoSink(&cameraSink);
     mic.setAudioOutput(&micOutput);
     desktop.setAudioOutput(&desktopOutput);
+    // An output keeps the device that was the default when it was created. Follow the
+    // system default so playback continues after headphones disconnect.
+    connect(&devices, &QMediaDevices::audioOutputsChanged, this, [this] {
+        const auto output = QMediaDevices::defaultAudioOutput();
+        micOutput.setDevice(output);
+        desktopOutput.setDevice(output);
+    });
     connect(&peaks, &Waveforms::changed, this, &Backend::waveformsChanged);
     connect(&screenSink, &QVideoSink::videoFrameChanged, this, &Backend::presentScreen);
     connect(&screen, &QMediaPlayer::seekableChanged, this, [this](bool seekable) {
@@ -174,12 +185,16 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
                 }
                 if (m_phase == "selecting" || m_phase == "countdown" || m_phase == "recording" ||
                     m_phase == "stopping") {
-                    if (QFileInfo(session + "/recording.mkv").size() > 1024) {
-                        prepare(session + "/recording.mkv", true);
-                    } else
+                    if (QFileInfo(m_original).size() > 1024) {
+                        prepare(m_original, true);
+                    } else {
+                        // Only a container header was written; don't leave it in Videos.
+                        QFile::remove(m_original);
+                        m_original.clear();
                         status("recorder", captureError.isEmpty()
                                                ? "Recording stopped before video was received."
                                                : captureError);
+                    }
                 }
             });
     connect(&worker, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) {
@@ -236,6 +251,7 @@ void Backend::newSession() {
     m_position = 0;
     m_dirty = true;
     m_lastExport.clear();
+    m_original.clear();
     snapshotWallpaper();
 }
 void Backend::snapshotWallpaper() {
@@ -272,7 +288,8 @@ void Backend::checkpoint() {
                                            {"cameraStart", cameraStart},
                                            {"sourceWidth", sourceWidth},
                                            {"dirty", m_dirty},
-                                           {"lastExport", m_lastExport}});
+                                           {"lastExport", m_lastExport},
+                                           {"original", m_original}});
 }
 void Backend::record(QString microphone, QString cam, bool desk, bool synthetic) {
     if (m_phase != "recorder")
@@ -284,9 +301,17 @@ void Backend::record(QString microphone, QString cam, bool desk, bool synthetic)
     lead = 0;
     captureError.clear();
     workerBuffer.clear();
+    // Captures are saved beside the user's other videos, outside the disposable session.
+    const QString videos = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+    QDir().mkpath(videos);
+    const QString name =
+        videos + "/omacap-" + QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss");
+    m_original = name + ".mkv";
+    for (int i = 2; QFile::exists(m_original); ++i)
+        m_original = name + QString("-%1.mkv").arg(i);
     QString script = session + "/capture.py";
     QFile::copy(":/scripts/capture.py", script);
-    QStringList args{script, "--output", session + "/recording.mkv"};
+    QStringList args{script, "--output", m_original};
     if (hasMic)
         args << "--mic" << microphone;
     if (hasCamera)
@@ -308,9 +333,11 @@ void Backend::record(QString microphone, QString cam, bool desk, bool synthetic)
         args << "--synthetic";
     status("selecting", "Choose a window or display in the system picker.");
     worker.setProcessEnvironment(QProcessEnvironment::systemEnvironment());
-    writeJson(
-        session + "/capture.json",
-        {{"mic", hasMic}, {"desktop", hasDesktop}, {"camera", hasCamera}, {"edit", state.json()}});
+    writeJson(session + "/capture.json", {{"mic", hasMic},
+                                          {"desktop", hasDesktop},
+                                          {"camera", hasCamera},
+                                          {"edit", state.json()},
+                                          {"recording", m_original}});
     ++workerRun;
     worker.start("/usr/bin/python", args);
 }
@@ -366,6 +393,7 @@ void Backend::loadFile(QString path) {
     newSession();
     captureError.clear();
     lead = 0;
+    m_original = path;
     prepare(path, false);
 }
 void Backend::testLoad(QString path) {
@@ -391,7 +419,8 @@ void Backend::prepare(QString path, bool captured) {
             double dur = o["format"].toObject()["duration"].toString().toDouble();
             QJsonArray streams = o["streams"].toArray();
             QJsonObject video;
-            int audioCount = 0, videoCount = 0;
+            int videoCount = 0;
+            QStringList audioTitles;
             for (auto v : streams) {
                 auto s = v.toObject();
                 if (s["codec_type"] == "video") {
@@ -399,8 +428,11 @@ void Backend::prepare(QString path, bool captured) {
                         video = s;
                     videoCount++;
                 }
-                if (s["codec_type"] == "audio")
-                    audioCount++;
+                if (s["codec_type"] == "audio") {
+                    // FFmpeg reports Matroska track names as "title", tags as "TITLE".
+                    const auto tags = s["tags"].toObject();
+                    audioTitles << tags["title"].toString(tags["TITLE"].toString());
+                }
             }
             const QString repaired = session + "/recovered.mkv";
             if (code == 0 && !video.isEmpty() && dur <= .1 && path != repaired) {
@@ -470,10 +502,12 @@ void Backend::prepare(QString path, bool captured) {
             }
             state.duration = dur;
             state.spans = {{std::min(lead, std::max(0., dur - .2)), dur}};
+            // OmaCap titles its capture tracks (see capture.py). In other files a second
+            // track may be another language or commentary, so only the first is used.
             if (!captured) {
                 hasCamera = false;
-                hasMic = audioCount > 0;
-                hasDesktop = false;
+                hasDesktop = audioTitles.contains("Desktop");
+                hasMic = hasDesktop ? audioTitles.contains("Microphone") : !audioTitles.isEmpty();
             }
             hasCamera = hasCamera && videoCount > 1;
             // A still frame lasts until the next update, not the nominal frame
@@ -1098,6 +1132,7 @@ void Backend::discard() {
     if (!session.isEmpty() && QFileInfo(session).absolutePath() == recoveryRoot)
         QDir(session).removeRecursively();
     session.clear();
+    m_original.clear();
     state = Edit();
     m_dirty = false;
     screenRevision = cameraRevision = 0;
@@ -1109,7 +1144,7 @@ void Backend::discard() {
 bool Backend::recoverable() const {
     for (auto d : QDir(recoveryRoot).entryList(QDir::Dirs | QDir::NoDotAndDotDot))
         if (QFile::exists(recoveryRoot + "/" + d + "/recovery.json") ||
-            QFileInfo(recoveryRoot + "/" + d + "/recording.mkv").size() > 1024)
+            QFileInfo(capturedRecording(recoveryRoot + "/" + d)).size() > 1024)
             return true;
     return false;
 }
@@ -1119,16 +1154,20 @@ void Backend::recover() {
         auto o = readJson(d.filePath() + "/recovery.json");
         if (o.isEmpty()) {
             auto capture = readJson(d.filePath() + "/capture.json");
-            if (capture.isEmpty() || QFileInfo(d.filePath() + "/recording.mkv").size() <= 1024)
+            const QString recording = capturedRecording(d.filePath());
+            if (capture.isEmpty() || QFileInfo(recording).size() <= 1024)
                 continue;
             session = d.filePath();
+            // Older versions kept the capture inside the session, which discard removes.
+            if (!recording.startsWith(session + "/"))
+                m_original = recording;
             state = Edit::fromJson(capture["edit"].toObject());
             hasMic = capture["mic"].toBool();
             hasDesktop = capture["desktop"].toBool();
             hasCamera = capture["camera"].toBool();
             lead = capture["lead"].toDouble();
             m_dirty = true;
-            prepare(session + "/recording.mkv", true);
+            prepare(recording, true);
             return;
         }
         session = d.filePath();
@@ -1139,6 +1178,7 @@ void Backend::recover() {
         sourceWidth = o["sourceWidth"].toInt(1920);
         m_dirty = o["dirty"].toBool(true);
         m_lastExport = o["lastExport"].toString();
+        m_original = o["original"].toString();
         ready();
         return;
     }

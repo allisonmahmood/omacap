@@ -11,6 +11,7 @@
 #include <QQuickItemGrabResult>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QtTest>
 #include <cmath>
@@ -177,6 +178,26 @@ class Integration : public QObject {
 #else
         QSKIP("Decoded audio continuity requires Qt 6.8");
 #endif
+    }
+    void importAudioTracks_data() {
+        QTest::addColumn<QString>("fixture");
+        QTest::addColumn<bool>("desktop");
+        QTest::newRow("omacap-recording")
+            << QDir::current().absoluteFilePath("tests/out/sparse-tracks.mkv") << true;
+        QTest::newRow("alternative-language")
+            << QDir::current().absoluteFilePath("tests/out/alternate-audio.mkv") << false;
+    }
+    void importAudioTracks() {
+        QFETCH(QString, fixture);
+        QFETCH(bool, desktop);
+        Theme theme;
+        Frames frames;
+        Backend b(&theme, &frames);
+        b.loadFile(fixture);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QVERIFY(!b.mic.source().isEmpty());
+        QCOMPARE(!b.desktop.source().isEmpty(), desktop);
+        b.discard();
     }
     void sparseRecordingSeek() {
         Theme theme;
@@ -1082,9 +1103,47 @@ class Integration : public QObject {
             QCOMPARE(b.state.windowTransparency, QString("custom"));
             QCOMPARE(b.state.windowOpacity, .73);
             QVERIFY(b.dirty());
+            QCOMPARE(b.original(), QDir::current().absoluteFilePath("tests/out/delayed.mkv"));
             b.discard();
             QVERIFY(!QDir(saved).exists());
         }
+    }
+    void interruptedCapture_data() {
+        QTest::addColumn<bool>("legacy");
+        QTest::newRow("saved-to-videos") << false;
+        QTest::newRow("inside-older-session") << true;
+    }
+    void interruptedCapture() {
+        QFETCH(bool, legacy);
+        Theme t;
+        Frames f;
+        const QString fixture = QDir::current().absoluteFilePath("tests/out/delayed.mkv");
+        QString saved;
+        {
+            Backend b(&t, &f);
+            b.newSession();
+            saved = b.sessionPath();
+        }
+        // The editor never opened, so only the capture's own record remains. Older
+        // versions wrote the capture into the session instead of recording its path.
+        QJsonObject record{{"mic", true}};
+        if (legacy)
+            QVERIFY(QFile::copy(fixture, saved + "/recording.mkv"));
+        else
+            record["recording"] = fixture;
+        QFile capture(saved + "/capture.json");
+        QVERIFY(capture.open(QIODevice::WriteOnly));
+        capture.write(QJsonDocument(record).toJson());
+        capture.close();
+        Backend b(&t, &f);
+        QVERIFY(b.recoverable());
+        b.recover();
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        // Only a recording outside the session survives discard, so only it is kept.
+        QCOMPARE(b.original(), legacy ? QString() : fixture);
+        b.discard();
+        QVERIFY(!QDir(saved).exists());
+        QVERIFY(QFile::exists(fixture));
     }
     void portalFixture() {
         const auto fixture = qEnvironmentVariable("OMACAP_PORTAL_FIXTURE");
@@ -1124,6 +1183,10 @@ class Integration : public QObject {
         b.stop();
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 20000);
         QVERIFY2(b.duration() > 3, qPrintable(b.message()));
+        const QString recording = b.original();
+        QCOMPARE(QFileInfo(recording).absolutePath(),
+                 QStandardPaths::writableLocation(QStandardPaths::MoviesLocation));
+        QVERIFY(QFileInfo(recording).size() > 1024);
         QTRY_VERIFY_WITH_TIMEOUT(!b.screenSource().isEmpty(), 5000);
         QTRY_VERIFY_WITH_TIMEOUT(!b.cameraSource().isEmpty(), 5000);
         QTRY_COMPARE(b.waveformData()["mic"].toMap()["status"].toString(), QString("ready"));
@@ -1246,7 +1309,14 @@ class Integration : public QObject {
         QVERIFY(b.recoverable());
         b.discard();
         QVERIFY(!QDir(session).exists());
+        QVERIFY(QFileInfo(recording).size() > 1024);
         QCOMPARE(b.phase(), QString("recorder"));
+        // Reopening the saved capture brings back both audio tracks.
+        b.loadFile(recording);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QVERIFY(!b.mic.source().isEmpty());
+        QVERIFY(!b.desktop.source().isEmpty());
+        b.discard();
     }
 };
 int main(int argc, char **argv) {

@@ -5,6 +5,7 @@
 #include "waveforms.h"
 #include <QAudioOutput>
 #include <QElapsedTimer>
+#include <QMediaDevices>
 #include <QMediaPlayer>
 #include <QObject>
 #include <QProcess>
@@ -36,6 +37,7 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList microphones READ microphones CONSTANT)
     Q_PROPERTY(QVariantList cameras READ cameras CONSTANT)
     Q_PROPERTY(QString lastExport READ lastExport NOTIFY changed)
+    Q_PROPERTY(QString original READ original NOTIFY changed)
   public:
     Backend(Theme *, Frames *, QObject *p = nullptr);
     ~Backend();
@@ -64,6 +66,8 @@ class Backend : public QObject {
     QVariantList microphones() const;
     QVariantList cameras() const;
     QString lastExport() const { return m_lastExport; }
+    // The recording this session edits. Discarding the session keeps it.
+    QString original() const { return m_original; }
     Q_INVOKABLE void record(QString mic, QString camera, bool desktop, bool synthetic = false);
     Q_INVOKABLE void stop();
     Q_INVOKABLE void importVideo();
@@ -119,7 +123,7 @@ class Backend : public QObject {
     double screenStart = 0, cameraStart = 0;
     friend class Integration;
     QString m_phase = "recorder", m_message, session, recoveryRoot, m_lastExport, pendingExport,
-            partialExport;
+            partialExport, m_original;
     double m_position = 0, m_aspect = 16. / 9, m_progress = 0, lead = 0;
     int sourceWidth = 1920, m_countdown = 0, screenRevision = 0, cameraRevision = 0;
     bool m_dirty = false, exportCancelled = false, hasMic = false, hasDesktop = false,
@@ -128,6 +132,7 @@ class Backend : public QObject {
     QByteArray workerBuffer;
     QMediaPlayer screen, camera, mic, desktop;
     QAudioOutput micOutput, desktopOutput;
+    QMediaDevices devices;
     QVideoSink screenSink, cameraSink;
     QProcess worker;
     Waveforms peaks;
