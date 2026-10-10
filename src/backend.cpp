@@ -21,6 +21,7 @@
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
+#include <utility>
 namespace {
 QJsonObject readJson(const QString &path) {
     QFile f(path);
@@ -49,6 +50,12 @@ QString exportedMessage(const QString &path) {
         message += " GitHub and Discord reject GIFs over 10 MB. A smaller width or frame rate "
                    "makes a smaller file.";
     return message;
+}
+// Ends the screen freeze the region picker left running, if it reported one.
+void unfreeze(const QString &pid) {
+    bool ok = false;
+    if (const int value = pid.toInt(&ok); ok && value > 0)
+        ::kill(value, SIGTERM);
 }
 // Saved screenshots go where Omarchy's do.
 QString screenshotDirectory() {
@@ -1137,6 +1144,84 @@ void Backend::outputImage(bool copy, bool save) {
     partialExport = session + "/styled.png";
     QFile::remove(partialExport);
     runExporter({{"edit", state.json()}, {"still", true}, {"sourceHeight", sourceHeight}});
+}
+void Backend::takeScreenshot() {
+    if (m_phase != "recorder")
+        return;
+    // The window hides in this phase. Hyprland's close animation takes about 150 ms;
+    // wait it out so OmaCap never appears in its own shot.
+    status("capturing");
+    QTimer::singleShot(300, this, &Backend::pickRegion);
+}
+void Backend::screenshotAtLaunch() {
+    quitOnCancel = true;
+    status("capturing");
+    pickRegion();
+}
+// Omarchy's picker freezes the screen and prints the frozen overlay's PID, then the
+// selection as "X,Y WxH", which is grim's geometry format. It exits 1 when cancelled.
+void Backend::pickRegion() {
+    auto picker = new QProcess(this);
+    connect(picker, &QProcess::errorOccurred, this, [this, picker](QProcess::ProcessError e) {
+        if (e != QProcess::FailedToStart)
+            return;
+        picker->deleteLater();
+        endCapture("Screenshots need Omarchy's region picker, omarchy-capture-region.");
+    });
+    connect(picker, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+            [this, picker](int code, QProcess::ExitStatus exit) {
+                const auto lines = QString::fromUtf8(picker->readAllStandardOutput()).split('\n');
+                picker->deleteLater();
+                const QString freeze = lines.value(0).trimmed(),
+                              geometry = lines.value(1).trimmed();
+                if (code == 0 && exit == QProcess::NormalExit && !geometry.isEmpty()) {
+                    grabRegion(geometry, freeze);
+                    return;
+                }
+                // --keep-freeze leaves the freeze running even when the pick is cancelled.
+                unfreeze(freeze);
+                endCapture({});
+            });
+    picker->start("omarchy-capture-region", {"smart", "--keep-freeze"});
+}
+// grim captures the frozen frame the selection was made on, at native scale.
+void Backend::grabRegion(const QString &geometry, const QString &freeze) {
+    newSession();
+    auto grim = new QProcess(this);
+    const auto done = [this, grim, freeze](bool ok, const QString &error) {
+        grim->deleteLater();
+        unfreeze(freeze);
+        const QImage image = ok ? QImage(session + "/source.png") : QImage();
+        if (image.isNull()) {
+            QDir(session).removeRecursively();
+            session.clear();
+            endCapture(error);
+            return;
+        }
+        quitOnCancel = false;
+        m_kind = "image";
+        showImage(image);
+    };
+    connect(grim, &QProcess::errorOccurred, this, [done](QProcess::ProcessError e) {
+        if (e == QProcess::FailedToStart)
+            done(false, "Screenshots need grim.");
+    });
+    connect(grim, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+            [grim, done](int code, QProcess::ExitStatus exit) {
+                done(code == 0 && exit == QProcess::NormalExit,
+                     ("Could not capture the screen. " +
+                      QString::fromUtf8(grim->readAllStandardError()).trimmed().right(500))
+                         .trimmed());
+            });
+    grim->start("grim", {"-g", geometry, session + "/source.png"});
+}
+// Returns to the start window. A cancelled pick from `omacap --screenshot` has no window
+// to return to, so it quits; errors stay on screen.
+void Backend::endCapture(const QString &message) {
+    const bool quit = std::exchange(quitOnCancel, false) && message.isEmpty();
+    status("recorder", message);
+    if (quit)
+        QCoreApplication::quit();
 }
 // Starts the offscreen export worker on a job. Every job renders this session's edit.
 void Backend::runExporter(const QJsonObject &job) {

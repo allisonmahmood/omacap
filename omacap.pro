@@ -1,4 +1,4 @@
-QT += core gui qml quick quickcontrols2 multimedia opengl widgets
+QT += core gui qml quick quickcontrols2 multimedia opengl widgets network
 CONFIG += c++20 console
 CONFIG -= app_bundle
 TARGET = omacap

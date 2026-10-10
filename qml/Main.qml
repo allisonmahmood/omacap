@@ -11,6 +11,7 @@ ApplicationWindow {
     property bool cropping: false
     property bool allowClose: false
     property bool closeAfterDiscard: false
+    property bool captureAfterDiscard: false
     property bool editing: backend.phase === "editor" || backend.phase === "exporting"
     // A screenshot session: no timeline, camera or audio, and Copy/Save instead of Export.
     property bool still: backend.kind === "image"
@@ -36,15 +37,16 @@ ApplicationWindow {
         backend.updateZoom(selectedZoom, a, b, x, y, amount);
     }
 
-    visible: true
+    // Hidden while the region picker runs, so OmaCap stays out of its own screenshot.
+    visible: backend.phase !== "capturing"
     title: "OmaCap"
     flags: recorderMode ? Qt.Dialog : Qt.Window
     width: recorderMode ? 520 : 1280
-    height: recorderMode ? 540 : 850
+    height: recorderMode ? 640 : 850
     minimumWidth: recorderMode ? 520 : 1000
-    minimumHeight: recorderMode ? 540 : 680
+    minimumHeight: recorderMode ? 640 : 680
     maximumWidth: recorderMode ? 520 : 1.67772e+07
-    maximumHeight: recorderMode ? 540 : 1.67772e+07
+    maximumHeight: recorderMode ? 640 : 1.67772e+07
     color: theme.colors.background
     font.family: "monospace"
     font.pixelSize: 12
@@ -115,6 +117,26 @@ ApplicationWindow {
         sequence: "Right"
         enabled: !win.still && backend.phase === "editor" && !win.cropping && !focusPicker.pressed && !exportDialog.opened && !discardDialog.opened
         onActivated: backend.seek(backend.position + 1 / 30)
+    }
+
+    // `omacap --screenshot` while OmaCap is open. An unexported edit asks first.
+    Connections {
+        function onScreenshotRequested() {
+            if (backend.phase === "recorder") {
+                backend.takeScreenshot();
+            } else if (backend.phase === "editor" && !backend.dirty) {
+                backend.discard();
+                backend.takeScreenshot();
+            } else if (backend.phase === "editor") {
+                win.closeAfterDiscard = false;
+                win.captureAfterDiscard = true;
+                discardDialog.open();
+                win.raise();
+                win.requestActivate();
+            }
+        }
+
+        target: backend
     }
 
     Shortcut {
@@ -242,6 +264,40 @@ ApplicationWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 14
+
+            ColumnLayout {
+                visible: backend.phase === "recorder"
+                Layout.fillWidth: true
+                spacing: 12
+
+                Label {
+                    text: "Take a screenshot"
+                    font.pixelSize: 20
+                }
+
+                Label {
+                    text: "Drag a region, click a window, or click empty space for the whole screen."
+                    color: theme.colors.dark_foreground
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+
+                FlatButton {
+                    objectName: "takeScreenshot"
+                    text: "Take screenshot"
+                    primary: true
+                    Layout.fillWidth: true
+                    onClicked: backend.takeScreenshot()
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.topMargin: 2
+                    height: 1
+                    color: theme.colors.lighter_background
+                }
+
+            }
 
             Label {
                 text: backend.phase === "recorder" ? "Record a demo" : backend.phase === "selecting" ? "Select a window or display" : backend.phase === "countdown" ? "Starting in " + backend.countdown : backend.phase === "recording" ? "Recording" : backend.phase === "stopping" ? "Finishing recording" : "Preparing video"
@@ -935,6 +991,7 @@ ApplicationWindow {
         modal: true
         title: "Discard this session?"
         width: 420
+        onClosed: win.captureAfterDiscard = false
 
         contentItem: Label {
             text: "This session has unexported changes. " + (backend.original ? (win.still ? "The image" : "The recording") + " stays at " + backend.original + "." : "Discard removes its temporary media.")
@@ -950,11 +1007,14 @@ ApplicationWindow {
             FlatButton {
                 text: "Discard"
                 onClicked: {
+                    const capture = win.captureAfterDiscard;
                     discardDialog.close();
                     backend.discard();
                     if (win.closeAfterDiscard) {
                         win.allowClose = true;
                         win.close();
+                    } else if (capture) {
+                        backend.takeScreenshot();
                     }
                 }
             }
