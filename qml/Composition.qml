@@ -38,7 +38,9 @@ Item {
         anchors.fill: parent
         source: scene.edit.background ? "file:" + scene.edit.background : ""
         fillMode: Image.PreserveAspectCrop
-        sourceSize.width: 1920
+        // Decode enough pixels to cover the canvas, which is larger than 1080p for
+        // screenshots and can be taller than the background.
+        sourceSize: Qt.size(Math.max(1920, scene.width), Math.max(1080, scene.height))
         asynchronous: false
     }
 

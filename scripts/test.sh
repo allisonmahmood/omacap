@@ -14,9 +14,12 @@ rm -f -- "$repo/tests/out/"{delayed-export.mp4,demo.mp4,demo60.mp4,demo.gif,canc
 test_state=$(mktemp -d)
 trap 'rm -rf -- "$test_state"' EXIT
 mkdir -p "$test_state/data" "$test_state/config" "$test_state/cache" "$test_state/tmp" \
-    "$test_state/videos"
-# Recordings are saved to the Videos folder; keep test captures out of the real one.
-echo "XDG_VIDEOS_DIR=\"$test_state/videos\"" >"$test_state/config/user-dirs.dirs"
+    "$test_state/videos" "$test_state/pictures"
+# Recordings and screenshots are saved to Videos and Pictures; keep test output out of the
+# real ones.
+printf 'XDG_VIDEOS_DIR="%s/videos"\nXDG_PICTURES_DIR="%s/pictures"\n' "$test_state" "$test_state" \
+    >"$test_state/config/user-dirs.dirs"
+unset OMARCHY_SCREENSHOT_DIR
 # Synthetic audio/video and a generated wallpaper; no desktop devices are opened.
 XDG_DATA_HOME="$test_state/data" XDG_CONFIG_HOME="$test_state/config" \
     XDG_CACHE_HOME="$test_state/cache" TMPDIR="$test_state/tmp" QT_FORCE_STDERR_LOGGING=1 \

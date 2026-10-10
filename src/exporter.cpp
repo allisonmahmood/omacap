@@ -63,12 +63,21 @@ int exportRecording(const QString &jobPath) {
         auto job = QJsonDocument::fromJson(file.readAll()).object();
         auto edit = Edit::fromJson(job["edit"].toObject());
         QString dir = job["session"].toString(), dest = job["output"].toString();
+        // A still job renders the session's screenshot once, at its native size.
+        const bool still = job["still"].toBool();
         int w = job["width"].toInt(1920), h = w * 9 / 16;
         w = w / 2 * 2;
         h = h / 2 * 2;
+        if (still) {
+            const auto size =
+                edit.stillSize({job["sourceWidth"].toInt(), job["sourceHeight"].toInt()});
+            w = size.width();
+            h = size.height();
+        }
         int fps = job["fps"].toInt(30);
         bool gif = job["gif"].toBool();
-        if (w < 320 || w > 3840 || fps < 1 || fps > 60 || edit.length() <= 0)
+        if (still ? w < 1 || h < 1 || w > 8192 || h > 8192
+                  : w < 320 || w > 3840 || fps < 1 || fps > 60 || edit.length() <= 0)
             throw std::runtime_error("Invalid export settings");
         double length = edit.length();
         int total = std::ceil(length * fps - 1e-9);
@@ -111,6 +120,30 @@ int exportRecording(const QString &jobPath) {
         root->setProperty("edit", edit.json().toVariantMap());
         double aspect = job["aspect"].toDouble(16. / 9);
         root->setProperty("sourceAspect", aspect);
+        // Callers update the scene, process events and make the context current first.
+        const auto render = [&] {
+            control.beginFrame();
+            control.polishItems();
+            control.sync();
+            control.render();
+            control.endFrame();
+            return fbo.toImage();
+        };
+        if (still) {
+            const QImage source(dir + "/source.png");
+            if (source.isNull())
+                throw std::runtime_error("Cannot read the screenshot");
+            frames->put(false, source);
+            root->setProperty("screenSource", QString("image://frames/screen/still"));
+            QCoreApplication::processEvents();
+            context.makeCurrent(&surface);
+            if (!render().convertToFormat(QImage::Format_RGB32).save(dest, "PNG"))
+                throw std::runtime_error("Could not write the PNG");
+            delete root;
+            control.invalidate();
+            event({{"event", "done"}, {"frames", 1}});
+            return 0;
+        }
         QProcess encoder;
         QStringList enc = {"-v",
                            "error",
@@ -199,12 +232,7 @@ int exportRecording(const QString &jobPath) {
                 context.makeCurrent(&surface);
                 QElapsedTimer rt;
                 rt.start();
-                control.beginFrame();
-                control.polishItems();
-                control.sync();
-                control.render();
-                control.endFrame();
-                auto image = fbo.toImage().convertToFormat(QImage::Format_RGBA8888);
+                auto image = render().convertToFormat(QImage::Format_RGBA8888);
                 renderMs += rt.nsecsElapsed() / 1e6;
                 encoder.write(reinterpret_cast<const char *>(image.constBits()),
                               image.sizeInBytes());

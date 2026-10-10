@@ -53,7 +53,7 @@ ColumnLayout {
         }
 
         Label {
-            text: "Crop recording"
+            text: backend.kind === "image" ? "Crop screenshot" : "Crop recording"
             color: theme.colors.dark_foreground
         }
 
