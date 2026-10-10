@@ -1067,11 +1067,12 @@ class Integration : public QObject {
         const QString source = dir.path() + "/shot.png";
         QVERIFY(shot.save(source));
         // A stand-in wl-copy records what Copy sends, leaving the real clipboard alone.
-        const QString clipboard = dir.path() + "/clipboard.png";
+        const QString clipboard = dir.path() + "/clipboard.png", slow = dir.path() + "/slow";
         QFile fake(dir.path() + "/wl-copy");
         QVERIFY(fake.open(QIODevice::WriteOnly));
-        fake.write(QString("#!/bin/sh\n[ \"$*\" = \"--type image/png\" ] && cat > '%1'\n")
-                       .arg(clipboard)
+        fake.write(QString("#!/bin/sh\n[ -e '%2' ] && sleep 1\n"
+                           "[ \"$*\" = \"--type image/png\" ] && cat > '%1'\n")
+                       .arg(clipboard, slow)
                        .toUtf8());
         fake.close();
         fake.setPermissions(fake.permissions() | QFileDevice::ExeOwner);
@@ -1108,7 +1109,8 @@ class Integration : public QObject {
             const QSize size = b.stillSize();
             QTRY_COMPARE(composition->height(), 1920 / b.canvasAspect());
             QTest::qWait(100);
-            auto grab = composition->grabToImage(QSize(1920, qRound(composition->height())));
+            auto grab = composition->grabToImage(
+                QSize(qRound(composition->width()), qRound(composition->height())));
             QVERIFY(grab);
             QSignalSpy ready(grab.data(), &QQuickItemGrabResult::ready);
             QVERIFY(ready.wait(5000));
@@ -1145,11 +1147,70 @@ class Integration : public QObject {
                 win->grabWindow().save("tests/out/preview-screenshot-editor.png");
             }
         }
+        // Save and Copy are independent: an unusable screenshot folder still copies.
+        qputenv("OMARCHY_SCREENSHOT_DIR", (source + "/folder").toUtf8());
+        auto restoreFolder = qScopeGuard([] { qunsetenv("OMARCHY_SCREENSHOT_DIR"); });
+        QFile::remove(clipboard);
         b.setValue("padding", .1);
+        b.outputImage(true, true);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
+        QVERIFY2(b.message().startsWith("Copied to the clipboard. Could not save"),
+                 qPrintable(b.message()));
+        QVERIFY(QFile::exists(clipboard));
+        QVERIFY(!b.dirty());
+        // A slow clipboard doesn't hold up the editor while it finishes.
+        QVERIFY(QFile(slow).open(QIODevice::WriteOnly));
+        QElapsedTimer beat;
+        qint64 longest = 0;
+        QTimer heartbeat;
+        heartbeat.setInterval(10);
+        connect(&heartbeat, &QTimer::timeout, [&] { longest = std::max(longest, beat.restart()); });
+        beat.start();
+        heartbeat.start();
+        b.outputImage(true, false);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
+        heartbeat.stop();
+        QCOMPARE(b.message(), QString("Copied to the clipboard."));
+        QVERIFY2(longest < 500, qPrintable(QString::number(longest)));
+        b.setValue("padding", .12);
         QVERIFY(b.dirty());
         b.discard();
         QCOMPARE(b.kind(), QString("video"));
         QVERIFY(QFile::exists(source));
+    }
+    void tallScreenshot() {
+        QTemporaryDir dir;
+        QImage shot(160, 4000, QImage::Format_RGB32);
+        shot.fill(QColor("#336699"));
+        QVERIFY(shot.save(dir.path() + "/tall.png"));
+        Theme theme;
+        QQmlApplicationEngine engine;
+        auto frames = new Frames;
+        engine.addImageProvider("frames", frames);
+        Backend b(&theme, frames);
+        b.loadFile(dir.path() + "/tall.png");
+        QCOMPARE(b.kind(), QString("image"));
+        // Earlier tests leave a remembered canvas; a tall shot needs auto.
+        b.setValue("canvas", "auto");
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &b);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
+        auto cleanup = qScopeGuard([&] { delete win; });
+        QVERIFY(QTest::qWaitForWindowExposed(win));
+        // The preview stays within 1920 px however tall the shot, and renders.
+        auto composition = win->findChild<QQuickItem *>("composition");
+        QVERIFY(composition);
+        QTRY_COMPARE(composition->height(), 1920.);
+        QVERIFY(composition->width() < 100);
+        QTest::qWait(200);
+        b.outputImage(false, true);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
+        QVERIFY(b.stillSize().height() > 4000);
+        QCOMPARE(QImage(b.lastExport()).size(), b.stillSize());
+        QFile::remove(b.lastExport());
+        b.discard();
     }
     void animatedImageOpensAsVideo() {
         QTemporaryDir dir;

@@ -38,9 +38,9 @@ Item {
         anchors.fill: parent
         source: scene.edit.background ? "file:" + scene.edit.background : ""
         fillMode: Image.PreserveAspectCrop
-        // Decode enough pixels to cover the canvas, which is larger than 1080p for
-        // screenshots and can be taller than the background.
-        sourceSize: Qt.size(Math.max(1920, scene.width), Math.max(1080, scene.height))
+        // Cover screenshot canvases larger than 1080p, but cap the decode at 4K: a very
+        // tall or wide canvas would otherwise demand an enormous image.
+        sourceSize: Qt.size(Math.min(3840, Math.max(1920, scene.width)), Math.min(2160, Math.max(1080, scene.height)))
         asynchronous: false
     }
 

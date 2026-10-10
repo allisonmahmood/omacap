@@ -429,9 +429,10 @@ ApplicationWindow {
                             id: composition
 
                             objectName: "composition"
-                            width: 1920
-                            height: 1920 / fit.aspect
-                            scale: fit.width / 1920
+                            // At most 1920 px on its longer side, however tall the shot.
+                            width: fit.aspect >= 1 ? 1920 : 1920 * fit.aspect
+                            height: width / fit.aspect
+                            scale: fit.width / width
                             transformOrigin: Item.TopLeft
                             edit: backend.edit
                             screenSource: win.still || backend.duration > 0 ? backend.screenSource : ""

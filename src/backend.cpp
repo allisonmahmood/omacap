@@ -1166,7 +1166,8 @@ void Backend::finishStill(int code) {
                              : captureError);
         return;
     }
-    QString saved;
+    // Save and Copy are independent: either can fail without stopping the other.
+    QString saved, saveError;
     if (saveStill) {
         const QString dir = screenshotDirectory();
         QDir().mkpath(dir);
@@ -1175,37 +1176,54 @@ void Backend::finishStill(int code) {
         saved = name + ".png";
         for (int i = 2; QFile::exists(saved); ++i)
             saved = name + QString("-%1.png").arg(i);
-        if (!QFile::copy(partialExport, saved)) {
-            status("editor", "Could not save the screenshot in " + dir + ".");
-            return;
+        if (QFile::copy(partialExport, saved))
+            m_lastExport = saved;
+        else {
+            saved.clear();
+            saveError = "Could not save the screenshot in " + dir + ".";
         }
-        m_lastExport = saved;
     }
-    bool copied = false;
-    if (copyStill) {
-        // wl-copy serves the clipboard from its own background process, so the image
-        // stays available after OmaCap closes.
-        QProcess copy;
-        copy.setStandardInputFile(partialExport);
-        copy.setStandardOutputFile(QProcess::nullDevice());
-        copy.setStandardErrorFile(QProcess::nullDevice());
-        copy.start("wl-copy", {"--type", "image/png"});
-        copied = copy.waitForFinished(5000) && copy.exitStatus() == QProcess::NormalExit &&
-                 copy.exitCode() == 0;
-        if (copy.state() != QProcess::NotRunning)
-            copy.kill();
+    const auto report = [this, saved, saveError](bool copied) {
+        const QString file = QFileInfo(saved).fileName();
+        QStringList parts;
+        if (copied && !saved.isEmpty())
+            parts << "Copied and saved " + file + ".";
+        else if (copied)
+            parts << "Copied to the clipboard.";
+        else if (!saved.isEmpty())
+            parts << "Saved " + file + ".";
+        if (!saveError.isEmpty())
+            parts << saveError;
+        if (copyStill && !copied)
+            parts << "Could not copy to the clipboard.";
+        if (copied || !saved.isEmpty())
+            m_dirty = state.json() != exportedEdit;
+        checkpoint();
+        status("editor", parts.join(' '));
+    };
+    if (!copyStill) {
+        report(false);
+        return;
     }
-    if (copied || !saved.isEmpty())
-        m_dirty = state.json() != exportedEdit;
-    checkpoint();
-    const QString file = QFileInfo(saved).fileName();
-    if (copyStill && !copied)
-        status("editor", saved.isEmpty() ? "Could not copy to the clipboard."
-                                         : "Saved " + file + ". Could not copy to the clipboard.");
-    else if (copyStill && !saved.isEmpty())
-        status("editor", "Copied and saved " + file + ".");
-    else
-        status("editor", copyStill ? "Copied to the clipboard." : "Saved " + file + ".");
+    // wl-copy serves the clipboard from its own background process, so the image stays
+    // available after OmaCap closes. A stalled one is killed rather than holding the editor.
+    auto copy = new QProcess(this);
+    copy->setStandardInputFile(partialExport);
+    copy->setStandardOutputFile(QProcess::nullDevice());
+    copy->setStandardErrorFile(QProcess::nullDevice());
+    connect(copy, &QProcess::errorOccurred, this, [copy, report](QProcess::ProcessError e) {
+        if (e != QProcess::FailedToStart)
+            return;
+        copy->deleteLater();
+        report(false);
+    });
+    connect(copy, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+            [copy, report](int code, QProcess::ExitStatus exit) {
+                copy->deleteLater();
+                report(exit == QProcess::NormalExit && code == 0);
+            });
+    QTimer::singleShot(5000, copy, [copy] { copy->kill(); });
+    copy->start("wl-copy", {"--type", "image/png"});
 }
 void Backend::cancelExport() {
     if (m_phase == "exporting") {
