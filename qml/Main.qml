@@ -122,6 +122,11 @@ ApplicationWindow {
     // `omacap --screenshot` while OmaCap is open. An unexported edit asks first.
     Connections {
         function onScreenshotRequested() {
+            // The new shot replaces this session, and its dialogs go with it.
+            if (backend.phase === "editor") {
+                exportDialog.close();
+                win.cropping = false;
+            }
             if (backend.phase === "recorder") {
                 backend.takeScreenshot();
             } else if (backend.phase === "editor" && !backend.dirty) {
@@ -986,6 +991,8 @@ ApplicationWindow {
 
     Dialog {
         id: discardDialog
+
+        objectName: "discardDialog"
 
         anchors.centerIn: parent
         modal: true

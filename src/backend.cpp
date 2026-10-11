@@ -12,6 +12,7 @@
 #include <QJsonDocument>
 #include <QLocale>
 #include <QMediaDevices>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QUrl>
@@ -21,6 +22,7 @@
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <utility>
 namespace {
 QJsonObject readJson(const QString &path) {
@@ -50,12 +52,6 @@ QString exportedMessage(const QString &path) {
         message += " GitHub and Discord reject GIFs over 10 MB. A smaller width or frame rate "
                    "makes a smaller file.";
     return message;
-}
-// Ends the screen freeze the region picker left running, if it reported one.
-void unfreeze(const QString &pid) {
-    bool ok = false;
-    if (const int value = pid.toInt(&ok); ok && value > 0)
-        ::kill(value, SIGTERM);
 }
 // Saved screenshots go where Omarchy's do.
 QString screenshotDirectory() {
@@ -222,6 +218,7 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
     });
 }
 Backend::~Backend() {
+    endFreeze();
     if (worker.state() != QProcess::NotRunning) {
         if (m_phase == "exporting")
             worker.terminate();
@@ -1158,39 +1155,54 @@ void Backend::screenshotAtLaunch() {
     status("capturing");
     pickRegion();
 }
-// Omarchy's picker freezes the screen and prints the frozen overlay's PID, then the
-// selection as "X,Y WxH", which is grim's geometry format. It exits 1 when cancelled.
+// Omarchy's picker freezes the screen, then prints the selection last, as "X,Y WxH":
+// grim's geometry format. It exits 1 when the pick is cancelled. --keep-freeze leaves the
+// freeze running so grim captures the frame the selection was made on.
 void Backend::pickRegion() {
     auto picker = new QProcess(this);
+    // Its own process group holds the freeze and slurp, so ending the group ends exactly
+    // what this pick started, without trusting a PID it prints.
+    picker->setChildProcessModifier([] { ::setpgid(0, 0); });
+    connect(picker, &QProcess::started, this,
+            [this, picker] { captureGroup = pid_t(picker->processId()); });
     connect(picker, &QProcess::errorOccurred, this, [this, picker](QProcess::ProcessError e) {
         if (e != QProcess::FailedToStart)
             return;
         picker->deleteLater();
         endCapture("Screenshots need Omarchy's region picker, omarchy-capture-region.");
     });
-    connect(picker, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
-            [this, picker](int code, QProcess::ExitStatus exit) {
-                const auto lines = QString::fromUtf8(picker->readAllStandardOutput()).split('\n');
-                picker->deleteLater();
-                const QString freeze = lines.value(0).trimmed(),
-                              geometry = lines.value(1).trimmed();
-                if (code == 0 && exit == QProcess::NormalExit && !geometry.isEmpty()) {
-                    grabRegion(geometry, freeze);
-                    return;
-                }
-                // --keep-freeze leaves the freeze running even when the pick is cancelled.
-                unfreeze(freeze);
-                endCapture({});
-            });
+    connect(
+        picker, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+        [this, picker](int code, QProcess::ExitStatus exit) {
+            static const QRegularExpression region("^-?\\d+,-?\\d+ \\d+x\\d+$");
+            const auto lines =
+                QString::fromUtf8(picker->readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
+            const QString error = QString::fromUtf8(picker->readAllStandardError()).trimmed();
+            picker->deleteLater();
+            const QString geometry = lines.isEmpty() ? QString() : lines.last().trimmed();
+            if (exit == QProcess::NormalExit && code == 0 && region.match(geometry).hasMatch()) {
+                grabRegion(geometry);
+                return;
+            }
+            endFreeze();
+            const bool cancelled = exit == QProcess::NormalExit && code == 1;
+            endCapture(cancelled ? QString()
+                                 : ("The region picker failed. " + error.right(500)).trimmed());
+        });
     picker->start("omarchy-capture-region", {"smart", "--keep-freeze"});
 }
+void Backend::endFreeze() {
+    if (captureGroup > 0)
+        ::killpg(captureGroup, SIGTERM);
+    captureGroup = 0;
+}
 // grim captures the frozen frame the selection was made on, at native scale.
-void Backend::grabRegion(const QString &geometry, const QString &freeze) {
+void Backend::grabRegion(const QString &geometry) {
     newSession();
     auto grim = new QProcess(this);
-    const auto done = [this, grim, freeze](bool ok, const QString &error) {
+    const auto done = [this, grim](bool ok, const QString &error) {
         grim->deleteLater();
-        unfreeze(freeze);
+        endFreeze();
         const QImage image = ok ? QImage(session + "/source.png") : QImage();
         if (image.isNull()) {
             QDir(session).removeRecursively();

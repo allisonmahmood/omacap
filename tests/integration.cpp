@@ -1219,7 +1219,8 @@ class Integration : public QObject {
         shot.fill(QColor("#336699"));
         QVERIFY(shot.save(dir.path() + "/shot.png"));
         // Stand-ins for Omarchy's picker and grim. The picker starts a "freeze" that must
-        // be ended afterwards, and records whether OmaCap's window was showing.
+        // be ended afterwards. Marker files make it cancel, fail, hang, garble its output,
+        // or report someone else's PID.
         const auto tool = [&](const QString &name, const QString &body) {
             QFile f(dir.path() + "/" + name);
             QVERIFY(f.open(QIODevice::WriteOnly));
@@ -1228,12 +1229,20 @@ class Integration : public QObject {
             f.setPermissions(f.permissions() | QFileDevice::ExeOwner);
         };
         const QString d = dir.path();
-        tool("omarchy-capture-region", QString("echo \"$@\" > '%1/picker-args'\n"
-                                               "sleep 30 & echo $! > '%1/freeze'\n"
-                                               "cat '%1/freeze'\n"
-                                               "[ -e '%1/cancel' ] && exit 1\n"
-                                               "echo '10,20 300x200'\n")
-                                           .arg(d));
+        tool("omarchy-capture-region",
+             QString("echo \"$@\" > '%1/picker-args'\n"
+                     "sleep 30 & echo $! > '%1/freeze'\n"
+                     "if [ -e '%1/liar' ]; then cat '%1/liar'; else cat '%1/freeze'; fi\n"
+                     "[ -e '%1/hang' ] && wait\n"
+                     "[ -e '%1/cancel' ] && exit 1\n"
+                     "[ -e '%1/fail' ] && { echo boom >&2; exit 2; }\n"
+                     "[ -e '%1/garbled' ] && { echo 'not a region'; exit 0; }\n"
+                     "echo '10,20 300x200'\n")
+                 .arg(d));
+        const auto mark = [&](const QString &name, bool on) {
+            QFile f(d + "/" + name);
+            QVERIFY(on ? f.open(QIODevice::WriteOnly) : (!f.exists() || f.remove()));
+        };
         tool("grim", QString("echo \"$@\" > '%1/grim-args'\ncp '%1/shot.png' \"$3\"\n").arg(d));
         const auto path = qgetenv("PATH");
         qputenv("PATH", d.toUtf8() + ":" + path);
@@ -1280,7 +1289,7 @@ class Integration : public QObject {
         b.discard();
 
         // A cancelled pick returns to the start window and still ends the freeze.
-        QVERIFY(QFile(d + "/cancel").open(QIODevice::WriteOnly));
+        mark("cancel", true);
         QFile::remove(d + "/freeze");
         b.takeScreenshot();
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recorder"), 5000);
@@ -1288,6 +1297,62 @@ class Integration : public QObject {
         QVERIFY(b.sessionPath().isEmpty());
         QVERIFY(b.message().isEmpty());
         QTRY_VERIFY(freezeEnded());
+        mark("cancel", false);
+
+        // Only the picker's own process group is signalled, never a PID it reports.
+        QProcess bystander;
+        bystander.start("sleep", {"30"});
+        QVERIFY(bystander.waitForStarted());
+        auto stopBystander = qScopeGuard([&] {
+            bystander.kill();
+            bystander.waitForFinished();
+        });
+        QFile liar(d + "/liar");
+        QVERIFY(liar.open(QIODevice::WriteOnly));
+        liar.write(QByteArray::number(bystander.processId()) + "\n");
+        liar.close();
+        b.takeScreenshot();
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 5000);
+        QTRY_VERIFY(freezeEnded());
+        QCOMPARE(bystander.state(), QProcess::Running);
+        b.discard();
+        mark("liar", false);
+
+        // Picker failures are reported rather than passed off as a cancel.
+        for (const QString failure : {"fail", "garbled"}) {
+            mark(failure, true);
+            b.takeScreenshot();
+            QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recorder"), 5000);
+            QVERIFY2(b.message().startsWith("The region picker failed."), qPrintable(b.message()));
+            QVERIFY(failure != "fail" || b.message().contains("boom"));
+            QTRY_VERIFY(freezeEnded());
+            mark(failure, false);
+        }
+
+        // Quitting mid-pick ends the freeze as well.
+        mark("hang", true);
+        QFile::remove(d + "/freeze");
+        {
+            Frames f;
+            Backend quitting(&theme, &f);
+            quitting.takeScreenshot();
+            QTRY_VERIFY(QFile(d + "/freeze").size() > 0);
+        }
+        QTRY_VERIFY(freezeEnded());
+        mark("hang", false);
+
+        // A request from a second `omacap --screenshot` closes a video's export dialog.
+        b.loadFile(QDir::current().absoluteFilePath("tests/out/delayed.mkv"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        auto exportDialog = win->findChild<QObject *>("exportDialog");
+        QVERIFY(exportDialog);
+        QMetaObject::invokeMethod(exportDialog, "open");
+        QTRY_VERIFY(exportDialog->property("opened").toBool());
+        emit b.screenshotRequested();
+        QTRY_VERIFY(!exportDialog->property("opened").toBool());
+        QTRY_VERIFY(win->findChild<QObject *>("discardDialog")->property("opened").toBool());
+        QMetaObject::invokeMethod(win->findChild<QObject *>("discardDialog"), "close");
+        b.discard();
 
         // Without the picker, the start window says what is missing.
         qputenv("PATH", "/nonexistent");

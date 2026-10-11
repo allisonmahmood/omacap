@@ -14,6 +14,7 @@
 #include <QVideoFrame>
 #include <QVideoSink>
 #include <memory>
+#include <sys/types.h>
 class Backend : public QObject {
     Q_OBJECT
     Q_PROPERTY(QVariantMap waveforms READ waveformData NOTIFY waveformsChanged)
@@ -181,7 +182,10 @@ class Backend : public QObject {
     void runExporter(const QJsonObject &job);
     void finishStill(int code);
     void pickRegion();
-    void grabRegion(const QString &geometry, const QString &freeze);
+    void grabRegion(const QString &geometry);
+    // Ends the running pick's process group, which holds the screen freeze.
+    void endFreeze();
+    pid_t captureGroup = 0;
     void endCapture(const QString &message);
     void ready();
     void openPlayers();
