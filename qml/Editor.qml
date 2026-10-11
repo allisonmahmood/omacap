@@ -242,7 +242,8 @@ FocusScope {
         x: 30
         y: toolbar.y + toolbar.height + 18
         width: parent.width - 60
-        height: parent.height - y - 18
+        // The status pill sits below.
+        height: parent.height - y - 60
         source: backend.screenSource
         sourceAspect: backend.aspect
         onAccepted: (crop) => {

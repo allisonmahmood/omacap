@@ -39,7 +39,8 @@ FocusScope {
     }
 
     function time(t) {
-        return Math.floor(t / 60) + ":" + Math.floor(t % 60).toString().padStart(2, "0");
+        const seconds = Math.round(t);
+        return Math.floor(seconds / 60) + ":" + (seconds % 60).toString().padStart(2, "0");
     }
 
     objectName: "card"
@@ -188,7 +189,7 @@ FocusScope {
 
             anchors.centerIn: parent
             // "Export complete. 1.2 MB." gives the size; a GIF over 10 MB is marked.
-            text: card.exporting ? "Exporting " + Math.round(Math.min(1, backend.progress / 0.9) * 100) + "%" : card.exported ? (backend.message.indexOf("10 MB") >= 0 ? "⚠ " : "✓ ") + backend.message.split(". ")[1] : "▶ " + card.time(backend.duration)
+            text: card.exporting ? "Exporting " + Math.round(Math.min(1, backend.progress / 0.9) * 100) + "%" : card.exported ? (backend.message.indexOf("10 MB") >= 0 ? "⚠ " : "✓ ") + backend.message.split(". ")[1].replace(/\.$/, "") : "▶ " + card.time(backend.duration)
             font: theme.mono(10, true)
             color: card.exported && backend.message.indexOf("10 MB") >= 0 ? theme.warning : theme.foreground
         }

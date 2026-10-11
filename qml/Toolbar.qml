@@ -48,7 +48,7 @@ Row {
     ChromeButton {
         objectName: "backdropButton"
         icon: "background"
-        tooltip: "Backdrop · B"
+        tooltip: toolbar.popover === "backdrop" ? "" : "Backdrop · B"
         selected: toolbar.popover === "backdrop"
         enabled: toolbar.editable
         onClicked: toolbar.triggered("backdrop")
@@ -57,7 +57,7 @@ Row {
     ChromeButton {
         objectName: "frameButton"
         icon: "frame"
-        tooltip: "Frame: padding, corners, shadow · F"
+        tooltip: toolbar.popover === "frame" ? "" : "Frame: padding, corners, shadow · F"
         selected: toolbar.popover === "frame"
         enabled: toolbar.editable
         onClicked: toolbar.triggered("frame")
@@ -66,7 +66,7 @@ Row {
     ChromeButton {
         objectName: "glassButton"
         icon: "glass"
-        tooltip: "Window transparency · G"
+        tooltip: toolbar.popover === "glass" ? "" : "Window transparency · G"
         selected: toolbar.popover === "glass"
         enabled: toolbar.editable
         onClicked: toolbar.triggered("glass")
@@ -75,7 +75,7 @@ Row {
     ChromeButton {
         objectName: "cameraButton"
         icon: "person"
-        tooltip: toolbar.hasCamera ? "Camera · P" : "Camera · this recording has none"
+        tooltip: toolbar.popover === "camera" ? "" : toolbar.hasCamera ? "Camera · P" : "Camera · this recording has none"
         selected: toolbar.popover === "camera"
         enabled: toolbar.editable && toolbar.hasCamera
         onClicked: toolbar.triggered("camera")
@@ -105,7 +105,7 @@ Row {
     ChromeButton {
         objectName: "zoomButton"
         icon: "zoom"
-        tooltip: toolbar.zoomSelected ? "Zoom amount · Z adds another" : "Add a zoom at the playhead · Z"
+        tooltip: toolbar.popover === "zoom" ? "" : "Zoom · Z adds one at the playhead"
         selected: toolbar.zoomSelected || toolbar.popover === "zoom"
         enabled: toolbar.editable
         onClicked: toolbar.triggered("zoom")
@@ -126,7 +126,7 @@ Row {
     ChromeButton {
         objectName: "exportButton"
         icon: "export"
-        tooltip: "Export · E"
+        tooltip: toolbar.popover === "export" ? "" : "Export · E"
         primary: true
         selected: toolbar.popover === "export"
         onClicked: toolbar.triggered("export")

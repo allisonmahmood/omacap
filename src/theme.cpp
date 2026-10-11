@@ -18,9 +18,12 @@ QString themeRoot() {
 Theme::Theme(QObject *parent)
     : QObject(parent), root(themeRoot()), watcher(root + "/theme") {
     connect(&watcher, &ChromeThemeWatcher::changed, this, [this] {
-        // Choosers are Qt widget dialogs; style them as Omasnap does.
-        if (auto app = qobject_cast<QApplication *>(QCoreApplication::instance()))
-            app->setStyleSheet(chrome().tooltipStyleSheet() + chrome().fileDialogStyleSheet());
+        // Choosers are Qt widget dialogs; style them as Omasnap styles its file chooser.
+        if (auto app = qobject_cast<QApplication *>(QCoreApplication::instance())) {
+            const QString files = chrome().fileDialogStyleSheet();
+            app->setStyleSheet(chrome().tooltipStyleSheet() + files +
+                               QString(files).replace("QFileDialog", "QColorDialog"));
+        }
         emit changed();
     });
 }

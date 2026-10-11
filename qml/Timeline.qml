@@ -230,6 +230,11 @@ FocusScope {
             Item {
                 id: ruler
 
+                // The roundest interval that gives at most six ticks.
+                readonly property real tick: [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600].find((step) => {
+                    return backend.duration / step <= 6;
+                }) ?? 1200
+
                 Layout.fillWidth: true
                 height: 18
 
@@ -241,13 +246,14 @@ FocusScope {
                 }
 
                 Repeater {
-                    model: 7
+                    model: backend.duration > 0 ? Math.floor(backend.duration / ruler.tick + 1e-6) + 1 : 0
 
                     Text {
                         required property int index
+                        readonly property real at: index * ruler.tick
 
-                        x: index / 6 * (ruler.width - width)
-                        text: timeline.time(index / 6 * backend.duration)
+                        x: Math.max(0, Math.min(ruler.width - width, at / backend.duration * ruler.width - width / 2))
+                        text: Math.floor(at / 60) + ":" + (ruler.tick < 1 ? (at % 60).toFixed(1).padStart(4, "0") : Math.floor(at % 60).toString().padStart(2, "0"))
                         font: theme.mono(10)
                         color: theme.alpha(theme.foreground, 128)
                     }

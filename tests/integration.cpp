@@ -880,6 +880,8 @@ class Integration : public QObject {
             if (child->metaObject()->indexOfProperty("handle") >= 0)
                 slider = child;
         QVERIFY(slider);
+        // The opacity row has only just appeared; hit-test it once it is laid out.
+        QTRY_VERIFY(slider->width() > 100);
         const auto start = slider->mapToScene(QPointF(slider->width() * .8, slider->height() / 2));
         const auto end = slider->mapToScene(QPointF(slider->width() * .4, slider->height() / 2));
         QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, start.toPoint());
