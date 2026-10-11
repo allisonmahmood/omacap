@@ -114,28 +114,23 @@ FocusScope {
         fill: theme.surface
     }
 
-    // The styled first frame, rounded like the card.
-    Item {
+    // The styled first frame, rounded like the card. Drawn at its own size and mipmapped, so
+    // a tenth of it is still smooth.
+    Composition {
         id: thumbnail
 
-        anchors.fill: parent
         visible: false
         layer.enabled: true
-
-        Composition {
-            width: 1920
-            height: 1080
-            scale: thumbnail.width / 1920
-            transformOrigin: Item.TopLeft
-            edit: backend.edit
-            screenSource: card.recovery ? "" : backend.screenSource
-            cameraSource: card.recovery ? "" : backend.cameraSource
-            sourceAspect: backend.aspect
-            zoom: backend.zoom
-            focusX: backend.focusX
-            focusY: backend.focusY
-        }
-
+        layer.textureSize: Qt.size(width, height)
+        layer.mipmap: true
+        layer.smooth: true
+        edit: backend.edit
+        screenSource: card.recovery ? "" : backend.screenSource
+        cameraSource: card.recovery ? "" : backend.cameraSource
+        sourceAspect: backend.aspect
+        zoom: backend.zoom
+        focusX: backend.focusX
+        focusY: backend.focusY
     }
 
     Rectangle {
