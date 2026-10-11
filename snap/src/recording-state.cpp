@@ -22,23 +22,6 @@
 #include <utility>
 
 namespace {
-/// The processes the marker names, one decimal PID per line. Empty when
-/// there is no marker or it names nothing. The writer replaces it whole
-/// (rename), so a line is never half a PID.
-QList<qint64> markerPids() {
-  QFile marker(recordingMarkerPath());
-  if (!marker.open(QIODevice::ReadOnly))
-    return {};
-  QList<qint64> pids;
-  for (const QByteArray &line : marker.readAll().split('\n')) {
-    bool ok = false;
-    const qint64 pid = line.trimmed().toLongLong(&ok);
-    if (ok && pid > 0 && !pids.contains(pid))
-      pids.append(pid);
-  }
-  return pids;
-}
-
 int openPidfd(qint64 pid) {
   return static_cast<int>(::syscall(SYS_pidfd_open, pid, 0));
 }
@@ -77,7 +60,7 @@ void retire(QSocketNotifier *exit) {
 }
 } // namespace
 
-bool recordingInProgress() { return std::ranges::any_of(markerPids(), alive); }
+bool recordingInProgress() { return std::ranges::any_of(recordingMarkerPids(), alive); }
 
 RecordingWatcher::RecordingWatcher(QObject *parent) : QObject(parent) {
   files_.addPath(omacapRuntimeDir());
@@ -108,7 +91,7 @@ void RecordingWatcher::refresh() {
   // spinning on it.
   QHash<qint64, QSocketNotifier *> watched;
   bool unwatched = false;
-  for (const qint64 pid : markerPids()) {
+  for (const qint64 pid : recordingMarkerPids()) {
     QSocketNotifier *exit = exits_.take(pid);
     if (!exit) {
       const int fd = openPidfd(pid);
