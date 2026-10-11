@@ -19,6 +19,7 @@
 #include <QObject>
 #include <QRectF>
 #include <QScopeGuard>
+#include <QStandardPaths>
 #include <QString>
 #include <QStringList>
 #include <QWidget>
@@ -43,6 +44,8 @@
 #include <QtTest/qtestkeyboard.h>
 
 #include <memory>
+
+#include <sys/stat.h>
 
 namespace {
 template <typename Predicate> bool waitUntil(Predicate ready) {
@@ -87,6 +90,47 @@ bool runSaveAsSmoke(QString &error) {
   replacement.fill(Qt::blue);
   if (!savePngFile(replacement, target, error) || QImage(target).convertToFormat(QImage::Format_ARGB32) != replacement) {
     error = QStringLiteral("Save As did not atomically replace existing PNG");
+    return false;
+  }
+  // Saved screenshots are for sharing: a new file gets the umask's
+  // permissions, as any program's would, and a replaced one keeps its own.
+  // A quick save moves a private working snapshot into place, so it too.
+  const mode_t mask = ::umask(0);
+  ::umask(mask);
+  const auto mode = [](const QString &path) {
+    struct stat info {};
+    return ::stat(QFile::encodeName(path).constData(), &info) == 0
+               ? info.st_mode & 0777
+               : 0u;
+  };
+  const QString snapshot = temporarySnapshotPath();
+  if (mode(target) != (0666 & ~mask) ||
+      !saveTemporarySnapshot(original, snapshot, error) || mode(snapshot) != 0600) {
+    error = QStringLiteral("Save As or a working snapshot had the wrong permissions: %1")
+                .arg(mode(target), 0, 8);
+    return false;
+  }
+  {
+    const QByteArray previousScreenshots = qgetenv("OMACAP_SCREENSHOT_DIR");
+    qputenv("OMACAP_SCREENSHOT_DIR", directory.path().toUtf8());
+    // The move reads the real config path; keep the developer's out of it.
+    QStandardPaths::setTestModeEnabled(true);
+    const auto restoreScreenshots = qScopeGuard([&] {
+      QStandardPaths::setTestModeEnabled(false);
+      previousScreenshots.isNull()
+          ? qunsetenv("OMACAP_SCREENSHOT_DIR")
+          : qputenv("OMACAP_SCREENSHOT_DIR", previousScreenshots);
+    });
+    const QString quick = moveSnapshotToScreenshots(snapshot, error);
+    const auto removeQuick = qScopeGuard([&] { QFile::remove(quick); });
+    if (quick.isEmpty() || mode(quick) != (0666 & ~mask)) {
+      error = QStringLiteral("A quick save kept its snapshot's private permissions");
+      return false;
+    }
+  }
+  if (::chmod(QFile::encodeName(target).constData(), 0640) != 0 ||
+      !savePngFile(replacement, target, error) || mode(target) != 0640) {
+    error = QStringLiteral("Replacing a file changed its permissions");
     return false;
   }
   if (savePngFile({}, target, error) || error.isEmpty() ||

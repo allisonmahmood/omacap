@@ -1551,16 +1551,33 @@ QString suggestedScreenshotPath(const QString &appSlug) {
   return suggestedScreenshotPathImpl(appSlug);
 }
 
+namespace {
+// The umask, read before main() while nothing else can be creating files:
+// reading it means setting it for a moment.
+const mode_t kUmask = [] {
+  const mode_t mask = ::umask(0);
+  ::umask(mask);
+  return mask;
+}();
+
+/// A working snapshot is private; the screenshot it becomes is for sharing,
+/// with the permissions any new file of the user's would have.
+QString shareScreenshot(const QString &path) {
+  ::chmod(QFile::encodeName(path).constData(), 0666 & ~kUmask);
+  return path;
+}
+} // namespace
+
 QString moveSnapshotToScreenshots(const QString &sourcePath, QString &error,
                                   const QString &appSlug) {
   const QString targetPath = screenshotTargetPath(error, appSlug);
   if (targetPath.isEmpty())
     return {};
   if (QFile::rename(sourcePath, targetPath))
-    return targetPath;
+    return shareScreenshot(targetPath);
   if (QFile::copy(sourcePath, targetPath)) {
     QFile::remove(sourcePath);
-    return targetPath;
+    return shareScreenshot(targetPath);
   }
   error = QStringLiteral("Could not move screenshot snapshot to: %1")
               .arg(targetPath);
@@ -1572,7 +1589,7 @@ QString copySnapshotToScreenshots(const QString &sourcePath, QString &error) {
   if (targetPath.isEmpty())
     return {};
   if (QFile::copy(sourcePath, targetPath))
-    return targetPath;
+    return shareScreenshot(targetPath);
   error = QStringLiteral("Could not save screenshot to: %1").arg(targetPath);
   return {};
 }
@@ -1791,10 +1808,13 @@ bool saveTemporarySnapshot(const QImage &image, QString path, QString &error) {
     return false;
   }
 
-  return savePngFile(image, path, error);
+  // Working snapshots are private, like the directory they are in.
+  return savePngFile(image, path, error,
+                     QFileDevice::ReadOwner | QFileDevice::WriteOwner);
 }
 
-bool savePngFile(const QImage &image, const QString &path, QString &error) {
+bool savePngFile(const QImage &image, const QString &path, QString &error,
+                 QFileDevice::Permissions permissions) {
   if (image.isNull() || path.isEmpty()) {
     error = QStringLiteral("Cannot save an empty image or filename");
     return false;
@@ -1802,7 +1822,8 @@ bool savePngFile(const QImage &image, const QString &path, QString &error) {
   QSaveFile file(path);
   file.setDirectWriteFallback(false);
   if (!file.open(QIODevice::WriteOnly) ||
-      !file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
+      (permissions != QFileDevice::Permissions() &&
+       !file.setPermissions(permissions))) {
     error = QStringLiteral("Could not open PNG file: %1")
                 .arg(file.errorString());
     return false;
