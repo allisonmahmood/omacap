@@ -65,12 +65,15 @@ make that hold:
   request is checked against `hyprctl -j monitors` first: one whose monitor changed since the
   area was picked is refused ("The display changed; pick the area again."), and the state it
   matched is what the worker watches. Hyprland sends no event for these changes, so the
-  worker asks its socket about the monitor every 250 ms. It holds encoded frames back for a
-  second, and a screen frame leaves that hold only once an answer asked for after the frame
-  was rendered still matched: an answer that differs ends the recording at the last one that
-  didn't, and answers that stop coming end it there too. Qt's notice of a change, when it
-  comes, makes the chrome transparent and hides it at once. A notification says why the
-  recording ended once the capture has ended.
+  worker asks its socket about the monitor every 100 ms (about 0.2 ms of work each, on either
+  side). It holds encoded frames back for a second, and a screen frame leaves that hold only
+  once an answer asked for after the frame was rendered still matched: an answer that differs
+  ends the recording at the last one that didn't, and answers that stop coming end it there
+  too. Qt's notice of a change, when it comes, makes the chrome transparent and hides it at
+  once. A notification says why the recording ended once the capture has ended. One window
+  remains: a change undone between two answers, within 100 ms, is never seen by the worker,
+  and the frames from it are kept. Qt's notice still hides the chrome and ends the recording
+  for any change it sees, but it misses flips.
 - **A clean first frame.** The countdown is drawn over the area. When it ends, it is
   repainted fully transparent (an unmapped surface would fade out on screen), and once the
   compositor has applied that, its monotonic time is the cut. XDPH stamps every frame with
@@ -88,12 +91,20 @@ make that hold:
   has exited.
 - **Notifications.** None is sent while the marker lists a running process. A `record` or
   `open` refused during a capture is shown by the video process once it has ended. One shown
-  just before a capture could still be up, so every OmaCap process sends them with
-  `omarchy-notification-send -p` and lists the id it prints in `notificationIdsPath()`, under
-  a lock on that file (`sendNotification()`). A recording takes the ids as soon as its marker
-  is written and closes each over D-Bus before showing anything. Omarchy's shell keeps a closed
-  toast up until it expires, five seconds after it appeared, so the countdown also lasts until
-  six seconds after the newest.
+  just before a capture could still be up, so every OmaCap process lists each in
+  `notificationIdsPath()` under a lock on that file (`sendNotification()`): `?` before sending
+  with `omarchy-notification-send -p`, which is given two seconds, then the id it prints. A
+  recording takes the list as soon as its marker is written. A sender that holds the lock past
+  its bound leaves the list unknown, so the recording refuses to start instead ("OmaCap is busy
+  showing a notification; try again."). Then it takes the toasts down before showing anything.
+  Omarchy's shell ignores a close, and keeps a toast up for as long as it is hovered, so the
+  recording runs `omarchy-shell notifications dismiss OmaCap`: it takes down every toast whose
+  summary holds "OmaCap", hovered or not, and every OmaCap notification's summary is "OmaCap".
+  Each id is also closed over D-Bus, for other daemons. Only when the dismiss isn't answered
+  does the countdown also last until six seconds after the newest, when Omarchy's shell lets a
+  toast nobody hovers expire. A `?` with no id after it (a send that timed out) may yet reach a
+  slow daemon, so it extends the countdown either way. A toast hovered through the countdown
+  under a daemon that neither answers the dismiss nor honours a close can still be recorded.
 - **Other windows.** Starting a recording ends the session, which closes the editor and
   card, and ends an offer to recover an earlier edit. `VideoStage` hides anything still
   open when the phase becomes `countdown`, at least three seconds before the first kept
