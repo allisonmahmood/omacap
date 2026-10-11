@@ -1311,8 +1311,8 @@ class Integration : public QObject {
                                                    {"description", "Screenrecording"}}})),
                  QString());
     }
-    // The marker exists from the first countdown frame until capture ends; a cancelled
-    // countdown leaves no recording behind.
+    // The marker lists this process and the worker from the request until the worker has
+    // exited; a cancelled countdown leaves no recording behind.
     void recordingLifecycle() {
         Theme t;
         Frames f;
@@ -1322,9 +1322,10 @@ class Integration : public QObject {
         const QString marker = recordingMarkerPath();
         QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
         QCOMPARE(b.phase(), QString("countdown"));
-        QFile pid(marker);
-        QVERIFY(pid.open(QIODevice::ReadOnly));
-        QCOMPARE(pid.readAll().trimmed().toLongLong(), QCoreApplication::applicationPid());
+        const QList<qint64> pids = recordingMarkerPids();
+        QCOMPARE(pids.size(), 2);
+        QCOMPARE(pids[0], QCoreApplication::applicationPid());
+        QVERIFY(processRunning(pids[1]));
         QVERIFY(!b.startRecording(syntheticRequest(), true).isEmpty());
         const QString cancelled = b.original();
         b.stop();
@@ -1337,10 +1338,12 @@ class Integration : public QObject {
 
         QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recording"), 15000);
-        QVERIFY(QFile::exists(marker));
+        const qint64 worker = recordingMarkerPids().value(1);
+        QVERIFY(processRunning(worker));
         QTest::qWait(1000);
         b.stop();
         QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(marker), 10000);
+        QVERIFY(!processRunning(worker));
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 20000);
         QCOMPARE(finished.count(), 1);
         QVERIFY(b.duration() > .5 && b.duration() < 2.5);
@@ -1367,6 +1370,18 @@ class Integration : public QObject {
         b.stop();
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
         QFile::remove(first);
+    }
+    // Without a marker, nothing would keep OmaCap's other surfaces out of the recording.
+    void unwritableMarker() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        QVERIFY(QDir().mkpath(recordingMarkerPath())); // can't be replaced by a file
+        const QString error = b.startRecording(syntheticRequest(), true);
+        QVERIFY(QDir().rmdir(recordingMarkerPath()));
+        QVERIFY2(error.startsWith("OmaCap can't record: "), qPrintable(error));
+        QCOMPARE(b.phase(), QString("idle"));
+        QVERIFY(b.sessionPath().isEmpty());
     }
     // Quitting mid-recording finalizes the file, which the next run recovers.
     void quitWhileRecording() {

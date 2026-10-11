@@ -182,6 +182,9 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
         if (recorded) {
             captureError = error;
             announceRecording = true;
+            // A recording that ended early says why; the card shows no messages.
+            if (!error.isEmpty())
+                emit backgroundError(error);
             prepare(m_original, true);
             return;
         }
@@ -375,7 +378,11 @@ QString Backend::startRecording(const RecordRequest &request, bool synthetic) {
                                           {"camera", hasCamera},
                                           {"edit", state.json()},
                                           {"recording", m_original}});
-    recorder.start(request, m_original, synthetic);
+    if (const QString problem = recorder.start(request, m_original, synthetic);
+        !problem.isEmpty()) {
+        discard();
+        return problem;
+    }
     return {};
 }
 void Backend::parseWorker() {

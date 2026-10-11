@@ -27,6 +27,13 @@ const QSize hudSize(124, 40), countdownSize(300, 150);
 // The HUD's stop button, in HUD coordinates.
 const QRect stopButton(89, 5, 30, 30);
 
+QScreen *screenNamed(const QString &name) {
+    for (QScreen *screen : QGuiApplication::screens())
+        if (screen->name() == name)
+            return screen;
+    return nullptr;
+}
+
 QString themeDirectory() {
     const QString root = qEnvironmentVariable("OMACAP_THEME_ROOT");
     return root.isEmpty() ? chromeThemeDirectory() : root + "/theme";
@@ -157,6 +164,12 @@ RecordingChrome::RecordingChrome(const RecordRequest &request, const QString &st
             }
         });
     }
+    // Surfaces keep their place in logical pixels, relative to their monitor. A new scale,
+    // size or rotation maps that place to other native pixels, perhaps in the encoded area. A
+    // monitor that only moves maps it to the same ones.
+    watch(screenNamed(request.monitor));
+    if (layout.hudMonitor != request.monitor)
+        watch(screenNamed(layout.hudMonitor));
     countdown = add(request.monitor, layout.countdown, false,
                     [this](QPainter &painter, const QRect &bounds) {
                         if (!cleared)
@@ -173,13 +186,33 @@ RecordingChrome::~RecordingChrome() = default;
 
 ChromeSurface *RecordingChrome::add(const QString &monitor, const QRect &global, bool input,
                                     Paint paint) {
-    for (QScreen *screen : QGuiApplication::screens())
-        if (screen->name() == monitor) {
-            surfaces.push_back(
-                std::make_unique<ChromeSurface>(screen, global, input, std::move(paint)));
-            return surfaces.back().get();
-        }
-    return nullptr;
+    QScreen *screen = screenNamed(monitor);
+    if (!screen)
+        return nullptr;
+    surfaces.push_back(std::make_unique<ChromeSurface>(
+        screen, global, input,
+        [this, paint = std::move(paint)](QPainter &painter, const QRect &bounds) {
+            if (!concealed)
+                paint(painter, bounds);
+        }));
+    return surfaces.back().get();
+}
+
+void RecordingChrome::watch(QScreen *screen) {
+    if (!screen)
+        return;
+    const auto shape = [screen] {
+        return std::tuple(screen->geometry().size(), screen->devicePixelRatio(),
+                          screen->orientation());
+    };
+    const auto check = [this, shape, before = shape()] {
+        if (shape() != before)
+            emit displayChanged();
+    };
+    connect(screen, &QScreen::geometryChanged, this, check);
+    connect(screen, &QScreen::orientationChanged, this, check);
+    connect(screen, &QScreen::logicalDotsPerInchChanged, this, check);
+    connect(screen, &QScreen::physicalDotsPerInchChanged, this, check);
 }
 
 void RecordingChrome::showCountdown(int remaining) {
@@ -218,6 +251,19 @@ void RecordingChrome::hide() {
     tick.stop();
     for (auto &surface : surfaces)
         surface->hide();
+}
+
+void RecordingChrome::conceal() {
+    concealed = true;
+    bool painted = false;
+    for (auto &surface : surfaces)
+        if (surface->isVisible()) {
+            surface->repaint();
+            painted = true;
+        }
+    if (painted)
+        roundTrip();
+    hide();
 }
 
 bool RecordingChrome::owns(const QWindow *window) const {

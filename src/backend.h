@@ -138,7 +138,8 @@ class Backend : public QObject {
     // when the last session failed (fail()), else 0. Checked once the current call has
     // returned, so a session on its way to another is not mistaken for none.
     void exitRequested(int code);
-    // Something failed while no card or editor is open to say so.
+    // Something failed while no card or editor is open to say so, or a recording ended early
+    // (it is kept, and the card shows no messages).
     void backgroundError(const QString &message);
 
   private:
