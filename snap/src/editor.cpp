@@ -7630,10 +7630,12 @@ void CaptureEditor::paintEdit(QPainter &painter) {
     // Spotlights sample the complete composed canvas. Build that source only
     // when one is present; a dragged preview may temporarily make it larger
     // than the settled canvas, so its opening stays live beyond the old edge.
+    // The screenshot alone is that canvas only while nothing frames it: with
+    // zero padding, glass or corners still show the backdrop through it.
     const QRectF spotlightCanvas = canvas.rect;
-    const bool spotlightGrown = spotlightCanvas !=
-                                QRectF(QPointF(), selection_.size());
-    if (spotlightGrown) {
+    const bool composed = matLayout.styled ||
+                          spotlightCanvas != QRectF(QPointF(), selection_.size());
+    if (composed) {
       const qreal pixelScale = editScale() * devicePixelRatioF();
       const QSize canvasPixels(
           std::max(1, qCeil(spotlightCanvas.width() * pixelScale)),

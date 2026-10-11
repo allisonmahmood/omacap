@@ -298,6 +298,56 @@ bool checkCardPainting(QString &error) {
   }
   return true;
 }
+/// With zero padding the canvas is the card, yet glass still shows the
+/// backdrop through it: a spotlight magnifies that, on screen as in the
+/// export.
+bool checkSpotlightOverGlass(QApplication &application, QString &error) {
+  const CaptureData capture = solidCapture({200, 120}, 1.0, Qt::black);
+  Operation styled;
+  styled.type = Operation::Type::Look;
+  styled.look.backdrop = BackgroundStyle::Solid;
+  styled.look.color = Qt::white;
+  styled.look.padding = 0.0;
+  styled.look.shadow = 0.0;
+  styled.look.glass = Glass::Custom;
+  styled.look.opacity = 0.5;
+  Annotation spotlight;
+  spotlight.id = 1;
+  spotlight.kind = Annotation::Kind::Spotlight;
+  spotlight.start = {40, 30};
+  spotlight.end = {160, 90};
+  spotlight.magnification = 2.0;
+  Operation annotate;
+  annotate.type = Operation::Type::Annotate;
+  annotate.annotations = {spotlight};
+  OperationLog log;
+  log.ops = {styled, annotate};
+  log.index = 2;
+  log.nextId = 2;
+  log.previewSize = capture.previewSize;
+  CaptureEditor editor(capture, CaptureEditor::CaptureMode::File,
+                       QuickOutputMode::None, log);
+  editor.setSuppressSnapshots(true);
+  editor.resize(800, 600);
+  editor.show();
+  application.processEvents();
+  const QPointF center(100, 60);
+  const QColor exported = editor.renderCurrentOutput().pixelColor(center.toPoint());
+  const QImage shown = editor.grab().toImage();
+  const QColor seen = shown.pixelColor(
+      (editor.annotationPointToWidgetForTest(center) * shown.devicePixelRatio())
+          .toPoint());
+  editor.close();
+  if (std::abs(exported.red() - 128) > 3 ||
+      std::abs(seen.red() - exported.red()) > 3) {
+    error = QStringLiteral("A spotlight over glass magnified %1 in the editor "
+                           "but %2 in the export")
+                .arg(seen.name(), exported.name());
+    return false;
+  }
+  return true;
+}
+
 /// The toolbar's look popovers: hovering a look button opens its popover;
 /// a slider drag previews live and is one undo step; segments and swatches
 /// commit at once.
@@ -403,5 +453,7 @@ bool checkPopovers(QApplication &application, QString &error) {
 
 bool runLookSmoke(QApplication &application, QString &error) {
   return checkLayoutMaths(error) && checkLookPersistence(application, error) &&
-         checkCardPainting(error) && checkPopovers(application, error);
+         checkCardPainting(error) &&
+         checkSpotlightOverGlass(application, error) &&
+         checkPopovers(application, error);
 }
