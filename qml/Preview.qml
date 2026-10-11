@@ -9,11 +9,18 @@ Item {
     property int zoomIndex: -1
     readonly property bool aiming: zoomIndex >= 0 && !backend.playing
     readonly property alias composition: composition
+    // Where the styled recording is drawn, in the parent's coordinates.
+    readonly property rect picture: Qt.rect(x + fit.x, y + fit.y, fit.width, fit.height)
 
     // A click on the recording itself, outside the camera and the aim.
     signal clicked()
     // A press on the zoom aim, which keeps that zoom selected.
     signal aimPressed()
+
+    // Ends a gesture still running on the preview, before undo or redo steps past it.
+    function settle() {
+        aim.settle();
+    }
 
     Item {
         id: fit
@@ -81,6 +88,8 @@ Item {
         }
 
         ZoomAim {
+            id: aim
+
             anchors.fill: parent
             visible: preview.aiming
             index: preview.zoomIndex

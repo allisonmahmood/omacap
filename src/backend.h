@@ -59,9 +59,10 @@ class Backend : public QObject {
     double focusX() const;
     double focusY() const;
     double progress() const { return m_progress; }
-    // Edits made since the last export, which closing or replacing the session would lose.
-    // The recording itself is kept either way.
-    bool dirty() const { return m_dirty && (!past.isEmpty() || recoveredEdits); }
+    // Edits made since the last export, which closing or replacing the session would lose:
+    // the edit differs from the one last loaded or exported, however undo got it there. The
+    // recording itself is kept either way.
+    bool dirty() const { return state.json() != savedEdit; }
     // Whether an earlier session left an unfinished edit or recording behind. Static, so
     // `omacap --record` can ask before a video process runs (once the app's name is set).
     static bool recoverable();
@@ -148,6 +149,9 @@ class Backend : public QObject {
     QVector<Edit> past, future;
     bool grouping = false;
     QJsonObject groupBefore, exportedEdit;
+    // The edit as last loaded or exported. Empty for a recovered edit that had unsaved
+    // changes, which stays dirty until it is exported.
+    QJsonObject savedEdit;
     quint64 workerRun = 0;
     double screenStart = 0, cameraStart = 0;
     friend class Integration;
@@ -155,9 +159,8 @@ class Backend : public QObject {
             partialExport, m_original;
     double m_position = 0, m_aspect = 16. / 9, m_progress = 0;
     int sourceWidth = 1920, sourceHeight = 1080, screenRevision = 0, cameraRevision = 0;
-    bool m_dirty = false, exportCancelled = false, hasMic = false, hasDesktop = false,
-         hasCamera = false, uiOpen = false, announceRecording = false, recoveredEdits = false,
-         failed = false;
+    bool exportCancelled = false, hasMic = false, hasDesktop = false, hasCamera = false,
+         uiOpen = false, announceRecording = false, failed = false;
     std::function<void(bool)> pendingReplace;
     QString captureError;
     QByteArray workerBuffer;

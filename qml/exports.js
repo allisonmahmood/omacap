@@ -13,13 +13,22 @@ function remembered(backend, key, count) {
     return index >= 0 && index < count ? index : 0;
 }
 
+// Each format remembers its own width and frame rate.
+function widthIndex(backend, format) {
+    return remembered(backend, "export/widthIndex" + format, widths[format].length);
+}
+
+function rateIndex(backend, format) {
+    return remembered(backend, "export/fpsIndex" + format, rates[format].length);
+}
+
 // The remembered settings, as VideoStage's chooseExport and exportNow take them.
 function current(backend) {
     const format = remembered(backend, "export/format", formats.length);
     return {
         "gif": format === 1,
-        "width": Number(widths[format][remembered(backend, "export/widthIndex" + format, widths[format].length)]),
-        "fps": Number(rates[format][remembered(backend, "export/fpsIndex" + format, rates[format].length)]),
+        "width": Number(widths[format][widthIndex(backend, format)]),
+        "fps": Number(rates[format][rateIndex(backend, format)]),
         "quality": crf[remembered(backend, "export/quality", qualities.length)]
     };
 }

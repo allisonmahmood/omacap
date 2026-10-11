@@ -9,8 +9,9 @@ Popover {
 
     readonly property bool exporting: backend.phase === "exporting"
     property int format: Exports.remembered(backend, "export/format", Exports.formats.length)
-    property int widthIndex: Exports.remembered(backend, "export/widthIndex" + format, Exports.widths[format].length)
-    property int rateIndex: Exports.remembered(backend, "export/fpsIndex" + format, Exports.rates[format].length)
+    // Per format, as each remembers its own: what is shown is what exports.
+    property var widthIndex: Exports.formats.map((_, f) => Exports.widthIndex(backend, f))
+    property var rateIndex: Exports.formats.map((_, f) => Exports.rateIndex(backend, f))
     property int quality: Exports.remembered(backend, "export/quality", Exports.qualities.length)
 
     title: "Export"
@@ -38,10 +39,11 @@ Popover {
 
         ChromeSegmented {
             options: Exports.widths[popover.format]
-            current: options[popover.widthIndex]
+            current: Exports.widths[popover.format][popover.widthIndex[popover.format]]
             onPicked: (option) => {
-                popover.widthIndex = options.indexOf(option);
-                backend.remember("export/widthIndex" + popover.format, popover.widthIndex);
+                const index = options.indexOf(option);
+                popover.widthIndex = popover.widthIndex.map((old, f) => f === popover.format ? index : old);
+                backend.remember("export/widthIndex" + popover.format, index);
             }
         }
 
@@ -52,11 +54,13 @@ Popover {
         label: "Frame rate"
 
         ChromeSegmented {
+            namePrefix: "rate"
             options: Exports.rates[popover.format]
-            current: options[popover.rateIndex]
+            current: Exports.rates[popover.format][popover.rateIndex[popover.format]]
             onPicked: (option) => {
-                popover.rateIndex = options.indexOf(option);
-                backend.remember("export/fpsIndex" + popover.format, popover.rateIndex);
+                const index = options.indexOf(option);
+                popover.rateIndex = popover.rateIndex.map((old, f) => f === popover.format ? index : old);
+                backend.remember("export/fpsIndex" + popover.format, index);
             }
         }
 

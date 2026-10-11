@@ -39,6 +39,15 @@ Item {
         aimAt(view.x + view.width / 2, view.y + view.height / 2, Math.max(1, Math.min(4, next)));
     }
 
+    // Ends a run of wheel notches now, before undo or redo steps past it, so its timer can't
+    // end whatever edit comes next.
+    function settle() {
+        if (!wheelRun.running)
+            return;
+        wheelRun.stop();
+        backend.endEdit();
+    }
+
     // Dims everything around the view.
     Repeater {
         model: [Qt.rect(0, 0, aim.width, aim.view.y), Qt.rect(0, aim.view.y + aim.view.height, aim.width, aim.height - aim.view.y - aim.view.height), Qt.rect(0, aim.view.y, aim.view.x, aim.view.height), Qt.rect(aim.view.x + aim.view.width, aim.view.y, aim.width - aim.view.x - aim.view.width, aim.view.height)]
@@ -131,7 +140,7 @@ Item {
                     if (!pressed)
                         return;
                     const point = mapToItem(aim, mouse.x, mouse.y);
-                    const half = Math.max(Math.abs(point.x - aim.view.x - aim.view.width / 2), Math.abs(point.y - aim.view.y - aim.view.height / 2) * 16 / 9);
+                    const half = Math.max(Math.abs(point.x - aim.view.x - aim.view.width / 2), Math.abs(point.y - aim.view.y - aim.view.height / 2) * aim.frame.width / aim.frame.height);
                     aim.changeAmount(aim.frame.width / Math.max(1, 2 * half));
                 }
                 onReleased: backend.endEdit()

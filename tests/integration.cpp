@@ -617,6 +617,24 @@ class Integration : public QObject {
         }
         QTRY_VERIFY(std::abs(b.state.zooms[0].amount - 2.1) < .001);
         QTRY_COMPARE_WITH_TIMEOUT(b.past.size(), beforeWheel + 1, 1000);
+        // Undo within a run undoes the run. Its timer then ends nothing: a press held past it
+        // stays one open edit, and redo still restores the run.
+        QWheelEvent notch(at(.5, .5), win->mapToGlobal(at(.5, .5)), {}, {0, 120}, Qt::NoButton,
+                          Qt::NoModifier, Qt::NoScrollPhase, false);
+        QGuiApplication::sendEvent(win, &notch);
+        QVERIFY(std::abs(b.state.zooms[0].amount - 2.2) < .001);
+        QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(b.state.zooms.size(), 1);
+        QVERIFY(std::abs(b.state.zooms[0].amount - 2.1) < .001);
+        const auto view =
+            aim->mapToScene(aim->parentItem()->property("view").toRectF().center()).toPoint();
+        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, view);
+        QTest::qWait(500);
+        QVERIFY(b.grouping);
+        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, view);
+        QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+        QVERIFY(std::abs(b.state.zooms[0].amount - 2.2) < .001);
+        b.undo();
         // Clicking footage keeps the aim, ends aiming and seeks.
         click(track, .8);
         QVERIFY(!aim->isVisible());
@@ -926,6 +944,47 @@ class Integration : public QObject {
         QCOMPARE(b.state.windowTransparency, QString("off"));
         b.discard();
     }
+    // Each format shows its own remembered width and frame rate, which are what it exports.
+    void exportChoices() {
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
+        b.newSession();
+        b.status("editor");
+        QTRY_VERIFY(s.stage.editorWindow());
+        auto win = s.stage.editorWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(win));
+        QTest::qWait(100);
+        auto click = [&](const QString &name) {
+            auto button = find(win->contentItem(), name);
+            QVERIFY(button);
+            QTest::mouseClick(
+                win, Qt::LeftButton, Qt::NoModifier,
+                button->mapToScene(QPointF(button->width() / 2, button->height() / 2)).toPoint());
+            QTest::qWait(40);
+        };
+        const auto chosen = [&](const QString &name) {
+            auto segment = find(win->contentItem(), name);
+            return segment && segment->property("chosen").toBool();
+        };
+        b.remember("export/fpsIndex1", 0);
+        click("exportButton");
+        click("formatMP4");
+        click("rate60");
+        click("formatGIF");
+        QVERIFY(chosen("rate15"));
+        click("rate20");
+        click("formatMP4");
+        QVERIFY(chosen("rate60"));
+        click("formatGIF");
+        QVERIFY(chosen("rate20"));
+        QCOMPARE(b.preference("export/fpsIndex1").toInt(), 2);
+        // The defaults again, for the exports after this.
+        click("formatMP4");
+        click("rate30");
+        b.remember("export/fpsIndex1", 0);
+        b.discard();
+    }
     void cropEditor_data() {
         QTest::addColumn<double>("aspect");
         QTest::newRow("landscape") << 16. / 9;
@@ -1206,6 +1265,29 @@ class Integration : public QObject {
             b.discard();
             QVERIFY(!QDir(saved).exists());
         }
+    }
+    // Unsaved edits are those since the last export, however undo and redo reach them.
+    void undoAfterExport() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        b.loadFile(QDir::current().absoluteFilePath("tests/out/delayed.mkv"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QVERIFY(!b.dirty());
+        b.setValue("padding", .12);
+        QVERIFY(b.dirty());
+        const QString out = QDir::current().absoluteFilePath("tests/out/undo-export.mp4");
+        QFile::remove(out);
+        b.startExport(out, false, 640, 30, 28);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 30000);
+        QVERIFY2(QFileInfo(out).size() > 1000, qPrintable(b.message()));
+        QVERIFY(!b.dirty());
+        b.undo();
+        QVERIFY(b.past.isEmpty());
+        QVERIFY(b.dirty());
+        b.redo();
+        QVERIFY(!b.dirty());
+        b.discard();
     }
     void interruptedCapture_data() {
         QTest::addColumn<bool>("legacy");
