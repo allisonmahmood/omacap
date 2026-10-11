@@ -45,6 +45,11 @@ QString capturedRecording(const QString &session) {
 bool screenshotSession(const QString &session) {
     return readJson(session + "/recovery.json")["kind"] == "image";
 }
+// Where sessions live while they are edited. Discarding one removes it; one left behind by a
+// crash is offered for recovery.
+QString scratchRoot() {
+    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/scratch";
+}
 // The status shown after an export: its size, plus a warning when a GIF is too big to
 // attach on GitHub or Discord.
 QString exportedMessage(const QString &path) {
@@ -58,8 +63,7 @@ QString exportedMessage(const QString &path) {
 }
 } // namespace
 Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames(f) {
-    recoveryRoot =
-        QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/scratch";
+    recoveryRoot = scratchRoot();
     QDir().mkpath(recoveryRoot);
     chmod(qPrintable(recoveryRoot), 0700);
     screen.setVideoSink(&screenSink);
@@ -144,6 +148,12 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
                 m_message = "Playback: " + e;
                 emit changed();
             });
+    exitCheck.setSingleShot(true);
+    exitCheck.setInterval(0);
+    connect(&exitCheck, &QTimer::timeout, this, [this] {
+        if (!uiOpen && m_phase == "idle")
+            emit exitRequested();
+    });
     seekTimer.setInterval(35);
     seekTimer.setSingleShot(true);
     connect(&seekTimer, &QTimer::timeout, this, &Backend::applySeek);
@@ -163,13 +173,8 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
             return;
         }
         // Nothing was recorded, so there is nothing to recover either.
-        QDir(session).removeRecursively();
-        session.clear();
-        m_original.clear();
-        if (error.isEmpty()) {
-            status("idle");
-            exitIfUnused();
-        } else
+        discard();
+        if (!error.isEmpty())
             fail(error);
     });
     connect(&worker, &QProcess::readyReadStandardOutput, this, &Backend::parseWorker);
@@ -178,7 +183,6 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
             [this](int code, QProcess::ExitStatus) {
                 parseWorker();
                 if (m_phase == "exporting") {
-                    const auto done = qScopeGuard([this] { exitIfUnused(); });
                     if (exportCancelled) {
                         QFile::remove(partialExport);
                         status("editor", "Export cancelled.");
@@ -224,22 +228,19 @@ Backend::~Backend() {
 void Backend::status(QString p, QString m) {
     m_phase = p;
     m_message = m;
+    if (p == "idle")
+        exitCheck.start();
     emit changed();
 }
-// A failure that leaves nothing open. With no editor to show it, the owner reports it.
 void Backend::fail(const QString &message) {
     status("idle", message);
     if (!uiOpen)
         emit backgroundError(message);
-    exitIfUnused();
 }
-void Backend::exitIfUnused() {
-    if (!uiOpen && (m_phase == "idle" || m_phase == "editor"))
-        emit exitRequested();
-}
-void Backend::uiClosed() {
-    uiOpen = false;
-    exitIfUnused();
+void Backend::setUiOpen(bool open) {
+    uiOpen = open;
+    if (!open)
+        exitCheck.start();
 }
 void Backend::confirmReplace(std::function<void(bool)> answer) {
     if (m_phase == "idle" || (m_phase == "editor" && !unsavedEdits()))
@@ -346,8 +347,6 @@ QString Backend::startRecording(const RecordRequest &request, bool synthetic) {
                                           {"camera", hasCamera},
                                           {"edit", state.json()},
                                           {"recording", m_original}});
-    // The card or editor hides for the countdown, and a new one opens when it is done.
-    uiOpen = false;
     recorder.start(request, m_original, synthetic);
     return {};
 }
@@ -373,13 +372,6 @@ void Backend::parseWorker() {
 void Backend::stop() {
     recorder.stop();
 }
-void Backend::importVideo() {
-    QString path = QFileDialog::getOpenFileName(
-        nullptr, "Open a recording", QStandardPaths::writableLocation(QStandardPaths::MoviesLocation),
-        "Videos (*.mp4 *.mkv *.mov *.webm *.avi *.gif);;All files (*)");
-    if (!path.isEmpty())
-        loadFile(path);
-}
 void Backend::loadFile(QString path) {
     if (!mayReplace())
         return;
@@ -389,9 +381,6 @@ void Backend::loadFile(QString path) {
     captureError.clear();
     m_original = path;
     prepare(path, false);
-}
-void Backend::testLoad(QString path) {
-    loadFile(path);
 }
 void Backend::prepare(QString path, bool captured) {
     status("preparing", "Preparing the recording…");
@@ -602,7 +591,6 @@ void Backend::openPlayers() {
     if (QFile::exists(session + "/desktop.wav"))
         desktop.setSource(QUrl::fromLocalFile(session + "/desktop.wav"));
     status("editor", captureError);
-    uiOpen = true;
     if (std::exchange(announceRecording, false))
         emit recordingFinished();
     seek(0);
@@ -1141,9 +1129,10 @@ void Backend::discard() {
     emit frameChanged();
     emit cameraFrameChanged();
 }
-bool Backend::recoverable() const {
-    for (auto d : QDir(recoveryRoot).entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
-        const QString dir = recoveryRoot + "/" + d;
+bool Backend::recoverable() {
+    const QString root = scratchRoot();
+    for (auto d : QDir(root).entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        const QString dir = root + "/" + d;
         if ((QFile::exists(dir + "/recovery.json") && !screenshotSession(dir)) ||
             QFileInfo(capturedRecording(dir)).size() > 1024)
             return true;

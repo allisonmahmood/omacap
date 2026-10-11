@@ -40,12 +40,6 @@ void registerWindowRules(QObject *owner) {
                             "opacity = 1 })"});
 }
 
-// Says what went wrong when there is no card or editor to say it, as Omasnap does.
-void notify(const QString &headline, const QString &description) {
-    QProcess::startDetached("omarchy-notification-send",
-                            {"--app-name", "omacap", "-t", "4500", headline, description});
-}
-
 QString uniquePath(const QString &stem, const QString &suffix) {
     QString path = stem + suffix;
     for (int i = 2; QFile::exists(path); ++i)
@@ -64,10 +58,8 @@ VideoStage::VideoStage(QQmlEngine &engine, Backend &backend, Theme &theme)
     engine.rootContext()->setContextProperty("backend", &backend);
     engine.rootContext()->setContextProperty("stage", this);
     connect(&backend, &Backend::changed, this, &VideoStage::phaseChanged);
-    // The card follows Backend::recordingFinished(). It must fire no later than the call
-    // that moves the phase to "editor"; until it exists, every session opens the editor.
-    if (backend.metaObject()->indexOfSignal("recordingFinished()") >= 0)
-        connect(&backend, SIGNAL(recordingFinished()), this, SLOT(noteRecordingFinished()));
+    // A new recording shows the card; recordingFinished() comes with its move to "editor".
+    connect(&backend, &Backend::recordingFinished, this, [this] { recordingDone = true; });
     if (onWayland())
         registerWindowRules(this);
 }
@@ -92,22 +84,15 @@ bool VideoStage::load() {
 }
 
 void VideoStage::offerRecovery() {
-    if (idle() && backend.recoverable())
+    if (backend.phase() == "idle" && Backend::recoverable())
         showCard("recovery");
-}
-
-bool VideoStage::idle() const {
-    // "recorder" is the backend's older name for idle.
-    return backend.phase() == "idle" || backend.phase() == "recorder";
+    else
+        reportUi();
 }
 
 bool VideoStage::recordingPhase() const {
-    static const QStringList hidden{"countdown", "recording", "stopping", "selecting", "capturing"};
+    static const QStringList hidden{"countdown", "recording", "stopping"};
     return hidden.contains(backend.phase());
-}
-
-void VideoStage::noteRecordingFinished() {
-    recordingDone = true;
 }
 
 // Backend::changed also reports messages and progress; act on phase changes only.
@@ -116,24 +101,25 @@ void VideoStage::phaseChanged() {
     if (phase == lastPhase)
         return;
     const QString was = std::exchange(lastPhase, phase);
-    // No OmaCap pixels may appear in a recording.
+    // No OmaCap pixels may appear in a recording. A new recording also ends the offer to
+    // recover an earlier edit, which stays recoverable.
     if (recordingPhase()) {
         hideSurfaces();
+        if (m_card == "recovery")
+            dropCard();
         return;
     }
+    // While a recording or file is prepared, whatever was open stays as it was.
     showSurfaces();
     if (phase == "editor" && was != "exporting") {
         // Decide once the call that loaded the session has returned, so its
         // recordingFinished() has been seen whichever order it came in.
         QTimer::singleShot(0, this, &VideoStage::decideSession);
-    } else if (idle()) {
-        // The session has ended.
+    } else if (phase == "idle") {
+        // The session has ended. A failure with nothing open is the backend's to report.
         closeEditor();
         if (m_card == "recording")
             dropCard();
-        if (!backend.message().isEmpty() && m_card.isEmpty() && onWayland())
-            notify("OmaCap", backend.message());
-        finishIfIdle();
     }
 }
 
@@ -151,6 +137,7 @@ void VideoStage::showCard(const QString &kind) {
     if (m_card != kind) {
         m_card = kind;
         emit cardChanged();
+        reportUi();
     }
     if (!cardHost) {
         cardItem = qobject_cast<QQuickItem *>(cardComponent.create(engine.rootContext()));
@@ -190,16 +177,12 @@ void VideoStage::showCard(const QString &kind) {
 }
 
 void VideoStage::closeCard() {
-    if (m_card.isEmpty())
+    if (m_card.isEmpty() || backend.phase() == "exporting")
         return;
     const bool session = m_card == "recording";
     dropCard();
-    // Ending the session brings the phase back to idle, which finishes; the recording stays
-    // in Videos.
     if (session && !editorOpen && backend.phase() == "editor")
         backend.discard();
-    else
-        finishIfIdle();
 }
 
 void VideoStage::dropCard() {
@@ -207,6 +190,7 @@ void VideoStage::dropCard() {
         return;
     m_card.clear();
     emit cardChanged();
+    reportUi();
     destroyHost(cardHost);
     if (cardItem)
         cardItem->deleteLater();
@@ -218,6 +202,7 @@ void VideoStage::openEditor() {
         return;
     dropCard();
     editorOpen = true;
+    reportUi();
     if (!editorItem) {
         editorItem = qobject_cast<QQuickItem *>(editorComponent.create(engine.rootContext()));
         if (!editorItem) {
@@ -277,6 +262,7 @@ void VideoStage::hostEditor() {
 
 void VideoStage::closeEditor() {
     editorOpen = false;
+    reportUi();
     destroyHost(editorHost);
     // The next session starts with a fresh editor. This often runs from one of its own
     // handlers, such as Discard's.
@@ -311,9 +297,10 @@ void VideoStage::hideSurfaces() {
             host->hide();
 }
 
-void VideoStage::finishIfIdle() {
-    if (idle() && !editorOpen && m_card.isEmpty())
-        emit finished();
+// The backend decides when the process exits, so it is told whether anything is open, counting
+// a surface hidden for a recording.
+void VideoStage::reportUi() {
+    backend.setUiOpen(editorOpen || !m_card.isEmpty());
 }
 
 bool VideoStage::eventFilter(QObject *watched, QEvent *event) {

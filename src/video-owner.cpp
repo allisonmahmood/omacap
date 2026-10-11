@@ -91,7 +91,7 @@ void VideoOwner::handleQuitSignals() {
     sigaction(SIGTERM, &action, nullptr);
 }
 
-void VideoOwner::attach(Backend &backend) {
+bool VideoOwner::attach(Backend &backend) {
     if (!server.listen())
         qWarning("OmaCap cannot accept commands: %s", qPrintable(server.errorString()));
     connect(&server, &VideoOwnerServer::command, &backend,
@@ -101,21 +101,25 @@ void VideoOwner::attach(Backend &backend) {
     // Queued, so a reply written just before still reaches its caller.
     connect(&backend, &Backend::exitRequested, qApp, &QCoreApplication::quit,
             Qt::QueuedConnection);
+    // As Omasnap says what went wrong when nothing is open to say it.
     connect(&backend, &Backend::backgroundError, this, [](const QString &message) {
-        QProcess::startDetached("notify-send", {"--app-name=OmaCap", "OmaCap", message});
+        QProcess::startDetached("omarchy-notification-send",
+                                {"--app-name", "omacap", "-t", "4500", "OmaCap", message});
     });
     const QStringList args = QCoreApplication::arguments().mid(1);
     if (args.contains("--record-request")) {
         const auto request = RecordRequest::fromJson(requestArgument(args));
         const QString error = request ? backend.startRecording(*request)
                                       : "OmaCap was given an invalid recording request.";
-        if (!error.isEmpty()) {
-            emit backend.backgroundError(error);
-            QMetaObject::invokeMethod(qApp, &QCoreApplication::quit, Qt::QueuedConnection);
-        }
-    } else if (const QString video = videoArgument(args); !video.isEmpty()) {
-        backend.loadFile(video);
+        if (!error.isEmpty())
+            backend.fail(error);
+        return true;
     }
+    const QString video = videoArgument(args);
+    if (video.isEmpty())
+        return false;
+    backend.loadFile(video);
+    return true;
 }
 
 std::optional<int> forwardToVideoOwner(const QStringList &args) {

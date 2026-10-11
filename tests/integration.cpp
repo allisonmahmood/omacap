@@ -296,7 +296,7 @@ class Integration : public QObject {
         Studio s;
         auto &b = s.backend;
         QVERIFY(s.stage.load());
-        QSignalSpy finished(&s.stage, &VideoStage::finished);
+        QSignalSpy exits(&b, &Backend::exitRequested);
         const QString fixture = QDir::current().absoluteFilePath("tests/out/delayed.mkv");
         // An opened file goes straight to the editor, over the desktop.
         auto overlay = openEditor(s, "tests/out/delayed.mkv");
@@ -328,11 +328,12 @@ class Integration : public QObject {
         b.status("editor");
         QVERIFY(s.stage.editorWindow()->isVisible());
         // Ending the session closes the editor, and with nothing left open the process may go.
+        QCOMPARE(exits.count(), 0);
         b.discard();
         QVERIFY(!s.stage.editorWindow());
-        QCOMPARE(finished.count(), 1);
+        QTRY_COMPARE(exits.count(), 1);
         // A new recording shows its card, which never comes up during a recording.
-        QVERIFY(QMetaObject::invokeMethod(&s.stage, "noteRecordingFinished"));
+        b.announceRecording = true;
         b.loadFile(fixture);
         QTRY_COMPARE_WITH_TIMEOUT(s.stage.card(), QString("recording"), 10000);
         QVERIFY(!s.stage.editorWindow());
@@ -350,14 +351,17 @@ class Integration : public QObject {
         QTRY_VERIFY(s.stage.editorWindow());
         QVERIFY(s.stage.card().isEmpty());
         b.discard();
+        QTRY_COMPARE(exits.count(), 2);
         // Closing a recording's card ends its session; the recording stays where it is.
-        QVERIFY(QMetaObject::invokeMethod(&s.stage, "noteRecordingFinished"));
+        b.announceRecording = true;
         b.loadFile(fixture);
         QTRY_COMPARE_WITH_TIMEOUT(s.stage.card(), QString("recording"), 10000);
+        QTest::qWait(50);
+        QCOMPARE(exits.count(), 2);
         s.stage.closeCard();
         QCOMPARE(b.phase(), QString("idle"));
         QVERIFY(QFile::exists(fixture));
-        QCOMPARE(finished.count(), 3);
+        QTRY_COMPARE(exits.count(), 3);
     }
     void mapping() {
         Edit e;
@@ -1328,7 +1332,7 @@ class Integration : public QObject {
         QVERIFY(!QFile::exists(marker));
         QVERIFY(!QFile::exists(cancelled));
         QVERIFY(b.sessionPath().isEmpty());
-        QCOMPARE(exits.count(), 1);
+        QTRY_COMPARE(exits.count(), 1);
         QCOMPARE(finished.count(), 0);
 
         QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
@@ -1432,6 +1436,78 @@ class Integration : public QObject {
         replace = true;
         QCOMPARE(ask(recordKey)["action"].toString(), QString("pick"));
         b.discard();
+    }
+    // The backend ends the process once no card or editor is open and nothing records,
+    // prepares or exports.
+    void lifetime() {
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
+        QSignalSpy exits(&b, &Backend::exitRequested);
+        // Nothing to recover and nothing asked for.
+        s.stage.offerRecovery();
+        QVERIFY(s.stage.card().isEmpty());
+        QTRY_COMPARE(exits.count(), 1);
+        // A recording opens nothing until its card.
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recording"), 15000);
+        QTest::qWait(1500);
+        b.stop();
+        QTRY_COMPARE_WITH_TIMEOUT(s.stage.card(), QString("recording"), 20000);
+        const QString recording = b.original(), session = b.sessionPath();
+        // Exported from the card, which then fades and ends the session.
+        auto card = find(s.stage.cardWindow()->contentItem(), "card");
+        QVERIFY(QMetaObject::invokeMethod(card, "exportNow"));
+        QCOMPARE(b.phase(), QString("exporting"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 60000);
+        QVERIFY2(QFileInfo(b.lastExport()).size() > 1000, qPrintable(b.message()));
+        QCOMPARE(exits.count(), 1);
+        QTRY_VERIFY_WITH_TIMEOUT(s.stage.card().isEmpty(), 12000);
+        QCOMPARE(b.phase(), QString("idle"));
+        QTRY_COMPARE(exits.count(), 2);
+        QVERIFY(!QDir(session).exists());
+        QVERIFY(QFile::exists(recording));
+        QFile::remove(recording);
+
+        // An earlier session's unfinished edit is offered.
+        QString saved;
+        {
+            Backend crashed(&s.theme, s.frames);
+            crashed.loadFile(QDir::current().absoluteFilePath("tests/out/delayed.mkv"));
+            QTRY_COMPARE_WITH_TIMEOUT(crashed.phase(), QString("editor"), 10000);
+            crashed.setValue("padding", .123);
+            saved = crashed.sessionPath();
+        }
+        s.stage.offerRecovery();
+        QCOMPARE(s.stage.card(), QString("recovery"));
+        QTest::qWait(50);
+        QCOMPARE(exits.count(), 2);
+        // A new recording ends the offer; the edit stays recoverable.
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        QVERIFY(s.stage.card().isEmpty());
+        b.stop();
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+        QTRY_COMPARE(exits.count(), 3);
+        QVERIFY(QDir(saved).exists());
+        // So does closing the card.
+        s.stage.offerRecovery();
+        QCOMPARE(s.stage.card(), QString("recovery"));
+        s.stage.closeCard();
+        QTRY_COMPARE(exits.count(), 4);
+        QVERIFY(QDir(saved).exists());
+        // Recovering opens the editor on it; closing the editor ends it.
+        s.stage.offerRecovery();
+        card = find(s.stage.cardWindow()->contentItem(), "card");
+        QVERIFY(QMetaObject::invokeMethod(card, "edit"));
+        QTRY_VERIFY_WITH_TIMEOUT(s.stage.editorWindow(), 10000);
+        QVERIFY(s.stage.card().isEmpty());
+        QCOMPARE(b.sessionPath(), saved);
+        QCOMPARE(b.edit()["padding"].toDouble(), .123);
+        QTest::qWait(50);
+        QCOMPARE(exits.count(), 4);
+        b.discard();
+        QTRY_COMPARE(exits.count(), 5);
+        QVERIFY(!QDir(saved).exists());
     }
     void portalFixture() {
         const auto fixture = qEnvironmentVariable("OMACAP_PORTAL_FIXTURE");
