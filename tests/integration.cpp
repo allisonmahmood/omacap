@@ -1207,6 +1207,29 @@ class Integration : public QObject {
             QVERIFY(!QDir(saved).exists());
         }
     }
+    // Unsaved edits are those since the last export, however undo and redo reach them.
+    void undoAfterExport() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        b.loadFile(QDir::current().absoluteFilePath("tests/out/delayed.mkv"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QVERIFY(!b.dirty());
+        b.setValue("padding", .12);
+        QVERIFY(b.dirty());
+        const QString out = QDir::current().absoluteFilePath("tests/out/undo-export.mp4");
+        QFile::remove(out);
+        b.startExport(out, false, 640, 30, 28);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 30000);
+        QVERIFY2(QFileInfo(out).size() > 1000, qPrintable(b.message()));
+        QVERIFY(!b.dirty());
+        b.undo();
+        QVERIFY(b.past.isEmpty());
+        QVERIFY(b.dirty());
+        b.redo();
+        QVERIFY(!b.dirty());
+        b.discard();
+    }
     void interruptedCapture_data() {
         QTest::addColumn<bool>("legacy");
         QTest::newRow("saved-to-videos") << false;

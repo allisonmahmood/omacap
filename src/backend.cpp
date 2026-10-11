@@ -205,7 +205,7 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
                         if (std::rename(QFile::encodeName(partialExport).constData(),
                                         QFile::encodeName(pendingExport).constData()) == 0) {
                             m_lastExport = pendingExport;
-                            m_dirty = state.json() != exportedEdit;
+                            savedEdit = exportedEdit;
                             checkpoint();
                             status("editor", exportedMessage(pendingExport));
                         } else
@@ -295,12 +295,15 @@ void Backend::newSession() {
     future.clear();
     screenRevision = cameraRevision = 0;
     m_position = 0;
-    m_dirty = true;
-    recoveredEdits = false;
+    savedEdit = state.json();
     m_lastExport.clear();
     m_original.clear();
     snapshotWallpaper([this](const QString &wallpaper) {
+        // The wallpaper is part of the edit as loaded, unless it arrives after an edit.
+        const bool saved = !dirty();
         state.background = wallpaper;
+        if (saved)
+            savedEdit = state.json();
         emit editChanged();
         if (m_phase == "editor")
             checkpoint();
@@ -347,7 +350,7 @@ void Backend::checkpoint() {
                                            {"cameraStart", cameraStart},
                                            {"sourceWidth", sourceWidth},
                                            {"sourceHeight", sourceHeight},
-                                           {"dirty", m_dirty},
+                                           {"dirty", dirty()},
                                            {"lastExport", m_lastExport},
                                            {"original", m_original}});
 }
@@ -565,6 +568,7 @@ void Backend::prepare(QString path, bool captured) {
                             fail("Could not prepare media: " + err.right(1500));
                             return;
                         }
+                        savedEdit = state.json(); // as loaded, so not yet edited
                         ready();
                     });
             demux->start("ffmpeg", args);
@@ -856,7 +860,6 @@ void Backend::edited() {
                                 "cameraShape", "cameraCorners", "cameraShadow"})
         look[key] = current[key];
     settings.setValue("appearance", look);
-    m_dirty = true;
     emit editChanged();
     emit changed();
     emit positionChanged();
@@ -1157,7 +1160,7 @@ void Backend::endSession(bool remove) {
     session.clear();
     m_original.clear();
     state = Edit();
-    m_dirty = recoveredEdits = false;
+    savedEdit = state.json();
     screenRevision = cameraRevision = 0;
     status("idle");
     emit editChanged();
@@ -1188,7 +1191,6 @@ void Backend::recover() {
         hasMic = capture["mic"].toBool();
         hasDesktop = capture["desktop"].toBool();
         hasCamera = capture["camera"].toBool();
-        m_dirty = true;
         prepare(recording, true);
         return;
     }
@@ -1198,8 +1200,8 @@ void Backend::recover() {
     cameraStart = o["cameraStart"].toDouble();
     sourceWidth = o["sourceWidth"].toInt(1920);
     sourceHeight = o["sourceHeight"].toInt(1080);
-    m_dirty = o["dirty"].toBool(true);
-    recoveredEdits = true;
+    // Edits that were unsaved stay so, whatever the edit is compared with.
+    savedEdit = o["dirty"].toBool(true) ? QJsonObject() : state.json();
     m_lastExport = o["lastExport"].toString();
     m_original = o["original"].toString();
     ready();
