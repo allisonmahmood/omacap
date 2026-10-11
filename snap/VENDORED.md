@@ -71,8 +71,10 @@ exports and spotlight sampling cannot disagree.
   tooltips) goes off screen until it ends, and none shown meanwhile maps
   (`RecordingConcealment`). A drag in progress is cancelled, and none starts.
   Desktop notifications are logged instead.
-- Every notification is sent with `omarchy-notification-send -p`; a detached shell
-  appends the id it prints to `omacapRuntimeDir()/notifications`, one line in one
-  `O_APPEND` write. The recorder closes the listed ones when a countdown starts.
+- Every notification's summary is "OmaCap", with the message as its (escaped) body, so a
+  recording can take OmaCap's toasts down with `omarchy-shell notifications dismiss
+  OmaCap`. A detached shell sends it with `omarchy-notification-send -p`, bounded by
+  `timeout`, and lists it in `omacapRuntimeDir()/notifications` under that file's lock, as
+  the video process's `sendNotification()` does: `?` before sending, then the id it prints.
 
 `README.md` in this directory is upstream's, kept for reference.
