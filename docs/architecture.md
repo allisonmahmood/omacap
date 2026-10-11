@@ -23,7 +23,9 @@ One `omacap` binary runs one of two apps, chosen in `src/main.cpp` before any
 | `omacap --version` | prints the version |
 
 A video process that loses the race for the video lock forwards its arguments to the one
-that won, so a request or file is acted on once. A video process exits 1 when the last thing
+that won, so a request or file is acted on once. It keeps trying for up to ten seconds, since
+the winner listens only once it is ready, and one that is exiting answers nothing and then
+lets go of the lock (the loser takes its place). A video process exits 1 when the last thing
 it was asked to do failed, such as an invalid `--record-request` or a file that won't open,
 and 0 otherwise.
 
@@ -38,8 +40,9 @@ and 0 otherwise.
    the video process with `record`, starting one if none runs.
 3. The video process records the monitor through the portal, cropped to the area before
    encoding, so nothing outside the area is ever saved. Its recording chrome stays
-   outside the area, or on another monitor, or is not shown. While the countdown or
-   recording runs, `recordingMarkerPath()` exists and no other OmaCap surface shows.
+   outside the area, or on another monitor, or is not shown. From the request until the
+   capture worker has exited, `recordingMarkerPath()` lists both processes and no other
+   OmaCap surface shows.
 4. After stopping, the video process shows its card, then the editor on request.
 
 ## Keeping OmaCap out of its own recordings
@@ -49,11 +52,20 @@ in the encoded pixels. `Recorder` (`src/recorder.*`) and its worker (`scripts/ca
 make that hold:
 
 - **Crop at capture.** The worker records the whole monitor and crops it to the area in
-  GStreamer, before encoding. The original never holds anything outside the area.
+  GStreamer, before encoding. The original never holds anything outside the area. The crop
+  is made for the monitor's size: a stream that changes size, or breaks off as XDPH's does
+  when the monitor's mode changes, ends the recording and keeps what came before. No frame
+  of a new size is kept, and the stream's flushes never reach the file.
 - **Chrome outside the area.** The HUD and outline sit outside a guard around the encoded
   pixels, else on another monitor, else are not shown (`src/recording-layout.*`). A HUD
   whose monitor disappears is hidden, never moved. Stopping uses the record hotkey, which
   the countdown names (from `hyprctl binds -j`).
+- **Display changes.** The chrome keeps its place in logical pixels, so a new scale, size or
+  rotation of the recorded monitor (or the HUD's) can move it into the area. The chrome is
+  then made transparent and hidden at once, and the recording ends half a second before Qt
+  told of the change. The worker holds encoded frames back for a second before writing
+  them, so a cut in the past still drops what was rendered since. A notification says why
+  once the capture has ended.
 - **A clean first frame.** The countdown is drawn over the area. When it ends, it is
   repainted fully transparent (an unmapped surface would fade out on screen), and once the
   compositor has applied that, its monotonic time is the cut. XDPH stamps every frame with
@@ -62,6 +74,12 @@ make that hold:
   capture overlay's fade, are never written.
 - **A clean last frame.** Stopping cuts at the moment of the request; the chrome hides
   only after the worker confirms it will keep nothing later.
+- **A dying video process.** Its worker gets SIGTERM (`PR_SET_PDEATHSIG`) and finishes the
+  file, but stops keeping frames as soon as a pad probe sees it was re-parented, whatever its
+  main loop is doing. The marker lists the worker, so other surfaces stay hidden until it
+  has exited.
+- **Notifications.** None is sent while the marker lists a running process. A `record` or
+  `open` refused during a capture is shown by the video process once it has ended.
 - **Other windows.** Starting a recording ends the session, which closes the editor and
   card, and ends an offer to recover an earlier edit. `VideoStage` hides anything still
   open when the phase becomes `countdown`, at least three seconds before the first kept
@@ -85,12 +103,17 @@ monitor. Rotated monitors are refused for now.
 | `open` | opens | opens; asks like `record` | error | error |
 
 A command that asks waits for the user's answer, so its caller waits too (up to two
-minutes, `answerTimeoutMs`).
+minutes, `answerTimeoutMs`). During `countdown`, `recording` and `stopping`, a refused
+`record` or `open` replies with `"deferred":true`: the video process notifies once the
+capture has ended, and the caller only prints the error. A video process that has decided to
+exit answers no command; its caller starts a video process of its own.
 
-`recordingMarkerPath()` holds the video process's PID, one line, from the moment a
-recording is requested until the worker confirms the stop (or exits). The capture overlay
-hides previews and pins while it exists with a live PID. Only the video lock's holder
-writes it, so a new owner removes one left behind by a crash.
+`recordingMarkerPath()` lists one decimal PID per line: the video process, then its capture
+worker once that runs. It exists from the moment a recording is requested until the worker
+has exited, and is written whole (aside, then renamed over the old one); a recording that
+can't write it fails. While any process it lists runs, no other OmaCap surface shows: the
+picker, previews, pins and notifications. Only the video lock's holder writes it, so a new
+owner removes one left behind by a crash once nothing it lists runs any more.
 
 ## Video process phases
 
@@ -116,11 +139,13 @@ Signals and calls between `Backend` and the UI:
   for a recording. The backend alone ends the process: `exitRequested(code)` follows once
   that settles with nothing open and the phase `idle`, so it never exits while recording,
   preparing or exporting, or while a session passes through `idle` on its way to another.
-  `code` is 1 when the last session failed (`fail()`), else 0.
+  The process exits there and then, answering no command after. `code` is 1 when the last
+  session failed (`fail()`), else 0.
 - A failure ends the session. One that never loaded anything, such as a file that won't
   open, is removed; one holding a recording or an edit stays recoverable. Failures with
-  nothing open to show them are reported as desktop notifications (`backgroundError()`,
-  sent with `omarchy-notification-send`).
+  nothing open to show them, and why a kept recording ended early, are reported as desktop
+  notifications (`backgroundError()`, sent with `omarchy-notification-send` once no capture
+  runs).
 
 ## Video UI
 
