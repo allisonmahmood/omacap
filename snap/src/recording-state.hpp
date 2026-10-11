@@ -3,17 +3,20 @@
 #pragma once
 
 #include <QFileSystemWatcher>
+#include <QHash>
 #include <QObject>
 
 class QSocketNotifier;
 
 /// The recording marker (recordingMarkerPath()) exists and names a live
-/// process. A marker a crashed recorder left behind does not count.
+/// process. It names one per line: the video process and, once it runs, its
+/// capture worker, which can outlive it. A marker whose processes are all
+/// gone, as a crashed recorder leaves it, does not count.
 [[nodiscard]] bool recordingInProgress();
 
 /// Follows recordingInProgress() without polling: inotify for the marker
-/// coming, changing and going, and a pidfd for a recorder that dies without
-/// removing it.
+/// coming, changing and going, and a pidfd for each process it names, which
+/// can die without removing it.
 class RecordingWatcher final : public QObject {
   Q_OBJECT
 public:
@@ -26,9 +29,8 @@ signals:
 
 private:
   void refresh();
-  void watchRecorder(qint64 pid);
   QFileSystemWatcher files_;
-  QSocketNotifier *recorderExit_ = nullptr;
-  qint64 watchedPid_ = 0;
+  /// An exit notifier per live process the marker names, by PID.
+  QHash<qint64, QSocketNotifier *> exits_;
   bool recording_ = false;
 };
