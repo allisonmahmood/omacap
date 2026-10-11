@@ -4,7 +4,7 @@
     scripts/nested-hyprland.sh start STATE && scripts/nested-portal.sh start STATE
     tests/record-nested.py STATE [--area X,Y,W,H] [--monitor NAME] [--omacap PATH]
                                  [--interrupt scale|mode|transform|kill-owner] [--stall-owner]
-                                 [--notify closes|keeps] [--stale]
+                                 [--notify closes|keeps|hovered] [--dismiss] [--stale]
 
 Runs `omacap --record-request`, stops with `omacap --record`, and decodes every frame of
 the saved recording. A magenta theme paints the countdown, HUD and OmaCap's windows; the
@@ -21,7 +21,12 @@ seconds around the change, so only the worker can react to it.
 --notify shows an OmaCap notification just before the request: a magenta toast over the area,
 from tests/notification-daemon.qml on the harness's bus. With `closes` it would stay up for a
 minute, so only OmaCap closing it takes it down; with `keeps` a close does nothing and it
-expires after five seconds, as Omarchy's shell keeps toasts.
+expires after five seconds, as Omarchy's shell keeps toasts; with `hovered` a close does nothing
+and it never expires, as Omarchy's shell keeps a toast while it is hovered.
+
+`omarchy-shell` is always a stand-in, so the real shell is never asked. It fails as with no
+Omarchy shell running, unless --dismiss: then `notifications dismiss` goes to the stand-in
+daemon, which takes down the toasts whose summary holds the needle, as Omarchy's shell does.
 
 --stale changes the monitor's scale after the request was made, and OmaCap must refuse it.
 """
@@ -39,7 +44,8 @@ p.add_argument("--omacap", default=str(repo / "build/omacap"))
 p.add_argument("--seconds", type=float, default=3)
 p.add_argument("--interrupt", choices=["scale", "mode", "transform", "kill-owner"])
 p.add_argument("--stall-owner", action="store_true")
-p.add_argument("--notify", choices=["closes", "keeps"])
+p.add_argument("--notify", choices=["closes", "keeps", "hovered"])
+p.add_argument("--dismiss", action="store_true")
 p.add_argument("--stale", action="store_true")
 a = p.parse_args()
 state = Path(a.state).resolve()
@@ -60,6 +66,19 @@ config = Path(env["XDG_CONFIG_HOME"])
 (config / "user-dirs.dirs").write_text(f'XDG_VIDEOS_DIR="{run}/videos"\n')
 env |= {"OMACAP_RUNTIME_DIR": str(run / "runtime"), "OMACAP_THEME_ROOT": str(run / "theme-root"),
         "QT_QPA_PLATFORM": "wayland"}
+# Omarchy's omarchy-shell would reach your session's shell.
+shell = run / "bin/omarchy-shell"
+shell.parent.mkdir()
+shell.write_text("""#!/bin/sh
+echo "$*" >>"$0.log"
+if [ "$1 $2" = "notifications dismiss" ] && [ -n "$OMACAP_TEST_DAEMON_PID" ]; then
+  exec quickshell ipc --pid "$OMACAP_TEST_DAEMON_PID" call notifications dismiss "$3"
+fi
+echo "omarchy-shell is not running" >&2
+exit 1
+""")
+shell.chmod(0o755)
+env["PATH"] = f"{shell.parent}:{env['PATH']}"
 
 monitors = json.loads(subprocess.check_output(["hyprctl", "monitors", "-j"], env=env))
 monitor = next(m for m in monitors if m["name"] == (a.monitor or monitors[0]["name"]))
@@ -108,10 +127,14 @@ daemon = None
 if a.notify:
     daemon = subprocess.Popen(
         ["quickshell", "-p", str(repo / "tests/notification-daemon.qml")],
-        env=env | ({"OMACAP_TEST_KEEP_CLOSED": "1"} if a.notify == "keeps"
-                   else {"OMACAP_TEST_TOAST_MS": "60000"}),
+        env=env | {"closes": {"OMACAP_TEST_TOAST_MS": "60000"},
+                   "keeps": {"OMACAP_TEST_KEEP_CLOSED": "1"},
+                   "hovered": {"OMACAP_TEST_KEEP_CLOSED": "1", "OMACAP_TEST_TOAST_MS": "0"}
+                   }[a.notify],
         stdout=open(run / "notifications.log", "w"), stderr=subprocess.STDOUT)
     atexit.register(daemon.terminate)
+    if a.dismiss:
+        env["OMACAP_TEST_DAEMON_PID"] = str(daemon.pid)
     deadline = time.monotonic() + 15
     while b"org.freedesktop.Notifications" not in subprocess.run(
             ["busctl", "--user", "list", "--no-legend"], env=env, capture_output=True).stdout:
@@ -133,7 +156,7 @@ while not marker.exists():
 requested = time.monotonic()
 assert marker.read_text().split()[0] == str(owner.pid), marker.read_text()
 # The countdown, then the recording. After a notification the countdown also waits out the
-# toast, as OmaCap can't tell whether the daemon took it down.
+# toast, unless the dismiss was answered.
 time.sleep(4 + a.seconds + (3 if a.notify else 0))
 # The video process, then its worker: OmaCap stays hidden while either runs.
 pids = [int(pid) for pid in marker.read_text().split()]
@@ -177,6 +200,9 @@ if owner.poll() is None:
         owner.terminate()
         owner.wait(timeout=20)
 assert not marker.exists() or a.interrupt == "kill-owner"
+if a.notify:
+    # Each recording that found a notification listed asked the shell to take OmaCap's down.
+    assert (shell.parent / "omarchy-shell.log").read_text() == "notifications dismiss OmaCap\n"
 videos = list((run / "videos").glob("omacap-*.mkv"))
 assert len(videos) == 1, (videos, (run / "owner.log").read_text())
 

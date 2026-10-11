@@ -428,14 +428,15 @@ bool removeEditorHandoff(const QString &path, const QString &token);
 [[nodiscard]] bool saveTemporarySnapshot(const QImage &image, QString path,
                                          QString &error);
 [[nodiscard]] QString recognizeText(const QImage &image, QString &error);
-/** Builds the omarchy-notification-send argv. With an image, the click command
- *  follows --exec as separate words (program, then file URL) and nothing else
- *  comes after it, since --exec consumes the rest of the line unparsed. */
+/** Builds the omarchy-notification-send argv: the summary "OmaCap" and the
+ *  message as the body. With an image, the click command follows --exec as
+ *  separate words (program, then file URL) and nothing else comes after it,
+ *  since --exec consumes the rest of the line unparsed. */
 [[nodiscard]] QStringList
 captureNotificationArguments(const QString &message,
                              const QString &imagePath = {});
 /** Notifies the desktop and lists the notification in OmaCap's notifications
- *  file, so a recording that starts soon after can close it; while OmaCap
+ *  file, so a recording that starts soon after can take it down; while OmaCap
  *  records, logs the message instead. Never waits for either. */
 void sendCaptureNotification(const QString &message,
                              const QString &imagePath = {});

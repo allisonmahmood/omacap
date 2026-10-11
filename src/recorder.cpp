@@ -37,15 +37,25 @@ std::optional<QByteArray> hyprctl(const QStringList &args) {
     return process.readAllStandardOutput();
 }
 
-// How long Omarchy's shell may keep a toast up: five seconds, for the low urgency OmaCap
-// sends, plus its fade. It keeps a toast a sender has closed until then.
+// How long Omarchy's shell keeps a toast up that nobody hovers: five seconds, for the low
+// urgency OmaCap sends, plus its fade.
 constexpr qint64 toastLifetimeMs = 6000;
 
-// Closes the notifications OmaCap processes have shown since the last recording (`shown`): one
-// sent just before the request may still be on screen, and must be gone before the first kept
-// frame. Returns once every close is answered, within a second, with when the last may still
-// show all the same: a notification daemon need not take a toast down when its sender closes it.
-QDeadlineTimer closeNotifications(const ShownNotifications &shown) {
+// Takes down the notifications OmaCap processes have shown since the last recording (`shown`):
+// one sent just before the request may still be on screen, and must be gone before the first
+// kept frame. Returns within two seconds, with when the last may still show all the same.
+//
+// Omarchy's shell ignores CloseNotification and keeps a toast up for as long as it is hovered,
+// but `omarchy-shell notifications dismiss` takes down every toast whose summary holds the
+// needle at once, hovered or not, and every OmaCap notification's summary says "OmaCap". It
+// answers `ok` or `none` (not with -q, which would hide the answer). Other daemons close each id
+// over D-Bus; where nothing answers the dismiss, the countdown also lasts until a toast the
+// daemon keeps would have expired, as Omarchy's shell keeps one nobody hovers.
+QDeadlineTimer takeDownNotifications(const ShownNotifications &shown) {
+    if (!shown.newest.isValid())
+        return QDeadlineTimer(0);
+    QProcess dismiss;
+    dismiss.start("omarchy-shell", {"notifications", "dismiss", "OmaCap"});
     QList<QDBusPendingCall> closing;
     for (const quint32 id : shown.ids) {
         QDBusMessage close = QDBusMessage::createMethodCall(
@@ -56,10 +66,15 @@ QDeadlineTimer closeNotifications(const ShownNotifications &shown) {
     }
     for (QDBusPendingCall &call : closing)
         call.waitForFinished();
-    if (!shown.newest.isValid())
-        return QDeadlineTimer(0);
-    // One listed without an id may have appeared as late as its send's bound.
-    const qint64 lasts = toastLifetimeMs + (shown.unnamed ? notificationSendMs : 0);
+    const bool dismissed =
+        dismiss.waitForFinished(2000) && dismiss.exitStatus() == QProcess::NormalExit &&
+        dismiss.exitCode() == 0 &&
+        QList<QByteArray>{"ok", "none"}.contains(dismiss.readAllStandardOutput().trimmed());
+    qint64 lasts = dismissed ? 0 : toastLifetimeMs;
+    // One listed without an id may have appeared as late as its send's bound, or be on its way
+    // still to a daemon too slow to answer, so after the dismiss too: wait it out either way.
+    if (shown.unnamed)
+        lasts = toastLifetimeMs + notificationSendMs;
     return QDeadlineTimer(
         std::max<qint64>(0, QDateTime::currentDateTime().msecsTo(shown.newest.addMSecs(lasts))));
 }
@@ -174,7 +189,7 @@ QString Recorder::start(const RecordRequest &next, const QString &path, bool syn
         return "OmaCap is busy showing a notification; try again.";
     }
     // Synthetic recordings (tests) leave the desktop's notifications alone.
-    toastsGone = synthetic ? QDeadlineTimer() : closeNotifications(*shown);
+    toastsGone = synthetic ? QDeadlineTimer() : takeDownNotifications(*shown);
     request = next;
     output = path;
     error.clear();

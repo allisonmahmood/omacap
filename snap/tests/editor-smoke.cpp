@@ -6292,7 +6292,12 @@ bool runNotificationArgvCheck(QString &error) {
     error = QStringLiteral("image-less notification carried --exec/--image");
     return false;
   }
+  // The summary is "OmaCap", by which a recording takes OmaCap's toasts down;
+  // the message is the body, which Omarchy's shell reads as markup.
   if (plain.last() != QStringLiteral("Screenshot copied") ||
+      plain.at(plain.size() - 2) != QStringLiteral("OmaCap") ||
+      captureNotificationArguments(QStringLiteral("a <b> & c")).last() !=
+          QStringLiteral("a &lt;b&gt; &amp; c") ||
       plain.indexOf(QStringLiteral("-t")) < 0 ||
       plain.at(plain.indexOf(QStringLiteral("-t")) + 1) !=
           QStringLiteral("4500")) {
@@ -6342,11 +6347,17 @@ bool runNotificationArgvCheck(QString &error) {
     error = QStringLiteral("--image does not carry the saved path");
     return false;
   }
+  if (saved.at(image - 2) != QStringLiteral("OmaCap") ||
+      saved.at(image - 1) != QStringLiteral("Screenshot saved\nClick to edit")) {
+    error = QStringLiteral("saved notification's summary or body is wrong: %1")
+                .arg(saved.join(QStringLiteral(" | ")));
+    return false;
+  }
 
   // Sending runs omarchy-notification-send, here a stand-in that records
   // what it was asked and answers -p with an id, fails, or hangs. While OmaCap
   // records, the notification would be in the recording: the message goes to
-  // the log instead. Otherwise it is listed for the recorder to close, a
+  // the log instead. Otherwise it is listed for the recorder to take down, a
   // `?` and then its id, after any already listed.
   const QTemporaryDir bin;
   QFile sender(bin.filePath(QStringLiteral("omarchy-notification-send")));

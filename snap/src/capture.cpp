@@ -2386,17 +2386,23 @@ QString recognizeText(const QImage &image, QString &error) {
 QStringList captureNotificationArguments(const QString &message,
                                          const QString &imagePath) {
   // -p prints the new notification's id, which sendCaptureNotification keeps.
-  QStringList arguments{QStringLiteral("-p"), QStringLiteral("-g"), QStringLiteral(""),
+  // The summary is "OmaCap", as each OmaCap notification's is: a recording
+  // takes them down on Omarchy by that. The message is the body, which the
+  // shell reads as markup.
+  QString body = message.toHtmlEscaped();
+  if (!imagePath.isEmpty())
+    body += QStringLiteral("\nClick to edit");
+  QStringList arguments{QStringLiteral("-p"), QStringLiteral("-g"), QStringLiteral(""),
                         QStringLiteral("--app-name"), QStringLiteral("OmaCap"),
-                        QStringLiteral("-t"), QStringLiteral("4500"), message};
+                        QStringLiteral("-t"), QStringLiteral("4500"),
+                        QStringLiteral("OmaCap"), body};
   if (!imagePath.isEmpty()) {
     const QString imageUrl =
         QUrl::fromLocalFile(imagePath).toString(QUrl::FullyEncoded);
     // --exec consumes the rest of the command line as the click command's
     // argv, which omarchy-notification-send runs without shell parsing. It
     // must come last and be given as separate words, never one quoted string.
-    arguments << QStringLiteral("Click to edit") << QStringLiteral("--image")
-              << imagePath << QStringLiteral("--exec")
+    arguments << QStringLiteral("--image") << imagePath << QStringLiteral("--exec")
               << QCoreApplication::applicationFilePath() << imageUrl;
   }
   return arguments;
@@ -2409,7 +2415,7 @@ void sendCaptureNotification(const QString &message, const QString &imagePath) {
     return;
   }
   // One sent just before a recording could still be up once it starts: the
-  // recorder takes OmaCap's notifications file then and closes them. A
+  // recorder takes OmaCap's notifications file then and takes them down. A
   // detached shell lists it there as sendNotification() does: under the
   // file's lock, it checks the marker again, appends `?`, sends within
   // notificationSendMs (killing a send that takes longer, so the lock is never
