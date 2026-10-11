@@ -83,9 +83,10 @@ Click **Export**, choose MP4 or GIF, set the output size and frame rate, and pic
 | Step backward / forward | Left / Right |
 | Cut / select mode | C / V, with the timeline focused |
 | Delete selected clip, range or zoom | Delete / Backspace, with the timeline focused |
-| Clear zoom selection or leave crop/cut mode | Escape |
+| Clear the zoom or annotation selection, or leave crop, cut or an annotation tool | Escape |
 | Undo | Ctrl+Z |
 | Redo | Ctrl+Shift+Z |
+| Annotation tools and colours, in a screenshot | V K R E A L T C F H D, 1–8 |
 | Copy / save a screenshot | Ctrl+C / Ctrl+S |
 | Copy and save a screenshot | Enter |
 
@@ -106,6 +107,23 @@ The binding works while OmaCap is open, too. If the current edit hasn't been cop
 To style a screenshot you already have, open a PNG, JPEG or WebP with `omacap shot.png`, or click **Open image or video**. The screenshot gets the same crop, background, padding, corners, shadow and window transparency as a recording, with no timeline. Choose a **Canvas**: **Auto** fits the shot plus its padding, and **16:9**, **4:3** and **1:1** suit posts.
 
 The styled shot keeps the screenshot's own resolution. The status bar shows its size. **Copy** puts a PNG on the clipboard, which stays there after OmaCap closes. **Save** writes `omacap-<date>_<time>.png` to the folder Omarchy saves screenshots in: `$OMARCHY_SCREENSHOT_DIR` if it is set, or `~/Pictures/Screenshots`. OmaCap edits its own copy, so the original image is never changed.
+
+### Annotate
+
+A screenshot gets a tool row with Omasnap's annotation tools. Pick one, then drag on the shot or click it; OmaCap returns to Select afterwards.
+
+| Tool | Key | What it does |
+| --- | --- | --- |
+| Select | V | Click a mark to select it. Drag it to move, or drag a handle to resize. Arrow keys nudge it 1 px, or 10 px with Shift. Delete removes it. |
+| Crop | K | Opens the crop view. |
+| Box / Ellipse | R / E | Outline by default; the sidebar switches the selection to Solid or Tint. Hold Shift for a square or circle. |
+| Arrow / Line | A / L | Hold Shift to snap to 45°. |
+| Text | T | Click and type. Enter finishes; Shift+Enter adds a line. Double-click text to edit it, and choose Pill or Plain in the sidebar. |
+| Step | C | Click to place a numbered marker. Steps renumber when one is deleted. |
+| Pen / Marker | F / H | Freehand, and a translucent highlighter. |
+| Redact | D | An opaque black box. Nothing of the screenshot survives under it in the PNG. |
+
+Keys 1–8 choose a colour, and S, M and L the size, for the selected mark and the next one. Sizes scale with the screenshot's resolution. Marks stay fully opaque over a transparent window, follow the screenshot when you crop, and may overhang the padding. Each mark, move or style change is one undo step.
 
 ## Before you record
 

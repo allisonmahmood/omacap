@@ -1050,6 +1050,46 @@ void Backend::deleteZoom(int i) {
         edited();
     }
 }
+QString Backend::addAnnotation(const QVariantMap &v) {
+    if (m_phase != "editor" || m_kind != "image")
+        return {};
+    auto a = Annotation::fromJson(QJsonObject::fromVariantMap(v));
+    if (a.kind.isEmpty())
+        return {};
+    a.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    push();
+    state.annotations.append(a);
+    edited();
+    return a.id;
+}
+void Backend::updateAnnotation(const QString &id, const QVariantMap &v) {
+    if (m_phase != "editor")
+        return;
+    const auto i = std::find_if(state.annotations.cbegin(), state.annotations.cend(),
+                                [&](const Annotation &a) { return a.id == id; }) -
+                   state.annotations.cbegin();
+    if (i == state.annotations.size())
+        return;
+    auto next = Annotation::fromJson(QJsonObject::fromVariantMap(v));
+    next.id = id;
+    if (next.kind.isEmpty() || next.json() == state.annotations[i].json())
+        return;
+    // push() shares the vector with the undo history; indexing afterwards detaches it.
+    push();
+    state.annotations[i] = next;
+    edited();
+}
+void Backend::deleteAnnotation(const QString &id) {
+    if (m_phase != "editor")
+        return;
+    auto next = state.annotations;
+    next.removeIf([&](const Annotation &a) { return a.id == id; });
+    if (next.size() == state.annotations.size())
+        return;
+    push();
+    state.annotations = next;
+    edited();
+}
 void Backend::chooseColor() {
     if (m_phase != "editor")
         return;

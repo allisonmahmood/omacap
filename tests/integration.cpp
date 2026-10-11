@@ -12,6 +12,7 @@
 #include <QQuickItemGrabResult>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -1374,6 +1375,236 @@ class Integration : public QObject {
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
         QCOMPARE(b.kind(), QString("video"));
         QVERIFY(b.duration() > .5);
+        b.discard();
+    }
+    void annotationModel() {
+        const auto parse = [](QJsonObject o) { return Annotation::fromJson(o); };
+        QCOMPARE(parse({{"kind", "box"}, {"points", QJsonArray{QJsonArray{1, 2}}}}).kind,
+                 QString());
+        QCOMPARE(
+            parse({{"kind", "star"}, {"points", QJsonArray{QJsonArray{1, 2}, QJsonArray{3, 4}}}})
+                .kind,
+            QString());
+        QCOMPARE(
+            parse({{"kind", "text"}, {"points", QJsonArray{QJsonArray{1, 2}}}, {"text", " "}}).kind,
+            QString());
+        const auto box = parse({{"kind", "box"},
+                                {"points", QJsonArray{QJsonArray{1, 2}, QJsonArray{3, 4}}},
+                                {"color", "not a colour"},
+                                {"size", 1e9},
+                                {"fill", "glitter"}});
+        QCOMPARE(box.kind, QString("box"));
+        QCOMPARE(box.color, QString("#ff375f"));
+        QCOMPARE(box.size, 1000.);
+        QCOMPARE(box.fill, QString("outline"));
+        Edit e;
+        e.annotations = {box, parse({{"kind", "step"}, {"points", QJsonArray{QJsonArray{5, 6}}}})};
+        QCOMPARE(Edit::fromJson(e.json()).json(), e.json());
+    }
+    void annotationEditing() {
+        // Script errors in the drawing code would otherwise only be logged.
+        QTest::failOnWarning(QRegularExpression("annotations\\.js|Annotation"));
+        QTemporaryDir dir;
+        QImage shot(900, 600, QImage::Format_RGB32);
+        shot.fill(QColor("#202830"));
+        QVERIFY(shot.save(dir.path() + "/shot.png"));
+        Theme theme;
+        QQmlApplicationEngine engine;
+        auto frames = new Frames;
+        engine.addImageProvider("frames", frames);
+        Backend b(&theme, frames);
+        b.loadFile(dir.path() + "/shot.png");
+        b.setValue("canvas", "auto");
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &b);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
+        auto cleanup = qScopeGuard([&] { delete win; });
+        QVERIFY(QTest::qWaitForWindowExposed(win));
+        win->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(win));
+        auto editor = win->findChild<QQuickItem *>("annotationEditor");
+        QVERIFY(editor);
+        QTRY_VERIFY(editor->property("k").toDouble() > 0);
+        const double k = editor->property("k").toDouble();
+        // Source pixels to window coordinates, through the preview's scale.
+        const auto at = [&](double x, double y) {
+            return editor
+                ->mapToScene({editor->property("originX").toDouble() + x * k,
+                              editor->property("originY").toDouble() + y * k})
+                .toPoint();
+        };
+        const auto drag = [&](QPoint from, QPoint to) {
+            QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, from);
+            QTest::mouseMove(win, (from + to) / 2, 20);
+            QTest::mouseMove(win, to, 20);
+            QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, to, 20);
+        };
+        const auto near = [&](QPointF actual, QPointF expected) {
+            return std::abs(actual.x() - expected.x()) <= 2 / k &&
+                   std::abs(actual.y() - expected.y()) <= 2 / k;
+        };
+
+        // A box lands where it was drawn, and the tool returns to Select.
+        QTest::keyClick(win, Qt::Key_R);
+        QCOMPARE(editor->property("tool").toString(), QString("box"));
+        drag(at(100, 100), at(300, 200));
+        QTRY_COMPARE(b.state.annotations.size(), 1);
+        auto box = b.state.annotations[0];
+        QCOMPARE(box.kind, QString("box"));
+        QVERIFY(near(box.points[0], {100, 100}) && near(box.points[1], {300, 200}));
+        QCOMPARE(editor->property("tool").toString(), QString("select"));
+        QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(b.state.annotations.size(), 0);
+        QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+        QCOMPARE(b.state.annotations.size(), 1);
+
+        // Dragging it moves it as one undo step; Delete removes it.
+        drag(at(200, 100), at(260, 140));
+        QTRY_VERIFY(near(b.state.annotations[0].points[0], {160, 140}));
+        QCOMPARE(editor->property("selectedId").toString(), box.id);
+        QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier);
+        QVERIFY(near(b.state.annotations[0].points[0], {100, 100}));
+        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(200, 100));
+        QTest::keyClick(win, Qt::Key_5);
+        QCOMPARE(b.state.annotations[0].color, QString("#0a84ff"));
+        QTest::keyClick(win, Qt::Key_Delete);
+        QCOMPARE(b.state.annotations.size(), 0);
+
+        // Text is typed in place and committed with Enter.
+        QTest::keyClick(win, Qt::Key_T);
+        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(400, 300));
+        QTRY_VERIFY(editor->property("typing").isValid() && !editor->property("typing").isNull());
+        for (char c : QByteArray("Ship it"))
+            QTest::keyClick(win, c);
+        QTest::keyClick(win, Qt::Key_Return);
+        QTRY_COMPARE(b.state.annotations.size(), 1);
+        QCOMPARE(b.state.annotations[0].kind, QString("text"));
+        QCOMPARE(b.state.annotations[0].text, QString("Ship it"));
+        QVERIFY(near(b.state.annotations[0].points[0], {400, 300}));
+
+        // Steps are placed with a click.
+        for (int i = 0; i < 2; i++) {
+            QTest::keyClick(win, Qt::Key_C);
+            QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(100 + i * 100, 500));
+        }
+        QTRY_COMPARE(b.state.annotations.size(), 3);
+        QCOMPARE(b.state.annotations[2].kind, QString("step"));
+
+        // The pen keeps the pointer's path.
+        QTest::keyClick(win, Qt::Key_F);
+        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, at(500, 100));
+        for (int i = 1; i <= 10; i++)
+            QTest::mouseMove(win, at(500 + i * 20, 100 + (i % 2) * 30), 10);
+        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, at(700, 100), 10);
+        QTRY_COMPARE(b.state.annotations.size(), 4);
+        QCOMPARE(b.state.annotations[3].kind, QString("pen"));
+        QVERIFY(b.state.annotations[3].points.size() > 5);
+        b.discard();
+    }
+    void annotationExport() {
+        QTest::failOnWarning(QRegularExpression("annotations\\.js|Annotation"));
+        QTemporaryDir dir;
+        QImage shot(900, 600, QImage::Format_RGB32);
+        shot.fill(QColor("#202830"));
+        QPainter(&shot).fillRect(360, 240, 180, 120, QColor("#e04040"));
+        QVERIFY(shot.save(dir.path() + "/shot.png"));
+        Theme theme;
+        QQmlApplicationEngine engine;
+        auto frames = new Frames;
+        engine.addImageProvider("frames", frames);
+        Backend b(&theme, frames);
+        b.loadFile(dir.path() + "/shot.png");
+        b.setValue("canvas", "auto");
+        b.setValue("padding", .08);
+        b.setValue("windowTransparency", "custom");
+        b.setValue("windowOpacity", .5);
+        const auto points = [](std::initializer_list<QPointF> ps) {
+            QVariantList list;
+            for (auto p : ps)
+                list << QVariant(QVariantList{p.x(), p.y()});
+            return list;
+        };
+        QVERIFY(!b.addAnnotation({{"kind", "redact"}, {"points", points({{350, 230}, {550, 370}})}})
+                     .isEmpty());
+        QVERIFY(!b.addAnnotation({{"kind", "box"},
+                                  {"points", points({{100, 100}, {300, 200}})},
+                                  {"color", "#30d158"},
+                                  {"size", 8}})
+                     .isEmpty());
+        b.addAnnotation({{"kind", "arrow"},
+                         {"points", points({{600, 100}, {800, 250}})},
+                         {"color", "#ff375f"},
+                         {"size", 6}});
+        b.addAnnotation({{"kind", "text"},
+                         {"points", points({{560, 450}})},
+                         {"text", "Hello"},
+                         {"size", 30},
+                         {"color", "#0a84ff"}});
+        b.addAnnotation({{"kind", "step"}, {"points", points({{80, 500}})}, {"size", 40}});
+        b.addAnnotation(
+            {{"kind", "ellipse"}, {"points", points({{620, 300}, {760, 380}})}, {"fill", "tint"}});
+        b.addAnnotation({{"kind", "line"}, {"points", points({{100, 400}, {300, 420}})}});
+        b.addAnnotation({{"kind", "marker"},
+                         {"points", points({{100, 560}, {200, 565}, {300, 560}})},
+                         {"color", "#ffd60a"},
+                         {"size", 18}});
+        QCOMPARE(b.state.annotations.size(), 8);
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &b);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
+        auto cleanup = qScopeGuard([&] { delete win; });
+        QVERIFY(QTest::qWaitForWindowExposed(win));
+        auto composition = win->findChild<QQuickItem *>("composition");
+        QVERIFY(composition);
+        QTest::qWait(200);
+        auto grab = composition->grabToImage(
+            QSize(qRound(composition->width()), qRound(composition->height())));
+        QVERIFY(grab);
+        QSignalSpy ready(grab.data(), &QQuickItemGrabResult::ready);
+        QVERIFY(ready.wait(5000));
+        const auto preview = grab->image();
+        // The editor with the box selected, for the CI test evidence.
+        win->findChild<QQuickItem *>("annotationEditor")
+            ->setProperty("selectedId", b.state.annotations[1].id);
+        QTest::qWait(100);
+        win->grabWindow().save("tests/out/preview-annotation-editor.png");
+        b.outputImage(false, true);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
+        const QImage saved(b.lastExport());
+        QCOMPARE(saved.size(), b.stillSize());
+        // Where a source pixel lands in the saved PNG, from Composition's layout.
+        const double w = saved.width(), h = saved.height(), pad = .08 * w;
+        const double frameW = std::min(w - 2 * pad, (h - 2 * pad) * 1.5), scale = frameW / 900;
+        const auto out = [&](double x, double y) {
+            return saved.pixelColor(qRound((w - frameW) / 2 + x * scale),
+                                    qRound((h - frameW / 1.5) / 2 + y * scale));
+        };
+        // Annotations stay opaque over a half-transparent window.
+        QCOMPARE(out(450, 300), QColor("#000000"));
+        const auto green = out(200, 100);
+        QVERIFY2(std::abs(green.red() - 0x30) <= 3 && std::abs(green.green() - 0xd1) <= 3 &&
+                     std::abs(green.blue() - 0x58) <= 3,
+                 qPrintable(green.name()));
+        const auto pill = out(590, 452);
+        QVERIFY2(pill.blue() > 200 && pill.red() < 40, qPrintable(pill.name()));
+        const auto exported =
+            saved.scaled(preview.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        double error = 0;
+        for (int y = 0; y < preview.height(); y += 4)
+            for (int x = 0; x < preview.width(); x += 4) {
+                const auto p = preview.pixelColor(x, y), e = exported.pixelColor(x, y);
+                error += std::abs(p.red() - e.red()) + std::abs(p.green() - e.green()) +
+                         std::abs(p.blue() - e.blue());
+            }
+        error /= preview.width() * preview.height() * 3. / 16;
+        qInfo() << "ANNOTATED_PREVIEW_EXPORT mean_channel_error=" << error;
+        saved.save("tests/out/export-annotated.png");
+        QVERIFY2(error < 5, qPrintable(QString::number(error)));
+        QFile::remove(b.lastExport());
         b.discard();
     }
     void screenshotRecovery() {

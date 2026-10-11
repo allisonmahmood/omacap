@@ -15,7 +15,56 @@ ApplicationWindow {
     property bool editing: backend.phase === "editor" || backend.phase === "exporting"
     // A screenshot session: no timeline, camera or audio, and Copy/Save instead of Export.
     property bool still: backend.kind === "image"
-    property bool outputReady: still && backend.phase === "editor" && !cropping && !discardDialog.opened
+    property bool outputReady: still && backend.phase === "editor" && !cropping && !discardDialog.opened && !editor.typing
+    // Single-key annotation shortcuts, off while typing.
+    property bool markKeys: outputReady
+    // The screenshot tool row, as in Omasnap: name, key, and the editor tool it selects.
+    readonly property var tools: [{
+        "id": "select",
+        "label": "Select",
+        "key": "V"
+    }, {
+        "id": "crop",
+        "label": "Crop",
+        "key": "K"
+    }, {
+        "id": "box",
+        "label": "Box",
+        "key": "R"
+    }, {
+        "id": "ellipse",
+        "label": "Ellipse",
+        "key": "E"
+    }, {
+        "id": "arrow",
+        "label": "Arrow",
+        "key": "A"
+    }, {
+        "id": "line",
+        "label": "Line",
+        "key": "L"
+    }, {
+        "id": "text",
+        "label": "Text",
+        "key": "T"
+    }, {
+        "id": "step",
+        "label": "Step",
+        "key": "C"
+    }, {
+        "id": "pen",
+        "label": "Pen",
+        "key": "F"
+    }, {
+        "id": "marker",
+        "label": "Marker",
+        "key": "H"
+    }, {
+        "id": "redact",
+        "label": "Redact",
+        "key": "D"
+    }]
+    readonly property var markColors: ["#ff375f", "#ff9f0a", "#ffd60a", "#30d158", "#0a84ff", "#bf5af2", "#000000", "#ffffff"]
 
     function time(t) {
         return Math.floor(t / 60).toString().padStart(2, "0") + ":" + (t % 60).toFixed(1).padStart(4, "0");
@@ -35,6 +84,41 @@ ApplicationWindow {
 
     function changeZoom(a, b, x, y, amount) {
         backend.updateZoom(selectedZoom, a, b, x, y, amount);
+    }
+
+    function startCrop() {
+        backend.pause();
+        timeline.selection = "";
+        win.cropping = true;
+        cropView.begin(backend.edit.crop);
+    }
+
+    function useTool(id) {
+        if (id === "crop") {
+            editor.cancel();
+            startCrop();
+            return ;
+        }
+        editor.commitText();
+        editor.tool = id;
+        if (id !== "select")
+            editor.selectedId = "";
+    }
+
+    // Colour and size apply to the selection, and to whatever is drawn next.
+    function useColor(color) {
+        editor.color = color;
+        editor.restyle({
+            "color": color
+        });
+    }
+
+    function useSize(index) {
+        editor.size = index;
+        if (editor.selected && editor.selected.kind !== "redact")
+            editor.restyle({
+                "size": editor.sizeFor(editor.selected.kind, index)
+            });
     }
 
     // Hidden while the region picker runs, so OmaCap stays out of its own screenshot.
@@ -97,13 +181,13 @@ ApplicationWindow {
 
     Shortcut {
         sequences: [StandardKey.Undo]
-        enabled: backend.phase === "editor" && !win.cropping && !focusPicker.pressed
+        enabled: backend.phase === "editor" && !win.cropping && !focusPicker.pressed && !editor.typing
         onActivated: backend.undo()
     }
 
     Shortcut {
         sequences: [StandardKey.Redo]
-        enabled: backend.phase === "editor" && !win.cropping && !focusPicker.pressed
+        enabled: backend.phase === "editor" && !win.cropping && !focusPicker.pressed && !editor.typing
         onActivated: backend.redo()
     }
 
@@ -169,7 +253,55 @@ ApplicationWindow {
             backend.endEdit();
             timeline.selection = "";
             timeline.cutting = false;
+            editor.cancel();
         }
+    }
+
+    Instantiator {
+        model: win.tools
+
+        delegate: Shortcut {
+            required property var modelData
+
+            sequence: modelData.key
+            enabled: win.markKeys
+            onActivated: win.useTool(modelData.id)
+        }
+
+    }
+
+    Instantiator {
+        model: win.markColors
+
+        delegate: Shortcut {
+            required property int index
+            required property string modelData
+
+            sequence: String(index + 1)
+            enabled: win.markKeys
+            onActivated: win.useColor(modelData)
+        }
+
+    }
+
+    Shortcut {
+        sequences: [StandardKey.Delete, "Backspace"]
+        enabled: win.markKeys && editor.selected !== null
+        onActivated: editor.remove()
+    }
+
+    // Arrow keys nudge the selected annotation 1 px, or 10 px with Shift.
+    Instantiator {
+        model: [["Left", -1, 0], ["Right", 1, 0], ["Up", 0, -1], ["Down", 0, 1], ["Shift+Left", -10, 0], ["Shift+Right", 10, 0], ["Shift+Up", 0, -10], ["Shift+Down", 0, 10]]
+
+        delegate: Shortcut {
+            required property var modelData
+
+            sequence: modelData[0]
+            enabled: win.markKeys && editor.selected !== null
+            onActivated: editor.nudge(modelData[1], modelData[2])
+        }
+
     }
 
     CropView {
@@ -263,6 +395,75 @@ ApplicationWindow {
             height: 1
             color: theme.colors.muted
         }
+
+        RowLayout {
+            objectName: "toolRow"
+            visible: win.still && win.editing
+            enabled: backend.phase === "editor"
+            Layout.fillWidth: true
+            spacing: 4
+
+            Repeater {
+                model: win.tools
+
+                FlatButton {
+                    required property var modelData
+                    required property int index
+
+                    objectName: "tool-" + modelData.id
+                    // Shortcut hints when the window has room for them.
+                    text: modelData.label + (win.width >= 1260 ? " <font color='" + theme.colors.muted + "'>" + modelData.key + "</font>" : "")
+                    padding: 8
+                    primary: editor.tool === modelData.id
+                    Layout.leftMargin: index === 2 ? 10 : 0
+                    onClicked: win.useTool(modelData.id)
+                }
+
+            }
+
+            Item {
+                Layout.fillWidth: true
+            }
+
+            Repeater {
+                model: win.markColors
+
+                Rectangle {
+                    required property string modelData
+
+                    implicitWidth: 18
+                    implicitHeight: 18
+                    color: modelData
+                    border.width: Qt.colorEqual(editor.color, modelData) ? 2 : 1
+                    border.color: Qt.colorEqual(editor.color, modelData) ? theme.colors.foreground : theme.colors.muted
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: win.useColor(parent.modelData)
+                    }
+
+                }
+
+            }
+
+            Repeater {
+                model: ["S", "M", "L"]
+
+                FlatButton {
+                    required property int index
+                    required property string modelData
+
+                    text: modelData
+                    padding: 8
+                    primary: editor.size === index
+                    Layout.leftMargin: index === 0 ? 10 : 0
+                    onClicked: win.useSize(index)
+                }
+
+            }
+
+        }
+
 
         ColumnLayout {
             visible: !win.editing
@@ -439,15 +640,12 @@ ApplicationWindow {
                 spacing: 8
 
                 RowLayout {
+                    visible: !win.still
+
                     FlatButton {
                         text: "Crop"
-                        enabled: win.still || backend.duration > 0
-                        onClicked: {
-                            backend.pause();
-                            timeline.selection = "";
-                            win.cropping = true;
-                            cropView.begin(backend.edit.crop);
-                        }
+                        enabled: backend.duration > 0
+                        onClicked: win.startCrop()
                     }
 
                     FlatButton {
@@ -496,6 +694,8 @@ ApplicationWindow {
                             scale: fit.width / width
                             transformOrigin: Item.TopLeft
                             edit: backend.edit
+                            sourcePixels: backend.sourceSize
+                            hiddenAnnotation: editor.hiddenId
                             screenSource: win.still || backend.duration > 0 ? backend.screenSource : ""
                             cameraSource: backend.duration > 0 ? backend.cameraSource : ""
                             sourceAspect: backend.aspect
@@ -514,6 +714,15 @@ ApplicationWindow {
                                 color: theme.colors.background
                             }
 
+                        }
+
+                        AnnotationEditor {
+                            id: editor
+
+                            objectName: "annotationEditor"
+                            anchors.fill: parent
+                            visible: win.still
+                            composition: composition
                         }
 
                         MouseArea {
@@ -686,6 +895,82 @@ ApplicationWindow {
                                 backend.deleteZoom(win.selectedZoom);
                                 timeline.selection = "";
                             }
+                        }
+
+                    }
+
+                    // The selected annotation's own options; colour and size are in the tool row.
+                    ColumnLayout {
+                        objectName: "annotationControls"
+                        visible: win.still && editor.selected !== null
+                        Layout.fillWidth: true
+                        spacing: 10
+
+                        Label {
+                            text: (win.tools.find((t) => t.id === editor.selected?.kind)?.label ?? "").toUpperCase()
+                            font.bold: true
+                        }
+
+                        RowLayout {
+                            visible: ["box", "ellipse"].includes(editor.selected?.kind)
+                            spacing: 0
+
+                            Repeater {
+                                model: ["Outline", "Solid", "Tint"]
+
+                                FlatButton {
+                                    required property string modelData
+
+                                    text: modelData
+                                    primary: editor.selected?.fill === modelData.toLowerCase()
+                                    onClicked: editor.restyle({
+                                        "fill": modelData.toLowerCase()
+                                    })
+                                }
+
+                            }
+
+                        }
+
+                        RowLayout {
+                            visible: editor.selected?.kind === "text"
+                            spacing: 0
+
+                            Repeater {
+                                model: ["Pill", "Plain"]
+
+                                FlatButton {
+                                    required property string modelData
+
+                                    text: modelData
+                                    primary: (editor.selected?.pill ?? true) === (modelData === "Pill")
+                                    onClicked: {
+                                        editor.textPill = modelData === "Pill";
+                                        editor.restyle({
+                                            "pill": editor.textPill
+                                        });
+                                    }
+                                }
+
+                            }
+
+                        }
+
+                        Label {
+                            visible: editor.selected?.kind === "text"
+                            text: "Double-click the text to edit it."
+                            color: theme.colors.dark_foreground
+                        }
+
+                        FlatButton {
+                            text: "Delete"
+                            onClicked: editor.remove()
+                        }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 1
+                            color: theme.colors.lighter_background
                         }
 
                     }
