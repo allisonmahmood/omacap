@@ -7,6 +7,7 @@
 #include <memory>
 
 class RecordingChrome;
+class WindowGuard;
 
 // Records one monitor area at a time, so that nothing OmaCap shows ends up in the file.
 //
@@ -27,8 +28,6 @@ class Recorder : public QObject {
     // Cancels a countdown, or ends the recording.
     void stop();
     State state() const { return m_state; }
-    // Seconds left in the countdown; 3 until every source delivers.
-    int countdown() const { return m_countdown; }
 
   signals:
     void stateChanged();
@@ -54,5 +53,6 @@ class Recorder : public QObject {
     QTimer countdownTimer;
     QSettings settings;
     std::unique_ptr<RecordingChrome> chrome;
+    std::unique_ptr<WindowGuard> guard;
     QString stopHint;
 };

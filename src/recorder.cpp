@@ -8,6 +8,7 @@
 #include <QGuiApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QEvent>
 #include <QWindow>
 #include <signal.h>
 #include <sys/prctl.h>
@@ -26,6 +27,29 @@ void hideOtherWindows(const RecordingChrome &chrome) {
 }
 } // namespace
 
+// While a countdown or recording runs, hides any other window of this process as soon as it
+// is shown. The hide is queued, so it runs before the compositor configures the new surface
+// and the window never draws a frame.
+class WindowGuard : public QObject {
+  public:
+    explicit WindowGuard(const RecordingChrome &chrome) : chrome(chrome) {
+        qApp->installEventFilter(this);
+    }
+
+  protected:
+    bool eventFilter(QObject *object, QEvent *event) override {
+        auto *window = qobject_cast<QWindow *>(object);
+        if (event->type() == QEvent::Show && window && !window->parent() && !chrome.owns(window)) {
+            qWarning("Hiding a window shown while recording.");
+            QMetaObject::invokeMethod(window, &QWindow::hide, Qt::QueuedConnection);
+        }
+        return false;
+    }
+
+  private:
+    const RecordingChrome &chrome;
+};
+
 Recorder::Recorder(QObject *parent) : QObject(parent) {
     countdownTimer.setInterval(1000);
     connect(&countdownTimer, &QTimer::timeout, this, &Recorder::tick);
@@ -34,6 +58,7 @@ Recorder::Recorder(QObject *parent) : QObject(parent) {
     connect(&worker, &QProcess::finished, this, [this] {
         parseWorker();
         countdownTimer.stop();
+        guard.reset();
         chrome.reset();
         removeMarker();
         // A recording cut short keeps whatever media was written, for the editor to recover.
@@ -46,6 +71,7 @@ Recorder::Recorder(QObject *parent) : QObject(parent) {
     connect(&worker, &QProcess::errorOccurred, this, [this](QProcess::ProcessError problem) {
         if (problem != QProcess::FailedToStart)
             return;
+        guard.reset();
         chrome.reset();
         removeMarker();
         setState(State::Idle);
@@ -79,8 +105,10 @@ void Recorder::start(const RecordRequest &next, const QString &path, bool synthe
     stopHint = "Run omacap --record again to stop";
     chrome = std::make_unique<RecordingChrome>(request, stopHint);
     connect(chrome.get(), &RecordingChrome::stopClicked, this, &Recorder::stop);
-    if (!synthetic)
+    if (!synthetic) {
+        guard = std::make_unique<WindowGuard>(*chrome);
         lookUpHotkey();
+    }
     const QString script = omacapRuntimeDir() + "/capture.py";
     QFile::remove(script);
     QFile::copy(":/scripts/capture.py", script);
@@ -136,7 +164,6 @@ void Recorder::stop() {
 void Recorder::tick() {
     if (--m_countdown > 0) {
         chrome->showCountdown(m_countdown);
-        emit stateChanged();
         return;
     }
     countdownTimer.stop();
@@ -175,6 +202,7 @@ void Recorder::parseWorker() {
         } else if (event == "stopping") {
             // Nothing captured from now on is kept, so the chrome may go and other OmaCap
             // windows may show again.
+            guard.reset();
             if (chrome)
                 chrome->hide();
             removeMarker();
