@@ -24,17 +24,19 @@ add_subdirectory(snap)
 # The video editor: recording, edit model, timeline and exports.
 add_library(omacap-video STATIC
   src/backend.cpp src/backend.h
+  src/chrome-items.cpp src/chrome-items.h
   src/exporter.cpp src/exporter.h
   src/frames.h
   src/model.cpp src/model.h
   src/theme.cpp src/theme.h
+  src/video-icons.cpp src/video-icons.h
   src/video-owner.cpp src/video-owner.h
   src/waveforms.cpp src/waveforms.h
 )
 target_include_directories(omacap-video PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(omacap-video PUBLIC cxx_std_23)
 target_compile_options(omacap-video PRIVATE -Wall -Wextra)
-target_link_libraries(omacap-video PUBLIC omacap-ipc
+target_link_libraries(omacap-video PUBLIC omacap-ipc omasnap-core
   Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickControls2
   Qt6::Multimedia Qt6::OpenGL Qt6::Network)
 

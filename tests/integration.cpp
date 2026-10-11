@@ -1733,16 +1733,19 @@ class Integration : public QObject {
         auto write = [&](QString accent) {
             QFile f(dir.path() + "/theme/colors.toml");
             QVERIFY(f.open(QIODevice::WriteOnly));
-            f.write(QString("accent = \"%1\"\nbackground = \"#101010\"\n").arg(accent).toUtf8());
+            f.write(QString("accent = \"%1\"\nbackground = \"#101010\"\nforeground = \"#eeeeee\"\n")
+                        .arg(accent)
+                        .toUtf8());
         };
         write("#123456");
         const auto previousRoot = qgetenv("OMACAP_THEME_ROOT");
         auto restoreTheme = qScopeGuard([&] { qputenv("OMACAP_THEME_ROOT", previousRoot); });
         qputenv("OMACAP_THEME_ROOT", dir.path().toUtf8());
+        // Omasnap's chrome theme needs both a background and a foreground.
         Theme t;
-        QCOMPARE(t.colors()["accent"].toString(), QString("#123456"));
+        QTRY_COMPARE(t.accent(), QColor("#123456"));
         write("#abcdef");
-        QTRY_COMPARE_WITH_TIMEOUT(t.colors()["accent"].toString(), QString("#abcdef"), 2000);
+        QTRY_COMPARE_WITH_TIMEOUT(t.accent(), QColor("#abcdef"), 2000);
     }
     void delayedTracks() {
         Theme t;
