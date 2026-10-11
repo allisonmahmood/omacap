@@ -86,7 +86,8 @@ add_library(omasnap-core STATIC
   src/stroke-smoothing.hpp
   ${PROTOCOL_SOURCES}
   src/editor.cpp
-  src/editor-save-as.cpp
+  src/editor-choosers.cpp
+  src/editor-look.cpp
   src/editor.hpp
   src/main.cpp
   src/snap-main.hpp

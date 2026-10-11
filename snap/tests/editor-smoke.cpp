@@ -12404,6 +12404,11 @@ int main(int argc, char **argv) {
   }
   CollapseShortcutGuides collapseGuides;
   application.installEventFilter(&collapseGuides);
+  // Early, before main() keeps editors of its own alive under the pointer.
+  if (!runLookSmoke(application, snapshotError)) {
+    qWarning().noquote() << "look smoke failed:" << snapshotError;
+    return 150;
+  }
   if (!runScrollFocusSmoke(snapshotError)) {
     qWarning().noquote() << snapshotError;
     return 224;
@@ -14043,11 +14048,6 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  QString lookError;
-  if (!runLookSmoke(application, lookError)) {
-    qWarning().noquote() << "look smoke failed:" << lookError;
-    return 150;
-  }
 
   QString paletteError;
   if (!runPaletteConfigSmoke(paletteError)) {

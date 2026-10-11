@@ -204,6 +204,14 @@ void drawToolbarIcon(QPainter &painter, const QRectF &bounds,
     path.lineTo(14, 12);
     path.lineTo(21, 19);
     painter.drawPath(path);
+  } else if (action == QStringLiteral("look-frame")) {
+    // A card inside its padding.
+    painter.drawRoundedRect(QRectF(3, 3, 18, 18), 4, 4);
+    painter.drawRoundedRect(QRectF(7.5, 7.5, 9, 9), 2, 2);
+  } else if (action == QStringLiteral("look-glass")) {
+    // Lucide's blend: two discs, one seen through the other.
+    painter.drawEllipse(QPointF(9, 9), 6, 6);
+    painter.drawEllipse(QPointF(15, 15), 6, 6);
   } else if (action == QStringLiteral("undo") ||
              action == QStringLiteral("redo")) {
     const bool forward = action == QStringLiteral("redo");

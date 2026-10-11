@@ -284,9 +284,110 @@ bool checkCardPainting(QString &error) {
   }
   return true;
 }
+/// The toolbar's look popovers: hovering a look button opens its popover;
+/// a slider drag previews live and is one undo step; segments and swatches
+/// commit at once.
+bool checkPopovers(QApplication &application, QString &error) {
+  const CaptureData capture = solidCapture({480, 300}, 1.0, Qt::darkCyan);
+  CaptureLook start;
+  start.backdrop = BackgroundStyle::Slate;
+  Operation look;
+  look.type = Operation::Type::Look;
+  look.look = start;
+  OperationLog log;
+  log.ops = {look};
+  log.index = 1;
+  log.previewSize = capture.previewSize;
+  CaptureEditor editor(capture, CaptureEditor::CaptureMode::File,
+                       QuickOutputMode::None, log);
+  editor.resize(800, 600);
+  editor.show();
+  editor.waitForPictures();
+  application.processEvents();
+  const auto hover = [&](const QString &action) {
+    QTest::mouseMove(&editor, editor.toolbarButtonCenterForTest(action));
+    application.processEvents();
+  };
+
+  hover(QStringLiteral("look-frame"));
+  const QRectF track = editor.lookControlRectForTest(QStringLiteral("padding"));
+  if (editor.lookPopoverForTest() != CaptureEditor::LookPopover::Frame ||
+      track.isEmpty()) {
+    error = QStringLiteral("Hovering Frame did not open its popover");
+    return false;
+  }
+  // Down into the popover, as a pointer would travel.
+  QTest::mouseMove(&editor, QPoint(qRound(track.center().x()),
+                                   qRound(track.top()) - 30));
+  QTest::mouseMove(&editor, track.center().toPoint());
+  const qsizetype before = editor.operationLog().size();
+  QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier,
+                    QPoint(qRound(track.left() + track.width() * 0.2),
+                           qRound(track.center().y())));
+  for (const qreal along : {0.4, 0.6, 0.8})
+    QTest::mouseMove(&editor, QPoint(qRound(track.left() + track.width() * along),
+                                     qRound(track.center().y())));
+  const qreal live = editor.currentLookForTest().padding;
+  QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier,
+                      QPoint(qRound(track.left() + track.width() * 0.8),
+                             qRound(track.center().y())));
+  application.processEvents();
+  if (std::abs(live - 0.2) > 0.01 || editor.operationLog().size() != before + 1 ||
+      std::abs(editor.currentLookForTest().padding - 0.2) > 0.01) {
+    error = QStringLiteral("A padding drag was not one live, undoable step (%1)")
+                .arg(editor.currentLookForTest().padding);
+    return false;
+  }
+  QTest::keyClick(&editor, Qt::Key_Z, Qt::ControlModifier);
+  if (editor.currentLookForTest() != start) {
+    error = QStringLiteral("Undo did not take back the whole padding drag");
+    return false;
+  }
+
+  QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier,
+                    editor.lookControlCenterForTest(QStringLiteral("aspect-wide")));
+  if (editor.currentLookForTest().aspect != CanvasAspect::Wide) {
+    error = QStringLiteral("The 16:9 segment did not set the canvas");
+    return false;
+  }
+
+  hover(QStringLiteral("look-backdrop"));
+  const QPoint aurora = editor.lookControlCenterForTest(QStringLiteral("aurora"));
+  QTest::mouseMove(&editor, QPoint(aurora.x(), aurora.y() - 30));
+  QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, aurora);
+  if (editor.lookPopoverForTest() != CaptureEditor::LookPopover::Backdrop ||
+      editor.currentLookForTest().backdrop != BackgroundStyle::Aurora) {
+    error = QStringLiteral("The Aurora swatch did not set the backdrop");
+    return false;
+  }
+
+  hover(QStringLiteral("look-glass"));
+  const QRectF opacity = editor.lookControlRectForTest(QStringLiteral("opacity"));
+  QTest::mouseMove(&editor, QPoint(qRound(opacity.center().x()),
+                                   qRound(opacity.top()) - 40));
+  QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier,
+                    opacity.center().toPoint());
+  QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier,
+                      opacity.center().toPoint());
+  if (editor.currentLookForTest().glass != Glass::Custom) {
+    error = QStringLiteral("Moving the opacity slider did not pick Custom glass");
+    return false;
+  }
+
+  // Leaving the popover closes it; nothing drew on the canvas meanwhile.
+  QTest::mouseMove(&editor, QPoint(600, 560));
+  application.processEvents();
+  if (editor.lookPopoverForTest() != CaptureEditor::LookPopover::None ||
+      editor.annotationCountForTest() != 0) {
+    error = QStringLiteral("The look popover stayed open or drew a layer");
+    return false;
+  }
+  editor.close();
+  return true;
+}
 } // namespace
 
 bool runLookSmoke(QApplication &application, QString &error) {
   return checkLayoutMaths(error) && checkLookPersistence(application, error) &&
-         checkCardPainting(error);
+         checkCardPainting(error) && checkPopovers(application, error);
 }

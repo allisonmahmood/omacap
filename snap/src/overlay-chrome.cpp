@@ -229,3 +229,23 @@ void drawStatusPill(QPainter &painter, const QRect &bounds,
   painter.setPen(chromeTheme().foreground);
   painter.drawText(pill, Qt::AlignCenter, text);
 }
+
+void drawInstantTooltip(QPainter &painter, const QRect &bounds,
+                        const QRectF &anchor, const QString &text) {
+  if (text.isEmpty())
+    return;
+  painter.setFont(chromeFont(12));
+  const qreal width = painter.fontMetrics().horizontalAdvance(text) + 20;
+  const qreal height = 28;
+  qreal x = std::clamp(anchor.center().x() - width / 2.0, 8.0,
+                       std::max(8.0, bounds.width() - width - 8.0));
+  qreal y = anchor.top() - height - 7;
+  if (y < 6)
+    y = anchor.bottom() + 7;
+  const QRectF pill(x, y, width, height);
+  painter.setPen(QPen(chromeTheme().tooltipBorder, 1));
+  painter.setBrush(chromeTheme().tooltipBackground);
+  painter.drawRoundedRect(pill, 7, 7);
+  painter.setPen(chromeTheme().tooltipText);
+  painter.drawText(pill, Qt::AlignCenter, text);
+}

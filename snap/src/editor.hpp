@@ -23,7 +23,7 @@
 #include <optional>
 #include <memory>
 
-class QFileDialog;
+class QDialog;
 class QKeyEvent;
 class QCloseEvent;
 class QEnterEvent;
@@ -405,6 +405,14 @@ public:
     return customColorPickerOpen_;
   }
   [[nodiscard]] bool shapeMenuOpenForTest() const { return shapeMenuOpen_; }
+  /// The look popover open under the toolbar, if any.
+  enum class LookPopover { None, Backdrop, Frame, Glass };
+  [[nodiscard]] LookPopover lookPopoverForTest() const { return lookPopover_; }
+  [[nodiscard]] QRectF lookPopoverRectForTest() const { return lookPopoverRect(); }
+  /// Center of a control in the open look popover ("aurora", "padding",
+  /// "aspect-wide", …), or (-1,-1).
+  [[nodiscard]] QPoint lookControlCenterForTest(const QString &id) const;
+  [[nodiscard]] QRectF lookControlRectForTest(const QString &id) const;
   /// Whether window selection is active in the select phase. Test accessor.
   [[nodiscard]] bool windowModeForTest() const { return windowMode_; }
   /// Whether clicks are inferred as window/fullscreen while drags stay areas.
@@ -672,14 +680,47 @@ private:
   friend bool runSaveAsSmoke(QString &error);
   void cancelSaveAs();
   void restoreSaveAsFocus();
+  /// Shows a chooser the way every chooser over the overlay is shown: the
+  /// overlay hides and gives up the keyboard so the floating dialog can take
+  /// it, and returns once the dialog has fully closed. `done` then runs with
+  /// whether it was accepted, unless a newer chooser or closing the editor
+  /// made it stale.
+  void openChooser(QDialog *dialog, std::function<void(bool accepted)> done);
   void saveAs();
   void showSaveAsDialog(const QString &suggested);
   void saveAsToPath(const QString &path);
+  /// The Colour… and Image… backdrops: a floating chooser, then one Look.
+  void chooseBackdropColour();
+  void chooseBackdropImage();
   void finish(OutputMode mode);
   void completeFinish(const FinishResult &result);
   void handleEscape();
   void handleToolbar(const QString &action);
   void paintEdit(QPainter &painter);
+  /// A control in a look popover: a backdrop swatch, a slider, one segment
+  /// of a segmented row, or that row's label.
+  struct LookControl {
+    enum class Kind { Swatch, Slider, Segment, Label };
+    Kind kind = Kind::Swatch;
+    QRectF rect;
+    QString id;
+    QString label;
+    bool selected = false;
+  };
+  [[nodiscard]] QRectF lookPopoverRect() const;
+  [[nodiscard]] QVector<LookControl> lookControls() const;
+  void paintLookPopover(QPainter &painter);
+  /// Opens, keeps or closes the look popovers as the pointer moves, the way
+  /// the palette does. Returns whether anything shown changed.
+  bool trackLookPopover();
+  /// A press inside the open popover. Returns whether it was consumed.
+  bool pressLookPopover(const QPointF &point);
+  /// A slider drag previews the look live and commits it once, on release,
+  /// as one undo step.
+  void dragLookSlider(const QPointF &point);
+  void releaseLookSlider();
+  void applyLookControl(const QString &id);
+  [[nodiscard]] QString lookStatus(const CaptureLook &look) const;
   void paintSelect(QPainter &painter);
   void refreshBackdropCache();
   void refreshComposedCapture();
@@ -1002,7 +1043,13 @@ private:
   QFutureWatcher<FinishResult> finishWatcher_;
   bool saveAsActive_ = false;
   quint64 saveAsRequest_ = 0;
-  QPointer<QFileDialog> saveAsDialog_;
+  /// The open chooser (Save As, backdrop colour or image), if any.
+  QPointer<QDialog> chooser_;
+  LookPopover lookPopover_ = LookPopover::None;
+  QPointF lookIntentOrigin_;
+  /// The slider being dragged, and the look before the drag.
+  QString lookSlider_;
+  CaptureLook lookBeforeSlider_;
   QString saveAsDirectory_;
   QFuture<QString> saveAsFuture_;
   QFuture<QString> dismissFuture_;

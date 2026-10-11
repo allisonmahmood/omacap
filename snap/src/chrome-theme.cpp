@@ -235,25 +235,34 @@ QString ChromeTheme::tooltipStyleSheet() const {
 }
 
 QString ChromeTheme::fileDialogStyleSheet() const {
-  // Scope every rule to the chooser: editor text remains transparent and
+  // Scope every rule to the choosers: editor text remains transparent and
   // annotation colors are independent of the desktop theme.
-  return QStringLiteral(
-             "QFileDialog, QFileDialog QWidget { background: %1; color: %2; }"
-             "QFileDialog QLineEdit, QFileDialog QAbstractItemView { "
-             "background: %3; selection-background-color: %4; "
-             "selection-color: %5; }"
-             "QFileDialog QPushButton, QFileDialog QToolButton, "
-             "QFileDialog QComboBox { background: %6; color: %7; "
-             "border: 1px solid %8; border-radius: 4px; padding: 5px; }"
-             "QFileDialog QPushButton:hover, QFileDialog QToolButton:hover { "
-             "background: %9; color: %10; }"
-             "QFileDialog QPushButton:default, QFileDialog QLineEdit:focus { "
-             "border: 1px solid %4; }"
-             "QFileDialog QWidget:disabled { color: %11; }")
-      .arg(cssColor(surface), cssColor(foreground), cssColor(canvasSurface),
-           cssColor(accent), cssColor(accentText), cssColor(button),
-           cssColor(buttonText), cssColor(tooltipBorder),
-           cssColor(buttonHover), cssColor(buttonHoverText), cssColor(muted));
+  QString sheet;
+  for (const QString &dialog :
+       {QStringLiteral("QFileDialog"), QStringLiteral("QColorDialog")}) {
+    // Substitute the dialog before the colours, which could contain a D.
+    sheet += QStringLiteral(
+                 "D, D QWidget { background: %1; color: %2; }"
+                 "D QLineEdit, D QAbstractItemView, D QSpinBox { "
+                 "background: %3; selection-background-color: %4; "
+                 "selection-color: %5; }"
+                 "D QPushButton, D QToolButton, D QComboBox { background: %6; "
+                 "color: %7; border: 1px solid %8; border-radius: 4px; "
+                 "padding: 5px; }"
+                 "D QPushButton:hover, D QToolButton:hover { background: %9; "
+                 "color: %10; }"
+                 "D QPushButton:default, D QLineEdit:focus { "
+                 "border: 1px solid %4; }"
+                 "D QWidget:disabled { color: %11; }")
+                 .replace(QLatin1Char('D'), dialog)
+                 .arg(cssColor(surface), cssColor(foreground),
+                      cssColor(canvasSurface), cssColor(accent),
+                      cssColor(accentText), cssColor(button),
+                      cssColor(buttonText), cssColor(tooltipBorder),
+                      cssColor(buttonHover), cssColor(buttonHoverText),
+                      cssColor(muted));
+  }
+  return sheet;
 }
 
 QString chromeThemeDirectory() {

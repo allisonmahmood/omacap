@@ -147,16 +147,16 @@ private:
 namespace {
 constexpr std::array<qreal, 3> kTextSizes{2.0, 5.0, 9.0};
 constexpr std::array<const char *, 3> kTextSizeNames{"S", "M", "L"};
-constexpr qreal kToolbarWidth = 840;
+constexpr qreal kToolbarWidth = 917;
 // Toolbar row to the top of the image below it.
 constexpr qreal kToolbarImageGap = 18.0;
 // Preserve the editor's established top inset without capture-mode chrome.
 constexpr qreal kToolbarTop = 39.0;
 /// Extra spacing between toolbar groups (history / style / tools / actions),
 /// so the row reads as clusters rather than one flat strip. Ordinary gaps are
-/// tightened from 4px to 2.5px; across the 20 gaps that exactly pays for these
-/// three 10px additions, keeping the existing 840px toolbar envelope and,
-/// crucially, the canvas fit geometry derived from its scale.
+/// tightened from 4px to 2.5px; across the gaps that pays for these three
+/// 10px additions. The look buttons (frame and glass) widen Omasnap's 840px
+/// envelope by two 36px buttons and their gaps.
 constexpr qreal kToolbarGroupGap = 10;
 constexpr qreal kMinimumRedactionExtent = 5.0;
 constexpr int kBackdropDim = 143;
@@ -286,12 +286,15 @@ constexpr qreal kRecentCardHeight = 84.0;
 constexpr qreal kRecentCardGap = 10.0;
 constexpr qreal kRecentEdgeMargin = 18.0;
 
-qreal toolbarScale(qreal availableWidth) {
+qreal toolbarScale(qreal availableWidth, qreal rowWidth = kToolbarWidth) {
   constexpr qreal sideMargins = 16.0;
   return std::min<qreal>(
-      1.0,
-      std::max<qreal>(0.1, (availableWidth - sideMargins) / kToolbarWidth));
+      1.0, std::max<qreal>(0.1, (availableWidth - sideMargins) / rowWidth));
 }
+/// Omasnap's row, without OmaCap's frame and glass buttons. The band above
+/// the image is sized for it, so the canvas sits where Omasnap puts it and a
+/// narrow window only scales the wider row a little further down.
+constexpr qreal kOmasnapToolbarWidth = 840;
 // A spotlight at 1x is not a failed zoom, it is a plain highlight: the dimming
 // still isolates the region. Name that state so it reads as somewhere to stop
 // rather than the bottom of a range.
@@ -648,26 +651,6 @@ QPointF constrainedRedactionEndpoint(const QPointF &candidate,
 
 /// One top-to-bottom pass of the OCR scan band.
 constexpr qint64 kOcrSweepMs = 1200;
-
-void drawInstantTooltip(QPainter &painter, const QRect &bounds,
-                        const QRectF &anchor, const QString &text) {
-  if (text.isEmpty())
-    return;
-  painter.setFont(chromeFont(12));
-  const qreal width = painter.fontMetrics().horizontalAdvance(text) + 20;
-  const qreal height = 28;
-  qreal x = std::clamp(anchor.center().x() - width / 2.0, 8.0,
-                       std::max(8.0, bounds.width() - width - 8.0));
-  qreal y = anchor.top() - height - 7;
-  if (y < 6)
-    y = anchor.bottom() + 7;
-  const QRectF pill(x, y, width, height);
-  painter.setPen(QPen(chromeTheme().tooltipBorder, 1));
-  painter.setBrush(chromeTheme().tooltipBackground);
-  painter.drawRoundedRect(pill, 7, 7);
-  painter.setPen(chromeTheme().tooltipText);
-  painter.drawText(pill, Qt::AlignCenter, text);
-}
 
 /**
  * Formats a native pixel size for the measurement readout. The number is the
@@ -2154,7 +2137,8 @@ qreal CaptureEditor::imageTopMargin() const {
   // any window size, small ones included. Rounded to a whole pixel: a
   // fractional margin puts the image at a fractional offset even at scale 1,
   // which is needless sub-pixel blur for no visual benefit.
-  return std::round(toolbarTop() + 36.0 * toolbarScale(width()) +
+  return std::round(toolbarTop() +
+                    36.0 * toolbarScale(width(), kOmasnapToolbarWidth) +
                     kToolbarImageGap);
 }
 
@@ -2247,7 +2231,8 @@ bool CaptureEditor::canStartAnnotationAt(const QPointF &position) const {
   if ((colorPaletteOpen_ && colorPaletteRect().contains(position)) ||
       (customColorPickerOpen_ && customColorPanelRect().contains(position)) ||
       (shapeMenuOpen_ && shapeMenuRect().contains(position)) ||
-      (textSizeMenuOpen_ && textSizePanelRect().contains(position)))
+      (textSizeMenuOpen_ && textSizePanelRect().contains(position)) ||
+      lookPopoverRect().contains(position))
     return false;
   if (requiresSourcePixels(tool_))
     return sourceFrameWidgetRect().contains(position);
@@ -2662,9 +2647,15 @@ CaptureEditor::toolbarButtons(QVector<qreal> *groupDividers,
       QStringLiteral("Redo · Ctrl+Shift+Z / Ctrl+Y"));
   endGroup();
 
-  // Style: canvas backdrop and annotation color.
-  add(36, QStringLiteral("background"), {},
-      QStringLiteral("Cycle backdrop · B"));
+  // Style: the look (backdrop, frame, glass), then annotation color.
+  add(36, QStringLiteral("look-backdrop"), {},
+      QStringLiteral("Backdrop · %1 · B cycles")
+          .arg(backgroundStyleLabel(look_.backdrop).remove(QLatin1Char('…'))));
+  add(36, QStringLiteral("look-frame"), {},
+      QStringLiteral("Padding, corners, shadow, canvas · Shift+B shadow"));
+  add(36, QStringLiteral("look-glass"), {},
+      QStringLiteral("Window opacity · %1%")
+          .arg(qRound(look_.cardOpacity() * 100)));
   add(36, QStringLiteral("palette"), {}, QStringLiteral("Annotation color"),
       annotationColor());
   endGroup();
@@ -4165,7 +4156,8 @@ void CaptureEditor::restoreSaveAsFocus() {
 void CaptureEditor::finish(OutputMode mode) {
   // An unfinished gesture or default backdrop has not entered the log yet.
   // Wait for it before taking the immutable export/document snapshot.
-  if (busy_ || dragging_ || !picturesReady() || selection_.isEmpty())
+  if (busy_ || dragging_ || !lookSlider_.isEmpty() || !picturesReady() ||
+      selection_.isEmpty())
     return;
   endNudgeRun();
   busy_ = true;
@@ -4406,8 +4398,12 @@ void CaptureEditor::handleToolbar(const QString &action) {
     customColorPickerOpen_ = !customColorPickerOpen_;
   } else if (action == QStringLiteral("ocr"))
     runOcr();
-  else if (action == QStringLiteral("background"))
-    cycleBackground();
+  else if (action == QStringLiteral("look-backdrop"))
+    lookPopover_ = LookPopover::Backdrop;
+  else if (action == QStringLiteral("look-frame"))
+    lookPopover_ = LookPopover::Frame;
+  else if (action == QStringLiteral("look-glass"))
+    lookPopover_ = LookPopover::Glass;
   else if (action == QStringLiteral("undo")) {
     undoEdit();
   } else if (action == QStringLiteral("redo")) {
@@ -5359,6 +5355,10 @@ void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
     if (!dragging_)
       updatePointerCursor();
   } else {
+    if (!lookSlider_.isEmpty()) {
+      dragLookSlider(cursor_);
+      return;
+    }
     if (tool_ == Tool::Select && marqueeSelecting_) {
       marqueeRect_ = QRectF(dragStart_, toAnnotationPoint(cursor_)).normalized();
       updatePointerCursor();
@@ -5670,6 +5670,11 @@ void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
       paletteIntentOrigin_ = {};
       customColorIntentOrigin_ = {};
     }
+    const QRectF lookPanel = lookPopoverRect();
+    if (trackLookPopover())
+      update();
+    else if (!lookPanel.isEmpty())
+      update(lookPanel.adjusted(-8, -40, 8, 8).toAlignedRect());
   }
   updatePointerCursor();
   LiveCanvas canvas;
@@ -5774,6 +5779,10 @@ void CaptureEditor::mousePressEvent(QMouseEvent *event) {
       // motion returns to narrow damage regions.
       update();
     }
+    return;
+  }
+  if (pressLookPopover(cursor_)) {
+    updatePointerCursor();
     return;
   }
   if (customColorPickerOpen_) {
@@ -6097,6 +6106,10 @@ void CaptureEditor::mousePressEvent(QMouseEvent *event) {
 }
 
 void CaptureEditor::mouseReleaseEvent(QMouseEvent *event) {
+  if (event->button() == Qt::LeftButton && !lookSlider_.isEmpty()) {
+    releaseLookSlider();
+    return;
+  }
   if (event->button() == Qt::MiddleButton && panning_) {
     panning_ = false;
     updatePointerCursor();
@@ -6615,7 +6628,8 @@ void CaptureEditor::updatePointerCursor() {
   }
   if ((colorPaletteOpen_ && colorPaletteRect().contains(cursor_)) ||
       (customColorPickerOpen_ && customColorPanelRect().contains(cursor_)) ||
-      (shapeMenuOpen_ && shapeMenuRect().contains(cursor_))) {
+      (shapeMenuOpen_ && shapeMenuRect().contains(cursor_)) ||
+      !lookSlider_.isEmpty() || lookPopoverRect().contains(cursor_)) {
     clearHighlighterPreview();
     applyCursor(Qt::PointingHandCursor);
     return;
@@ -6922,6 +6936,8 @@ void CaptureEditor::returnToSelect() {
   customColorPickerOpen_ = false;
   shapeMenuOpen_ = false;
   textSizeMenuOpen_ = false;
+  lookPopover_ = LookPopover::None;
+  lookSlider_.clear();
   dismissOcrOverlay();
   // Everything edited derives from the op log; an empty log is the untouched
   // screen again.
@@ -7377,7 +7393,9 @@ QVector<QPair<QString, QString>> editorHotkeyEntries() {
           {QStringLiteral("1–8"), QStringLiteral("Color")},
           {QStringLiteral("Wheel"), QStringLiteral("Zoom selected / tool size")},
           {QStringLiteral("D / O"), QStringLiteral("Redact / OCR text")},
-          {QStringLiteral("B / P"), QStringLiteral("Backdrop / Pin on screen")},
+          {QStringLiteral("B / Shift+B"), QStringLiteral("Next backdrop / shadow")},
+          {QStringLiteral("G"), QStringLiteral("Canvas growth")},
+          {QStringLiteral("P"), QStringLiteral("Pin on screen")},
           {QStringLiteral("W"), QStringLiteral("Editor to window / overlay")},
           {QStringLiteral("Ctrl+Z"), QStringLiteral("Undo")},
           {QStringLiteral("Ctrl+Shift+Z"), QStringLiteral("Redo")},
@@ -7850,8 +7868,12 @@ void CaptureEditor::paintEdit(QPainter &painter) {
         (button.action == QStringLiteral("shape-ellipse") &&
          tool_ == Tool::Ellipse) ||
         (button.action == QStringLiteral("shape-fill") && fillShapes_) ||
-        (button.action == QStringLiteral("background") &&
-         look_.backdrop != BackgroundStyle::Off) ||
+        (button.action == QStringLiteral("look-backdrop") &&
+         lookPopover_ == LookPopover::Backdrop) ||
+        (button.action == QStringLiteral("look-frame") &&
+         lookPopover_ == LookPopover::Frame) ||
+        (button.action == QStringLiteral("look-glass") &&
+         lookPopover_ == LookPopover::Glass) ||
         (button.action == QStringLiteral("palette") && colorPaletteOpen_) ||
         (button.action == QStringLiteral("custom-color") &&
          usingCustomColor_) ||
@@ -7870,7 +7892,23 @@ void CaptureEditor::paintEdit(QPainter &painter) {
     if (button.action == QStringLiteral("both"))
       painter.setBrush(chromeTheme().accent);
     painter.drawRoundedRect(button.rect, 8, 8);
-    if (button.color.isValid()) {
+    if (button.action == QStringLiteral("look-backdrop") &&
+        look_.backdrop != BackgroundStyle::Off) {
+      // The button wears the backdrop it opens, as the palette its color.
+      const QRectF swatch(button.rect.center() - QPointF(9, 7), QSizeF(18, 14));
+      QPainterPath shape;
+      shape.addRoundedRect(swatch, 3, 3);
+      painter.save();
+      painter.setClipPath(shape);
+      paintCaptureBackground(painter, swatch, look_.backdrop,
+                             lookPicture(look_), look_.color);
+      painter.restore();
+      painter.setBrush(Qt::NoBrush);
+      painter.setPen(QPen(chromeAlpha(chromeTheme().foreground,
+                                      selected ? 230 : 110),
+                          1));
+      painter.drawRoundedRect(swatch, 3, 3);
+    } else if (button.color.isValid()) {
       const QPointF center = button.rect.center();
       painter.setPen(QPen(selected ? chromeTheme().foreground : chromeAlpha(chromeTheme().foreground, 80),
                           selected ? 2 : 1));
@@ -7886,6 +7924,8 @@ void CaptureEditor::paintEdit(QPainter &painter) {
                                      : button.action == QStringLiteral("tool-cut") &&
                                              cutInsertHint()
                                            ? QStringLiteral("tool-cut-insert")
+                                     : button.action == QStringLiteral("look-backdrop")
+                                           ? QStringLiteral("background")
                                            : button.action;
       const QColor text = button.action == QStringLiteral("both")
                               ? theme.accentText
@@ -7894,6 +7934,7 @@ void CaptureEditor::paintEdit(QPainter &painter) {
       drawToolbarIcon(painter, button.rect, icon, button.label, text);
     }
   }
+  paintLookPopover(painter);
   if (textSizeMenuOpen_ && !colorPaletteOpen_ && !customColorPickerOpen_) {
     const QRectF panel = textSizePanelRect();
     painter.setPen(QPen(chromeTheme().panelBorder.brush(panel), 1));
@@ -7938,6 +7979,11 @@ void CaptureEditor::paintEdit(QPainter &painter) {
     drawAnchoredHotkeyLegend(painter, rect(), editorHotkeyEntries(),
                              legendAnchor);
   }
+  // A look button's open popover is titled already; its tooltip would
+  // cover that title.
+  if (hoveredButton && lookPopover_ != LookPopover::None &&
+      hoveredButton->action.startsWith(QStringLiteral("look-")))
+    hoveredButton = nullptr;
   if (hoveredButton) {
     drawInstantTooltip(painter, rect(), hoveredButton->rect,
                        hoveredButton->tooltip);
