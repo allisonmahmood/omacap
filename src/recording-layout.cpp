@@ -92,6 +92,35 @@ RecordingLayout layoutRecording(const RecordRequest &request, const QList<Monito
     return layout;
 }
 
+std::optional<QJsonObject> requestedDisplay(const RecordRequest &request,
+                                            const QByteArray &monitorsJson) {
+    for (const auto &value : QJsonDocument::fromJson(monitorsJson).array()) {
+        const QJsonObject monitor = value.toObject();
+        if (monitor["name"].toString() != request.monitor)
+            continue;
+        // Derived as the picker derives the request from the same output.
+        const double scale = monitor["scale"].toDouble();
+        const int transform = monitor["transform"].toInt();
+        if (!(scale > 0))
+            return std::nullopt;
+        QSize logical(qRound(monitor["width"].toInt() / scale),
+                      qRound(monitor["height"].toInt() / scale));
+        if (transform % 2)
+            logical.transpose();
+        if (!qFuzzyCompare(scale, request.scale) || transform != request.transform ||
+            QRect(QPoint(monitor["x"].toInt(), monitor["y"].toInt()), logical) !=
+                request.monitorLogical)
+            return std::nullopt;
+        // The worker's Display.FIELDS.
+        QJsonObject state;
+        for (const char *field :
+             {"width", "height", "scale", "transform", "x", "y", "mirrorOf", "disabled"})
+            state[field] = monitor[field];
+        return state;
+    }
+    return std::nullopt;
+}
+
 QString recordHotkey(const QByteArray &bindsJson) {
     for (const auto &value : QJsonDocument::fromJson(bindsJson).array()) {
         const QJsonObject bind = value.toObject();

@@ -1393,6 +1393,41 @@ class Integration : public QObject {
                                                    {"description", "Screenrecording"}}})),
                  QString());
     }
+    // A request is recorded only on the monitor as it was picked on.
+    void requestedDisplay() {
+        RecordRequest request;
+        request.monitor = "DP-1";
+        request.monitorLogical = QRect(1920, 0, 1280, 800);
+        request.scale = 2;
+        request.area = QRect(0, 0, 100, 100);
+        QJsonObject monitor{{"name", "DP-1"},   {"width", 2560},       {"height", 1600},
+                            {"scale", 2},       {"transform", 0},      {"x", 1920},
+                            {"y", 0},           {"mirrorOf", "none"},  {"disabled", false},
+                            {"focused", true}};
+        const auto answer = [](const QJsonObject &monitor) {
+            return QJsonDocument(QJsonArray{QJsonObject{{"name", "HDMI-A-1"}}, monitor}).toJson();
+        };
+        const auto state = ::requestedDisplay(request, answer(monitor));
+        QVERIFY(state);
+        QCOMPARE(state->keys(), (QStringList{"disabled", "height", "mirrorOf", "scale",
+                                             "transform", "width", "x", "y"}));
+        QCOMPARE((*state)["width"].toInt(), 2560);
+        // A new scale, a flip, a new mode or a move since the area was picked.
+        for (const auto &[field, value] : {std::pair<QString, QJsonValue>{"scale", 1.6},
+                                           {"transform", 4},
+                                           {"width", 1920},
+                                           {"x", 0}}) {
+            QJsonObject changed = monitor;
+            changed[field] = value;
+            QVERIFY2(!::requestedDisplay(request, answer(changed)), qPrintable(field));
+        }
+        QVERIFY(!::requestedDisplay(request, "[]"));
+        // A rotated monitor's logical sides are swapped.
+        request.transform = 1;
+        request.monitorLogical = QRect(1920, 0, 800, 1280);
+        monitor["transform"] = 1;
+        QVERIFY(::requestedDisplay(request, answer(monitor)));
+    }
     // The marker lists this process and the worker from the request until the worker has
     // exited; a cancelled countdown leaves no recording behind.
     void recordingLifecycle() {

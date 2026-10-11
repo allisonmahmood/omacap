@@ -167,7 +167,8 @@ class Display:
 
     def __init__(self, name="", baseline=None):
         self.name = name
-        self.baseline = baseline  # None: nothing to watch (synthetic sources)
+        # None: nothing to watch (synthetic sources)
+        self.baseline = None if baseline is None else {k: baseline.get(k) for k in self.FIELDS}
         self.verified = None
         self.changed = False
         self.wake = threading.Event()  # asks again at once

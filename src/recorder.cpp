@@ -18,9 +18,20 @@
 namespace {
 QString tokenKey(const QString &monitor) { return "restoreTokens/" + monitor; }
 
-// How late Qt may tell us that a monitor changed. A stop after a change cuts this far back;
-// the worker holds encoded frames back for longer (HOLD), so none rendered since is saved.
+// A stop after Qt tells of a display change cuts this far back; the worker holds encoded frames
+// back for longer (HOLD). The worker's own watch of the recorded monitor is what bounds the cut;
+// Qt's notice hides the chrome at once, and also covers the HUD's monitor.
 constexpr qint64 changeNoticeNs = 500'000'000;
+
+// `hyprctl args`'s output, or nothing when Hyprland didn't answer in time.
+std::optional<QByteArray> hyprctl(const QStringList &args) {
+    QProcess process;
+    process.start("hyprctl", args);
+    if (!process.waitForFinished(2000) || process.exitStatus() != QProcess::NormalExit ||
+        process.exitCode() != 0)
+        return std::nullopt;
+    return process.readAllStandardOutput();
+}
 
 // Nothing but the recording chrome may be on screen once a recording starts. The editor and
 // card hide on the countdown phase; this makes sure.
@@ -108,6 +119,18 @@ Recorder::~Recorder() {
 QString Recorder::start(const RecordRequest &next, const QString &path, bool synthetic) {
     if (m_state != State::Idle)
         return "OmaCap is already recording.";
+    // The chrome and the crop are placed for the monitor as the area was picked on it. The
+    // worker records only while it stays that way, so one that changed since gets neither.
+    QJsonObject display;
+    if (!synthetic) {
+        const auto monitors = hyprctl({"-j", "monitors"});
+        if (!monitors)
+            return "OmaCap couldn't ask Hyprland about the displays.";
+        const auto current = requestedDisplay(next, *monitors);
+        if (!current)
+            return "The display changed; pick the area again.";
+        display = *current;
+    }
     // First of all: while the marker lists this process, no other OmaCap surface shows.
     if (const QString problem = publishMarker({QCoreApplication::applicationPid()});
         !problem.isEmpty())
@@ -145,6 +168,8 @@ QString Recorder::start(const RecordRequest &next, const QString &path, bool syn
                          .arg(crop.y())
                          .arg(crop.width())
                          .arg(crop.height())};
+    if (!display.isEmpty())
+        args << "--display" << QJsonDocument(display).toJson(QJsonDocument::Compact);
     if (const QString token = settings.value(tokenKey(request.monitor)).toString();
         !token.isEmpty())
         args << "--token" << token;
@@ -238,7 +263,11 @@ void Recorder::parseWorker() {
                 setState(State::Recording);
         } else if (event == "stopping") {
             // Nothing captured from now on is kept, so the chrome may go and this process's
-            // windows may show again. The marker stays until the worker has exited.
+            // windows may show again. The marker stays until the worker has exited. The worker
+            // also stops by itself, e.g. when the display changed, perhaps mid-countdown.
+            countdownTimer.stop();
+            if (m_state == State::Countdown || m_state == State::Recording)
+                setState(State::Stopping);
             guard.reset();
             if (chrome)
                 chrome->hide();
