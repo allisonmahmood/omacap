@@ -45,23 +45,31 @@ QList<qint64> recordingMarkerPids();
 // Whether `pid` is running. One that has exited but not been reaped is not.
 bool processRunning(qint64 pid);
 
-// One decimal id per line: the desktop notifications OmaCap processes have shown, each sent with
-// `omarchy-notification-send -p`, which prints its id. A recording closes all of them when it
-// starts and empties the file, and its countdown lasts until a toast the daemon keeps up anyway
-// has expired, so none is on screen once it records. Senders check the marker and append their
-// id under an exclusive flock(2) on the file, as sendNotification() does; the recorder takes the
-// ids under the same lock, after writing the marker.
+// The desktop notifications OmaCap processes have shown since the last recording started, so it
+// can take them down before it records. Under an exclusive flock(2) on the file, and only while
+// the marker lists no running process, a sender appends `?`, sends with
+// `omarchy-notification-send -p` within notificationSendMs, and appends the id that prints: a
+// `?` with no id after it stands for one that may be up without an id to close it by (the send
+// timed out, or its id couldn't be read or listed). A send that failed takes its `?` back.
+// sendNotification() does this; the recorder takes the list under the same lock, after writing
+// the marker.
 QString notificationIdsPath();
-// Shows `omarchy-notification-send args` and lists its id, unless a recording runs (it would be
-// recorded). Waits for the notification daemon, up to a few seconds. False when nothing was shown.
+// How long a sender may take to show a notification, holding notificationIdsPath()'s lock.
+constexpr int notificationSendMs = 2000;
+// Shows `omarchy-notification-send args` and lists it, unless a recording runs (it would be
+// recorded). Waits for the notification daemon, up to notificationSendMs. True once shown; false
+// when it wasn't, or may not have been.
 bool sendNotification(const QStringList &args);
-// What notificationIdsPath() lists, emptying it: the ids, and when the newest was listed
-// (invalid when none was).
+// What notificationIdsPath() listed: the ids, whether one may be up without an id, and when the
+// newest was listed (invalid when nothing was).
 struct ShownNotifications {
     QList<quint32> ids;
+    bool unnamed = false;
     QDateTime newest;
 };
-ShownNotifications takeShownNotifications();
+// Takes what notificationIdsPath() lists, emptying it. Nothing when its lock stays held past any
+// sender's bound: what it lists is then unknown.
+std::optional<ShownNotifications> takeShownNotifications();
 
 // Sends one command to the running video process. Returns its reply, or nothing when no
 // video process is running or it did not answer in time.

@@ -7,6 +7,7 @@
 #include <QtConcurrent>
 #include <QApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -24,6 +25,7 @@
 #include <ctime>
 #include <functional>
 #include <signal.h>
+#include <sys/file.h>
 #if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
 #include <QAudioBuffer>
 #include <QAudioBufferOutput>
@@ -1506,6 +1508,76 @@ class Integration : public QObject {
         QCOMPARE(b.phase(), QString("idle"));
         QVERIFY(b.sessionPath().isEmpty());
     }
+    // OmaCap's notifications are listed under a lock that no sender holds for long: a send that
+    // fails is taken back, and one that hangs is given up on in time and stays listed, as it may
+    // be up all the same. A lock held past that leaves what is on screen unknown, so a recording
+    // refuses to start rather than take the list unlocked, before it runs a worker.
+    void notificationLock() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        QTemporaryDir bin;
+        QFile notifier(bin.filePath("omarchy-notification-send"));
+        QVERIFY(notifier.open(QIODevice::WriteOnly));
+        notifier.write("#!/bin/sh\ncase $* in *hangs*) exec sleep 10 ;; esac\nexit 1\n");
+        notifier.close();
+        notifier.setPermissions(QFileDevice::ReadOwner | QFileDevice::ExeOwner);
+        const QByteArray path = qgetenv("PATH");
+        qputenv("PATH", QFile::encodeName(bin.path()) + ":" + path);
+        const auto restorePath = qScopeGuard([&] { qputenv("PATH", path); });
+        QFile::remove(notificationIdsPath());
+        QVERIFY(!sendNotification({"OmaCap", "fails"}));
+        QCOMPARE(QFileInfo(notificationIdsPath()).size(), 0);
+        QElapsedTimer sending;
+        sending.start();
+        QVERIFY(!sendNotification({"OmaCap", "hangs"}));
+        QVERIFY(sending.elapsed() < notificationSendMs + 500);
+
+        // A `?` that no id follows is one that may be up without an id, as the hung one is.
+        const auto take = [](const QByteArray &listed) {
+            QFile file(notificationIdsPath());
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Append) || file.write(listed) < 0)
+                return std::optional<ShownNotifications>();
+            file.close();
+            return takeShownNotifications();
+        };
+        auto shown = take("");
+        QVERIFY(shown && shown->unnamed && shown->ids.isEmpty() && shown->newest.isValid());
+        shown = take("5\n?\n?\n6\n");
+        QVERIFY(shown && shown->unnamed);
+        QCOMPARE(shown->ids, (QList<quint32>{5, 6}));
+        shown = take("?\n7\n");
+        QVERIFY(shown && !shown->unnamed && shown->ids == QList<quint32>{7});
+        QCOMPARE(QFileInfo(notificationIdsPath()).size(), 0);
+        shown = take("");
+        QVERIFY(shown && !shown->newest.isValid());
+
+        QFile held(notificationIdsPath());
+        QVERIFY(held.open(QIODevice::ReadWrite));
+        QCOMPARE(::flock(held.handle(), LOCK_EX | LOCK_NB), 0);
+        // The worker would be this process's child.
+        const auto children = [] {
+            QFile file(QString("/proc/self/task/%1/children").arg(QCoreApplication::applicationPid()));
+            return file.open(QIODevice::ReadOnly)
+                       ? QString::fromLatin1(file.readAll()).split(' ', Qt::SkipEmptyParts)
+                       : QStringList();
+        };
+        const QStringList before = children();
+        QElapsedTimer waited;
+        waited.start();
+        QCOMPARE(b.startRecording(syntheticRequest(), true),
+                 QString("OmaCap is busy showing a notification; try again."));
+        QVERIFY(waited.elapsed() >= notificationSendMs);
+        QCOMPARE(b.phase(), QString("idle"));
+        QVERIFY(!QFile::exists(recordingMarkerPath()));
+        for (const QString &child : children())
+            QVERIFY2(before.contains(child), qPrintable(child));
+        held.close();
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        QCOMPARE(QFileInfo(notificationIdsPath()).size(), 0);
+        b.stop();
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+    }
     // Quitting mid-recording finalizes the file, which the next run recovers.
     void quitWhileRecording() {
         Theme t;
@@ -1636,10 +1708,10 @@ class Integration : public QObject {
         QTRY_COMPARE(notified(),
                      (QStringList{didntOpen, didntOpen,
                                   "OmaCap was recording, so it didn't start another recording."}));
-        // Each is listed, for the next recording to close.
+        // Each is listed, for the next recording to take down.
         QFile shown(notificationIdsPath());
         QVERIFY(shown.open(QIODevice::ReadOnly));
-        QCOMPARE(shown.readAll(), QByteArray("7\n7\n7\n"));
+        QCOMPARE(shown.readAll(), QByteArray("?\n7\n?\n7\n?\n7\n"));
         QVERIFY(shown.remove()); // they would lengthen later tests' countdowns
         qputenv("PATH", path);
 

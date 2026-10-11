@@ -41,12 +41,11 @@ std::optional<QByteArray> hyprctl(const QStringList &args) {
 // sends, plus its fade. It keeps a toast a sender has closed until then.
 constexpr qint64 toastLifetimeMs = 6000;
 
-// Closes every notification an OmaCap process has shown (notificationIdsPath()): one sent just
-// before the request may still be on screen, and must be gone before the first kept frame.
-// Returns once every close is answered, within a second, with when the last may still show
-// all the same: a notification daemon need not take a toast down when its sender closes it.
-QDeadlineTimer closeNotifications() {
-    const ShownNotifications shown = takeShownNotifications();
+// Closes the notifications OmaCap processes have shown since the last recording (`shown`): one
+// sent just before the request may still be on screen, and must be gone before the first kept
+// frame. Returns once every close is answered, within a second, with when the last may still
+// show all the same: a notification daemon need not take a toast down when its sender closes it.
+QDeadlineTimer closeNotifications(const ShownNotifications &shown) {
     QList<QDBusPendingCall> closing;
     for (const quint32 id : shown.ids) {
         QDBusMessage close = QDBusMessage::createMethodCall(
@@ -59,8 +58,10 @@ QDeadlineTimer closeNotifications() {
         call.waitForFinished();
     if (!shown.newest.isValid())
         return QDeadlineTimer(0);
-    return QDeadlineTimer(std::max<qint64>(
-        0, QDateTime::currentDateTime().msecsTo(shown.newest.addMSecs(toastLifetimeMs))));
+    // One listed without an id may have appeared as late as its send's bound.
+    const qint64 lasts = toastLifetimeMs + (shown.unnamed ? notificationSendMs : 0);
+    return QDeadlineTimer(
+        std::max<qint64>(0, QDateTime::currentDateTime().msecsTo(shown.newest.addMSecs(lasts))));
 }
 
 // Nothing but the recording chrome may be on screen once a recording starts. The editor and
@@ -165,8 +166,15 @@ QString Recorder::start(const RecordRequest &next, const QString &path, bool syn
     if (const QString problem = publishMarker({QCoreApplication::applicationPid()});
         !problem.isEmpty())
         return "OmaCap can't record: " + problem;
-    // Then none is shown any more, and those still on screen go before the countdown ends.
-    toastsGone = closeNotifications();
+    // Then no notification is shown any more, and those still on screen go before the countdown
+    // ends. A sender that holds on to the list past its bound leaves them unknown.
+    const auto shown = takeShownNotifications();
+    if (!shown) {
+        removeMarker();
+        return "OmaCap is busy showing a notification; try again.";
+    }
+    // Synthetic recordings (tests) leave the desktop's notifications alone.
+    toastsGone = synthetic ? QDeadlineTimer() : closeNotifications(*shown);
     request = next;
     output = path;
     error.clear();

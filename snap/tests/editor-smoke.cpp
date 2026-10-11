@@ -41,6 +41,7 @@
 #include "video-ipc.h"
 
 #include <QApplication>
+#include <sys/file.h>
 #include <QBackingStore>
 #include <QTextBlock>
 #include <QTextLayout>
@@ -6343,14 +6344,16 @@ bool runNotificationArgvCheck(QString &error) {
   }
 
   // Sending runs omarchy-notification-send, here a stand-in that records
-  // what it was asked and answers -p with an id. While OmaCap records, the
-  // notification would be in the recording: the message goes to the log
-  // instead. Otherwise its id joins those the recorder closes when one
-  // starts, after any already listed.
+  // what it was asked and answers -p with an id, fails, or hangs. While OmaCap
+  // records, the notification would be in the recording: the message goes to
+  // the log instead. Otherwise it is listed for the recorder to close, a
+  // `?` and then its id, after any already listed.
   const QTemporaryDir bin;
   QFile sender(bin.filePath(QStringLiteral("omarchy-notification-send")));
   if (!bin.isValid() || !sender.open(QIODevice::WriteOnly) ||
-      sender.write("#!/bin/sh\necho \"$*\" >> \"$0.log\"\necho 4242\n") < 0 ||
+      sender.write("#!/bin/sh\necho \"$*\" >> \"$0.log\"\n"
+                   "case $* in *hangs*) exec sleep 10 ;; *fails*) exit 1 ;; esac\n"
+                   "echo 4242\n") < 0 ||
       !sender.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
                              QFileDevice::ExeOwner)) {
     error = QStringLiteral("Could not prepare the notification stand-in");
@@ -6371,6 +6374,23 @@ bool runNotificationArgvCheck(QString &error) {
     QFile file(ids.fileName());
     return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
   };
+  // Sends `message` and waits until the sender let go of the list's lock;
+  // false when that took longer than `ms` from when it started sending.
+  const auto sendAndSettle = [&](const QString &message, qint64 ms) {
+    sendCaptureNotification(message);
+    QDeadlineTimer deadline(5000);
+    while (!sentText().contains(message) && !deadline.hasExpired())
+      QThread::msleep(10);
+    QElapsedTimer sending;
+    sending.start();
+    QFile list(ids.fileName());
+    if (!list.open(QIODevice::ReadOnly))
+      return false;
+    while (::flock(list.handle(), LOCK_EX | LOCK_NB) != 0 &&
+           !deadline.hasExpired())
+      QThread::msleep(10);
+    return sentText().contains(message) && sending.elapsed() < ms;
+  };
   QFile marker(recordingMarkerPath());
   if (!ids.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
       ids.write("7\n") < 0 ||
@@ -6383,19 +6403,28 @@ bool runNotificationArgvCheck(QString &error) {
   marker.close();
   sendCaptureNotification(QStringLiteral("during the recording"));
   marker.remove();
-  sendCaptureNotification(QStringLiteral("after the recording"));
-  QDeadlineTimer deadline(3000);
-  while (idsText() != "7\n4242\n" && !deadline.hasExpired())
-    QThread::msleep(10);
-  QThread::msleep(100);
-  if (!sentText().contains(QStringLiteral("after the recording")) ||
+  if (!sendAndSettle(QStringLiteral("after the recording"), 2000) ||
       sentText().contains(QStringLiteral("during the recording"))) {
     error = QStringLiteral("A notification was sent during a recording: %1")
                 .arg(sentText());
     return false;
   }
-  if (idsText() != "7\n4242\n") {
-    error = QStringLiteral("The notification's id was not appended: %1")
+  if (idsText() != "7\n?\n4242\n") {
+    error = QStringLiteral("The notification wasn't listed: %1")
+                .arg(QString::fromUtf8(idsText()));
+    return false;
+  }
+  // One that failed was never shown; one that hangs is killed within the
+  // bound, so the lock is never held for long, and may be up all the same.
+  if (!sendAndSettle(QStringLiteral("fails"), 2000) ||
+      idsText() != "7\n?\n4242\n") {
+    error = QStringLiteral("A failed notification stayed listed: %1")
+                .arg(QString::fromUtf8(idsText()));
+    return false;
+  }
+  if (!sendAndSettle(QStringLiteral("hangs"), notificationSendMs + 1000) ||
+      idsText() != "7\n?\n4242\n?\n") {
+    error = QStringLiteral("A hung notification held the list or went unlisted: %1")
                 .arg(QString::fromUtf8(idsText()));
     return false;
   }

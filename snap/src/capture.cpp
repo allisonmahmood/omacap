@@ -2409,25 +2409,33 @@ void sendCaptureNotification(const QString &message, const QString &imagePath) {
     return;
   }
   // One sent just before a recording could still be up once it starts: the
-  // recorder reads OmaCap's notifications file then and waits them out. A
-  // detached shell holds the file's lock (as sendNotification() does) while
-  // it checks the marker again, sends, and appends the id, so a recording
-  // either sees the id or starts before the notification is sent at all.
-  // Neither this thread nor this process's exit waits for it.
+  // recorder takes OmaCap's notifications file then and closes them. A
+  // detached shell lists it there as sendNotification() does: under the
+  // file's lock, it checks the marker again, appends `?`, sends within
+  // notificationSendMs (killing a send that takes longer, so the lock is never
+  // held for long), and appends the id. A send that timed out or printed no
+  // id may be up all the same, so its `?` stays; one that failed takes it
+  // back. A recording either sees the notification listed or starts before it
+  // is sent at all. Neither this thread nor this process's exit waits for it.
   static constexpr auto keepId = R"sh(
-ids=$1 marker=$2; shift 2
-exec 9>>"$ids" && flock 9 || exit
+ids=$1 marker=$2 seconds=$3; shift 3
+exec 9>>"$ids" && flock -w 3 9 || exit
 if [ -f "$marker" ]; then
   while read -r pid; do kill -0 "$pid" 2>/dev/null && exit; done < "$marker"
 fi
-id=$("$@") || exit
-case $id in '' | *[!0-9]*) exit ;; esac
-printf '%s\n' "$id" >&9)sh";
+listed=$(stat -c %s "$ids") && printf '?\n' >&9 || exit
+id=$(timeout -k 0.5 "$seconds" "$@")
+case $? in
+0) case $id in '' | *[!0-9]* | 0) ;; *) printf '%s\n' "$id" >&9 ;; esac ;;
+124 | 137) ;;
+*) truncate -s "$listed" "$ids" ;;
+esac)sh";
   QProcess::startDetached(
       QStringLiteral("sh"),
       QStringList{QStringLiteral("-c"), QString::fromLatin1(keepId),
                   QStringLiteral("sh"), notificationIdsPath(),
                   recordingMarkerPath(),
+                  QString::number(notificationSendMs / 1000.0),
                   QStringLiteral("omarchy-notification-send")} +
           captureNotificationArguments(message, imagePath));
 }

@@ -28,8 +28,9 @@ class Recorder : public QObject {
     explicit Recorder(QObject *parent = nullptr);
     ~Recorder() override;
     // Records `request` into `output`. Synthetic sources stand in for the portal and devices.
-    // Returns why it can't, e.g. when the display changed since the area was picked or the
-    // recording marker can't be written; empty when it started.
+    // Returns why it can't, e.g. when the display changed since the area was picked, the
+    // recording marker can't be written or a notification is still being sent; empty when it
+    // started.
     QString start(const RecordRequest &request, const QString &output, bool synthetic = false);
     // Cancels a countdown, or ends the recording.
     void stop();

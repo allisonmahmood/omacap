@@ -68,34 +68,55 @@ QString notificationIdsPath() { return omacapRuntimeDir() + "/notifications"; }
 
 bool sendNotification(const QStringList &args) {
     // Under the lock, a recording that starts now either has its marker seen here, or finds
-    // this notification's id once it takes them.
+    // this notification listed once it takes the list.
     QFile ids(notificationIdsPath());
     if (!lockNotificationIds(ids, 3000) ||
         std::ranges::any_of(recordingMarkerPids(), processRunning))
         return false;
+    // Listed before it is sent, so one that may be up is never missing from the list.
+    const qint64 listed = ids.size();
+    if (!ids.seek(listed) || ids.write("?\n") != 2 || !ids.flush())
+        return false;
     QProcess send;
     send.start("omarchy-notification-send", QStringList{"-p"} + args);
-    if (!send.waitForFinished(2000))
+    const bool finished = send.waitForFinished(notificationSendMs);
+    if (send.error() == QProcess::FailedToStart ||
+        (finished && send.exitStatus() == QProcess::NormalExit && send.exitCode() != 0)) {
+        ids.resize(listed); // nothing was shown
+        return false;
+    }
+    // One that ran out of time, crashed or printed no id may be up all the same: its `?`
+    // stays. QProcess's destructor kills a send still running, before the lock goes.
+    if (!finished || send.exitStatus() != QProcess::NormalExit)
         return false;
     bool ok = false;
-    if (const quint32 id = send.readAllStandardOutput().trimmed().toUInt(&ok); ok && id) {
-        ids.seek(ids.size());
+    if (const quint32 id = send.readAllStandardOutput().trimmed().toUInt(&ok); ok && id)
         ids.write(QByteArray::number(id) + '\n');
-    }
-    return send.exitStatus() == QProcess::NormalExit && send.exitCode() == 0;
+    return true;
 }
 
-ShownNotifications takeShownNotifications() {
-    // A sender holds the lock for two seconds at most, so its id is in by then.
+std::optional<ShownNotifications> takeShownNotifications() {
+    // A sender holds the lock for notificationSendMs and a little more (snap's, half a second).
     QFile file(notificationIdsPath());
-    lockNotificationIds(file, 2500);
+    if (!lockNotificationIds(file, notificationSendMs + 1500))
+        return std::nullopt;
     ShownNotifications shown;
+    bool pending = false; // a `?` no id has followed yet
     for (const QByteArray &line : file.readAll().split('\n')) {
+        const QByteArray entry = line.trimmed();
         bool ok = false;
-        if (const quint32 id = line.trimmed().toUInt(&ok); ok && id)
+        if (const quint32 id = entry.toUInt(&ok); ok && id) {
             shown.ids << id;
+            pending = false;
+        } else if (entry == "?") {
+            shown.unnamed |= pending;
+            pending = true;
+        } else if (!entry.isEmpty()) {
+            shown.unnamed = true;
+        }
     }
-    if (!shown.ids.isEmpty())
+    shown.unnamed |= pending;
+    if (!shown.ids.isEmpty() || shown.unnamed)
         shown.newest = QFileInfo(file).lastModified();
     file.resize(0);
     return shown;
