@@ -2,6 +2,7 @@
 #include <QTextLayout>
 #include <QTextOption>
 #include "capture.hpp"
+#include "video-ipc.h"
 #include "pin-file.hpp"
 #include "pin-layout.hpp"
 #include "png.hpp"
@@ -296,14 +297,10 @@ bool ensurePrivateDirectory(const QString &path) {
 }
 
 QString secureRuntimeDirectory() {
-  QString runtime =
-      QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
-  if (runtime.isEmpty()) {
-    runtime = QDir(QDir::tempPath())
-                  .filePath(QStringLiteral("omasnap-%1").arg(::getuid()));
-  } else {
-    runtime = QDir(runtime).filePath(QStringLiteral("omasnap"));
-  }
+  // OmaCap's runtime directory also holds the video process's socket, lock
+  // and recording marker; screenshot working files stay in their own corner.
+  const QString runtime =
+      QDir(omacapRuntimeDir()).filePath(QStringLiteral("snap"));
   return ensurePrivateDirectory(runtime) ? QDir::cleanPath(runtime) : QString();
 }
 
@@ -370,14 +367,17 @@ QString runtimePath(const QString &name) {
 }
 
 QString suggestedScreenshotPathImpl(const QString &appSlug) {
-  // Precedence: OMASNAP_SCREENSHOT_DIR, then [output] directory in the
-  // config, then ~/Pictures/Screenshots. The filename pattern comes from
-  // [output] filename; its default keeps the date first so the folder always
-  // sorts chronologically.
+  // Precedence: OMACAP_SCREENSHOT_DIR, then [output] directory in the
+  // config, then Omarchy's OMARCHY_SCREENSHOT_DIR, then
+  // ~/Pictures/Screenshots. The filename pattern comes from [output]
+  // filename; its default keeps the date first so the folder always sorts
+  // chronologically.
   const OutputConfig config = loadOutputConfig(defaultConfigPath());
-  QString root = qEnvironmentVariable("OMASNAP_SCREENSHOT_DIR");
+  QString root = qEnvironmentVariable("OMACAP_SCREENSHOT_DIR");
   if (root.isEmpty())
     root = config.directory;
+  if (root.isEmpty())
+    root = qEnvironmentVariable("OMARCHY_SCREENSHOT_DIR");
   if (root.isEmpty())
     root =
         QDir(QStandardPaths::writableLocation(QStandardPaths::PicturesLocation))
@@ -1350,7 +1350,7 @@ bool captureMonitorPixels(const MonitorInfo &monitor, CaptureData &capture,
     startupTimingMark("hyprctl clients launched");
   }
 
-  const QString testCapture = qEnvironmentVariable("OMASNAP_TEST_CAPTURE");
+  const QString testCapture = qEnvironmentVariable("OMACAP_TEST_CAPTURE");
   if (!testCapture.isEmpty()) {
     if (!capture.source.load(testCapture)) {
       error = QStringLiteral("Screen capture failed: could not load test "
@@ -2603,7 +2603,7 @@ QString recognizeText(const QImage &image, QString &error) {
     return {};
   }
 
-  QString languages = qEnvironmentVariable("OMASNAP_OCR_LANGS");
+  QString languages = qEnvironmentVariable("OMACAP_OCR_LANGS");
   if (languages.isEmpty())
     languages =
         qEnvironmentVariable("OMARCHY_OCR_LANGS", QStringLiteral("eng"));
@@ -2636,20 +2636,17 @@ QString recognizeText(const QImage &image, QString &error) {
 QStringList captureNotificationArguments(const QString &message,
                                          const QString &imagePath) {
   QStringList arguments{QStringLiteral("-g"), QStringLiteral(""),
-                        QStringLiteral("--app-name"), QStringLiteral("omasnap"),
+                        QStringLiteral("--app-name"), QStringLiteral("OmaCap"),
                         QStringLiteral("-t"), QStringLiteral("4500"), message};
   if (!imagePath.isEmpty()) {
     const QString imageUrl =
         QUrl::fromLocalFile(imagePath).toString(QUrl::FullyEncoded);
-    QString omasnap = QDir(QCoreApplication::applicationDirPath())
-                          .filePath(QStringLiteral("omasnap"));
-    if (!QFileInfo::exists(omasnap))
-      omasnap = QStringLiteral("omasnap");
     // --exec consumes the rest of the command line as the click command's
     // argv, which omarchy-notification-send runs without shell parsing. It
     // must come last and be given as separate words, never one quoted string.
     arguments << QStringLiteral("Click to edit") << QStringLiteral("--image")
-              << imagePath << QStringLiteral("--exec") << omasnap << imageUrl;
+              << imagePath << QStringLiteral("--exec")
+              << QCoreApplication::applicationFilePath() << imageUrl;
   }
   return arguments;
 }

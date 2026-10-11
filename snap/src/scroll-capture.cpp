@@ -333,7 +333,7 @@ void ScrollCapturePanel::startCapture(Mode mode, stitch::Axis axis) {
   }
   worker->regionPhysical = regionPhysical().intersected(
       QRect(QPoint(), worker->output.bufferSize()));
-  worker->debugDir = qEnvironmentVariable("OMASNAP_SCROLL_DEBUG_DIR");
+  worker->debugDir = qEnvironmentVariable("OMACAP_SCROLL_DEBUG_DIR");
   worker_ = std::move(worker);
   autoStalled_ = false;
   phase_ = Phase::Capturing;

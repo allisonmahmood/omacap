@@ -298,16 +298,16 @@ bool runRecentPersistenceSmoke(QApplication &application, QString &error) {
     return false;
   }
   const QDir root(directory.path());
-  const QByteArray previousShelf = qgetenv("OMASNAP_RECENT_DIR");
-  const QByteArray previousOutput = qgetenv("OMASNAP_SCREENSHOT_DIR");
+  const QByteArray previousShelf = qgetenv("OMACAP_RECENT_DIR");
+  const QByteArray previousOutput = qgetenv("OMACAP_SCREENSHOT_DIR");
   const auto restore = qScopeGuard([&] {
-    qputenv("OMASNAP_RECENT_DIR", previousShelf);
-    qputenv("OMASNAP_SCREENSHOT_DIR", previousOutput);
+    qputenv("OMACAP_RECENT_DIR", previousShelf);
+    qputenv("OMACAP_SCREENSHOT_DIR", previousOutput);
   });
   const QString shelf = root.filePath(QStringLiteral("recent"));
   const QString output = root.filePath(QStringLiteral("output"));
-  qputenv("OMASNAP_RECENT_DIR", shelf.toUtf8());
-  qputenv("OMASNAP_SCREENSHOT_DIR", output.toUtf8());
+  qputenv("OMACAP_RECENT_DIR", shelf.toUtf8());
+  qputenv("OMACAP_SCREENSHOT_DIR", output.toUtf8());
 
   CaptureData capture;
   capture.monitor.name = QStringLiteral("TEST");
@@ -390,7 +390,7 @@ bool runRecentPersistenceSmoke(QApplication &application, QString &error) {
     return false;
   }
   blocker.close();
-  qputenv("OMASNAP_RECENT_DIR", blockedShelf.toUtf8());
+  qputenv("OMACAP_RECENT_DIR", blockedShelf.toUtf8());
   QTimer watchdog;
   watchdog.setSingleShot(true);
   QObject::connect(&watchdog, &QTimer::timeout, &application, release);
@@ -448,7 +448,7 @@ bool runRecentPersistenceSmoke(QApplication &application, QString &error) {
     error = QStringLiteral("Closed editor removed the retained recovery document");
     return false;
   }
-  qputenv("OMASNAP_RECENT_DIR", shelf.toUtf8());
+  qputenv("OMACAP_RECENT_DIR", shelf.toUtf8());
   CaptureData recoveryCapture;
   describeFileCapture(recoveryCapture, QImage(source), log);
   CaptureEditor recovered(recoveryCapture, CaptureEditor::CaptureMode::File,

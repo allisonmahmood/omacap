@@ -72,13 +72,13 @@ bool waitForPendingCaptures(const QDir &dir, const QString &id = {}) {
 } // namespace
 
 QString recentSnapsDirectory() {
-  QString root = qEnvironmentVariable("OMASNAP_RECENT_DIR");
+  QString root = qEnvironmentVariable("OMACAP_RECENT_DIR");
   if (root.isEmpty()) {
     const QString state =
-        QStandardPaths::writableLocation(QStandardPaths::StateLocation);
+        QStandardPaths::writableLocation(QStandardPaths::GenericStateLocation);
     if (state.isEmpty())
       return {};
-    root = QDir(state).filePath(QStringLiteral("recent"));
+    root = QDir(state).filePath(QStringLiteral("omacap/recent"));
   }
   // Working documents hold whole-monitor pixels, so the shelf is as private
   // as the runtime directory those came from.

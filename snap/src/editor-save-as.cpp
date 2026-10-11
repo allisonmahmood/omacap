@@ -31,8 +31,8 @@ void prepareSaveAsWindow() {
   QProcess process;
   process.start(QStringLiteral("hyprctl"),
                 {QStringLiteral("eval"),
-                 QStringLiteral("hl.window_rule({ name = \"omasnap-save-as\", "
-                                "match = { class = \"^omasnap$\", "
+                 QStringLiteral("hl.window_rule({ name = \"omacap-save-as\", "
+                                "match = { class = \"^omacap$\", "
                                 "title = \"^Save screenshot as$\" }, "
                                 "float = true, center = true, opacity = 1 })")});
   if (!process.waitForFinished(500)) {
@@ -98,7 +98,7 @@ void CaptureEditor::showSaveAsDialog(const QString &suggested) {
                                  QStringLiteral("PNG image (*.png)"));
   saveAsDialog_ = dialog;
   const quint64 request = saveAsRequest_;
-  dialog->setObjectName(QStringLiteral("omasnap-save-as"));
+  dialog->setObjectName(QStringLiteral("omacap-save-as"));
   dialog->setScreen(screen());
   dialog->setFont(chromeFont(13));
   dialog->resize(760, 520);

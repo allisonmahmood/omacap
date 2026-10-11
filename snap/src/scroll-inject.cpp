@@ -104,7 +104,7 @@ public:
     setup.id.bustype = BUS_USB;
     setup.id.vendor = 0x1d6b;
     setup.id.product = 0x0001;
-    std::strncpy(setup.name, "Omasnap Auto Scroll", sizeof(setup.name) - 1);
+    std::strncpy(setup.name, "OmaCap Auto Scroll", sizeof(setup.name) - 1);
     if (ioctl(fd_, UI_DEV_SETUP, &setup) < 0 || ioctl(fd_, UI_DEV_CREATE) < 0) {
       error = QStringLiteral("uinput device setup failed");
       close();

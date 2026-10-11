@@ -76,13 +76,13 @@ bool runPinRevealSmoke(QString &error) {
     return false;
   const QByteArray oldPath = qgetenv("PATH");
   const QByteArray oldRuntime = qgetenv("XDG_RUNTIME_DIR");
-  const QByteArray oldScreenshots = qgetenv("OMASNAP_SCREENSHOT_DIR");
+  const QByteArray oldScreenshots = qgetenv("OMACAP_SCREENSHOT_DIR");
   const auto restore = qScopeGuard([&] {
     pinPool().waitForDone();
     QThreadPool::globalInstance()->waitForDone();
     for (const auto &variable : {qMakePair("PATH", oldPath),
                                  qMakePair("XDG_RUNTIME_DIR", oldRuntime),
-                                 qMakePair("OMASNAP_SCREENSHOT_DIR", oldScreenshots)}) {
+                                 qMakePair("OMACAP_SCREENSHOT_DIR", oldScreenshots)}) {
       if (variable.second.isNull())
         qunsetenv(variable.first);
       else
@@ -121,7 +121,7 @@ bool runPinRevealSmoke(QString &error) {
   qputenv("PATH", files.path().toUtf8());
   qputenv("XDG_RUNTIME_DIR", files.path().toUtf8());
   const QString screenshots = files.filePath(QStringLiteral("shots # ' ü"));
-  qputenv("OMASNAP_SCREENSHOT_DIR", screenshots.toUtf8());
+  qputenv("OMACAP_SCREENSHOT_DIR", screenshots.toUtf8());
   const auto drain = [] {
     for (int pass = 0; pass < 3; ++pass) {
       pinPool().waitForDone();
@@ -438,7 +438,7 @@ bool runPinInteractionSmoke(QString &error) {
   monitors.close();
   const QRect screen(0, 0, 1200, 900);
   const QRect origin(986, 773, 200, 113);
-  const CompositorPin older{QStringLiteral("omasnap-pin older"),
+  const CompositorPin older{QStringLiteral("omacap-pin older"),
                             QStringLiteral("0x222"), QRect(986, 640, 200, 113),
                             true, true};
   const auto pinsAt = [&](const QRect &rect) {
@@ -449,7 +449,7 @@ bool runPinInteractionSmoke(QString &error) {
     QJsonArray clients;
     for (const CompositorPin &pin : pinsAt(rect))
       clients.push_back(QJsonObject{
-          {QStringLiteral("class"), QStringLiteral("omasnap")},
+          {QStringLiteral("class"), QStringLiteral("omacap")},
           {QStringLiteral("title"), pin.title},
           {QStringLiteral("address"), pin.address},
           {QStringLiteral("at"), QJsonArray{pin.rect.x(), pin.rect.y()}},

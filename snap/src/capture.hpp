@@ -164,7 +164,7 @@ enum class AnnotationLayer { Redaction, Default };
 [[nodiscard]] bool loadCaptureFonts();
 /** User-facing name for a bundled annotation typeface. */
 [[nodiscard]] QString annotationTextFontName(TextFont textFont);
-/** Bundled annotation font at Omasnap's logical text size. */
+/** Bundled annotation font at the editor's logical text size. */
 [[nodiscard]] QFont annotationTextFont(qreal size,
                                        TextFont textFont = TextFont::Neucha);
 /**
@@ -378,7 +378,8 @@ QImage applyRedactionsScaled(QImage image, const QVector<Annotation> &redactions
                              const QRectF &selection, const QSizeF &targetSize);
 /** Creates or repairs a private directory owned by the current user. */
 [[nodiscard]] bool ensurePrivateDirectory(const QString &path);
-/** Returns Omasnap's private runtime directory, or empty on failure. */
+/** OmaCap's private screenshot runtime directory, `omacapRuntimeDir()/snap`,
+ *  or empty on failure. */
 [[nodiscard]] QString secureRuntimeDirectory();
 /**
  * Filename-safe token for a window class: lowercase, `[a-z0-9-]` only,

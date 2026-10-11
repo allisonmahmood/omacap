@@ -51,7 +51,7 @@ QString formatScreenshotFilename(const QString &pattern, const QDateTime &when,
   if (name.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive))
     name.chop(4);
   if (name.isEmpty())
-    name = QStringLiteral("screenshot-") +
+    name = QStringLiteral("omacap-") +
            when.toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss"));
   return name + QStringLiteral(".png");
 }
@@ -71,12 +71,12 @@ QString editorFloatRuleScript(bool floating) {
   // so a floating session's rule cannot leak into tiled use. The title
   // pattern skips the pins, whose titles have no space after the name.
   return floating ? QStringLiteral(
-                        "hl.window_rule({ name = \"omasnap-editor-float\", "
-                        "match = { title = \"^omasnap( .+)?$\" }, "
+                        "hl.window_rule({ name = \"omacap-editor-float\", "
+                        "match = { title = \"^omacap( .+)?$\" }, "
                         "float = true, center = true })")
                   : QStringLiteral(
-                        "hl.window_rule({ name = \"omasnap-editor-float\", "
-                        "match = { title = \"^omasnap( .+)?$\" }, "
+                        "hl.window_rule({ name = \"omacap-editor-float\", "
+                        "match = { title = \"^omacap( .+)?$\" }, "
                         "enabled = false })");
 }
 
@@ -98,5 +98,5 @@ bool loadEditorWindowBackdropOpaque(const QString &filePath) {
 
 QString defaultConfigPath() {
   return QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) +
-         QStringLiteral("/omasnap/omasnap.conf");
+         QStringLiteral("/omacap/omacap.conf");
 }

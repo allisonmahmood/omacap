@@ -841,7 +841,7 @@ CaptureEditor::CaptureEditor(CaptureData capture, CaptureMode mode,
       seedConfiguredBackground(defaultStyle);
     }
   }
-  setWindowTitle(QStringLiteral("Omasnap"));
+  setWindowTitle(QStringLiteral("omacap"));
   setWindowFlags(Qt::Window | Qt::FramelessWindowHint |
                  Qt::WindowStaysOnTopHint);
   setAttribute(Qt::WA_TranslucentBackground);
@@ -3470,7 +3470,7 @@ void CaptureEditor::handOffEditor(bool toWindow) {
           pinDocument->preserveForEditor();
         return QString();
       }
-      error = QStringLiteral("Could not start omasnap");
+      error = QStringLiteral("Could not start OmaCap");
     }
     QFile::remove(path);
     QFile::remove(operationLogPath(path));

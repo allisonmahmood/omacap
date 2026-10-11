@@ -143,7 +143,7 @@ target_link_libraries(omasnap-core PUBLIC
   PkgConfig::Libdeflate
 )
 
-target_compile_definitions(omasnap-core PRIVATE OMASNAP_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(omasnap-core PRIVATE OMACAP_VERSION="${PROJECT_VERSION}")
 
 if(BUILD_TESTING)
 qt_add_executable(omasnap-smoke
