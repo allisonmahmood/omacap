@@ -1,6 +1,8 @@
 #pragma once
 #include "frames.h"
 #include "model.h"
+#include "record-request.h"
+#include "recorder.h"
 #include "theme.h"
 #include "waveforms.h"
 #include <QAudioOutput>
@@ -13,6 +15,7 @@
 #include <QTimer>
 #include <QVideoFrame>
 #include <QVideoSink>
+#include <functional>
 #include <memory>
 class Backend : public QObject {
     Q_OBJECT
@@ -31,11 +34,8 @@ class Backend : public QObject {
     Q_PROPERTY(double focusX READ focusX NOTIFY displayPositionChanged)
     Q_PROPERTY(double focusY READ focusY NOTIFY displayPositionChanged)
     Q_PROPERTY(double progress READ progress NOTIFY changed)
-    Q_PROPERTY(int countdown READ countdown NOTIFY changed)
     Q_PROPERTY(bool dirty READ dirty NOTIFY changed)
     Q_PROPERTY(bool recoverable READ recoverable NOTIFY changed)
-    Q_PROPERTY(QVariantList microphones READ microphones CONSTANT)
-    Q_PROPERTY(QVariantList cameras READ cameras CONSTANT)
     Q_PROPERTY(QString lastExport READ lastExport NOTIFY changed)
     Q_PROPERTY(QString original READ original NOTIFY changed)
     Q_PROPERTY(QSize sourceSize READ sourceSize NOTIFY changed)
@@ -61,17 +61,26 @@ class Backend : public QObject {
     double focusX() const;
     double focusY() const;
     double progress() const { return m_progress; }
-    int countdown() const { return m_countdown; }
     bool dirty() const { return m_dirty; }
     bool recoverable() const;
-    QVariantList microphones() const;
-    QVariantList cameras() const;
     QString lastExport() const { return m_lastExport; }
     // The recording this session edits. Discarding the session keeps it.
     QString original() const { return m_original; }
     QSize sourceSize() const { return {sourceWidth, sourceHeight}; }
-    Q_INVOKABLE void record(QString mic, QString camera, bool desktop, bool synthetic = false);
+    // Starts the countdown for a recording, replacing the session. Returns why it can't start
+    // (it would lose edits the user hasn't agreed to replace, or can't record the request);
+    // empty when it started.
+    QString startRecording(const RecordRequest &request, bool synthetic = false);
+    // Cancels the countdown, or stops the recording.
     Q_INVOKABLE void stop();
+    // The UI calls this once neither the card nor the editor is open. The process then exits
+    // as soon as nothing records or exports.
+    Q_INVOKABLE void uiClosed();
+    // Answers replaceRequested(): true discards the edit for the new recording or file.
+    Q_INVOKABLE void answerReplace(bool replace);
+    // Calls `answer` with whether a new recording or file may replace the session. Asks the UI
+    // first (replaceRequested) when that would lose edits; false while busy.
+    void confirmReplace(std::function<void(bool)> answer);
     Q_INVOKABLE void importVideo();
     Q_INVOKABLE void loadFile(QString path);
     Q_INVOKABLE void seek(double seconds);
@@ -113,6 +122,14 @@ class Backend : public QObject {
     void positionChanged();
     void frameChanged();
     void cameraFrameChanged();
+    // A new recording is loaded: show the card.
+    void recordingFinished();
+    // A new recording or file would replace unsaved edits. Ask, then call answerReplace().
+    void replaceRequested();
+    // Nothing is open, recording or exporting: the process may exit.
+    void exitRequested();
+    // Something failed while no card or editor is open to say so.
+    void backgroundError(const QString &message);
 
   private:
     Theme *theme;
@@ -124,22 +141,23 @@ class Backend : public QObject {
     quint64 workerRun = 0;
     double screenStart = 0, cameraStart = 0;
     friend class Integration;
-    QString m_phase = "recorder", m_message, session, recoveryRoot, m_lastExport, pendingExport,
+    QString m_phase = "idle", m_message, session, recoveryRoot, m_lastExport, pendingExport,
             partialExport, m_original;
-    double m_position = 0, m_aspect = 16. / 9, m_progress = 0, lead = 0;
-    int sourceWidth = 1920, sourceHeight = 1080, m_countdown = 0, screenRevision = 0,
-        cameraRevision = 0;
+    double m_position = 0, m_aspect = 16. / 9, m_progress = 0;
+    int sourceWidth = 1920, sourceHeight = 1080, screenRevision = 0, cameraRevision = 0;
     bool m_dirty = false, exportCancelled = false, hasMic = false, hasDesktop = false,
-         hasCamera = false;
+         hasCamera = false, uiOpen = false, announceRecording = false, replaceConfirmed = false;
+    std::function<void(bool)> pendingReplace;
     QString captureError;
     QByteArray workerBuffer;
     QMediaPlayer screen, camera, mic, desktop;
     QAudioOutput micOutput, desktopOutput;
     QMediaDevices devices;
+    Recorder recorder;
     QVideoSink screenSink, cameraSink;
     QProcess worker;
     Waveforms peaks;
-    QTimer countdownTimer, seekTimer, displayTimer, seekTimeout;
+    QTimer seekTimer, displayTimer, seekTimeout;
     QElapsedTimer presentationClock;
     double presentedSource = 0, m_displayPosition = 0;
     bool seeking = false, seekInFlight = false;
@@ -153,6 +171,9 @@ class Backend : public QObject {
     double pendingSeek = 0;
     QSettings settings;
     void status(QString phase, QString message = {});
+    void fail(const QString &message);
+    void exitIfUnused();
+    bool mayReplace() const;
     void newSession();
     void checkpoint();
     void push();

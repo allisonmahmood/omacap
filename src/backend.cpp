@@ -147,21 +147,38 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
     seekTimer.setInterval(35);
     seekTimer.setSingleShot(true);
     connect(&seekTimer, &QTimer::timeout, this, &Backend::applySeek);
-    countdownTimer.setInterval(1000);
-    connect(&countdownTimer, &QTimer::timeout, this, [this] {
-        if (--m_countdown <= 0) {
-            countdownTimer.stop();
-            status("recording");
+    connect(&recorder, &Recorder::stateChanged, this, [this] {
+        switch (recorder.state()) {
+        case Recorder::State::Countdown: status("countdown"); break;
+        case Recorder::State::Recording: status("recording"); break;
+        case Recorder::State::Stopping: status("stopping", "Finishing the recording…"); break;
+        case Recorder::State::Idle: break; // finished() follows
         }
-        emit changed();
+    });
+    connect(&recorder, &Recorder::finished, this, [this](bool recorded, const QString &error) {
+        if (recorded) {
+            captureError = error;
+            announceRecording = true;
+            prepare(m_original, true);
+            return;
+        }
+        // Nothing was recorded, so there is nothing to recover either.
+        QDir(session).removeRecursively();
+        session.clear();
+        m_original.clear();
+        if (error.isEmpty()) {
+            status("idle");
+            exitIfUnused();
+        } else
+            fail(error);
     });
     connect(&worker, &QProcess::readyReadStandardOutput, this, &Backend::parseWorker);
     worker.setChildProcessModifier([] { prctl(PR_SET_PDEATHSIG, SIGTERM); });
     connect(&worker, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
             [this](int code, QProcess::ExitStatus) {
                 parseWorker();
-                countdownTimer.stop();
                 if (m_phase == "exporting") {
+                    const auto done = qScopeGuard([this] { exitIfUnused(); });
                     if (exportCancelled) {
                         QFile::remove(partialExport);
                         status("editor", "Export cancelled.");
@@ -187,34 +204,16 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
                                       QString::fromUtf8(worker.readAllStandardError()).right(1500)
                                 : captureError);
                     }
-                    return;
-                }
-                if (m_phase == "selecting" || m_phase == "countdown" || m_phase == "recording" ||
-                    m_phase == "stopping") {
-                    if (QFileInfo(m_original).size() > 1024) {
-                        prepare(m_original, true);
-                    } else {
-                        // Only a container header was written; don't leave it in Videos.
-                        QFile::remove(m_original);
-                        m_original.clear();
-                        status("recorder", captureError.isEmpty()
-                                               ? "Recording stopped before video was received."
-                                               : captureError);
-                    }
                 }
             });
     connect(&worker, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) {
         if (e == QProcess::FailedToStart)
-            status(m_phase == "exporting" ? "editor" : "recorder",
-                   "Could not start the media worker.");
+            status("editor", "Could not start the export worker.");
     });
 }
 Backend::~Backend() {
     if (worker.state() != QProcess::NotRunning) {
-        if (m_phase == "exporting")
-            worker.terminate();
-        else
-            ::kill(worker.processId(), SIGINT);
+        worker.terminate();
         if (!worker.waitForFinished(8000)) {
             worker.kill();
             worker.waitForFinished(2000);
@@ -227,24 +226,43 @@ void Backend::status(QString p, QString m) {
     m_message = m;
     emit changed();
 }
+// A failure that leaves nothing open. With no editor to show it, the owner reports it.
+void Backend::fail(const QString &message) {
+    status("idle", message);
+    if (!uiOpen)
+        emit backgroundError(message);
+    exitIfUnused();
+}
+void Backend::exitIfUnused() {
+    if (!uiOpen && (m_phase == "idle" || m_phase == "editor"))
+        emit exitRequested();
+}
+void Backend::uiClosed() {
+    uiOpen = false;
+    exitIfUnused();
+}
+void Backend::confirmReplace(std::function<void(bool)> answer) {
+    if (m_phase == "idle" || (m_phase == "editor" && !m_dirty))
+        return answer(true);
+    if (m_phase != "editor" || pendingReplace)
+        return answer(false);
+    pendingReplace = std::move(answer);
+    emit replaceRequested();
+}
+void Backend::answerReplace(bool replace) {
+    replaceConfirmed = replace;
+    if (auto answer = std::exchange(pendingReplace, {}))
+        answer(replace);
+}
+// A new recording or file may replace the session only when no edits would be lost.
+bool Backend::mayReplace() const {
+    return m_phase == "idle" || (m_phase == "editor" && (!m_dirty || replaceConfirmed));
+}
 QVariant Backend::preference(QString k, QVariant f) const {
     return settings.value(k, f);
 }
 void Backend::remember(QString k, QVariant v) {
     settings.setValue(k, v);
-}
-QVariantList Backend::microphones() const {
-    QVariantList list;
-    for (auto d : QMediaDevices::audioInputs())
-        if (!QString::fromUtf8(d.id()).contains("monitor"))
-            list << QVariantMap{{"label", d.description()}, {"id", QString::fromUtf8(d.id())}};
-    return list;
-}
-QVariantList Backend::cameras() const {
-    QVariantList list;
-    for (auto d : QMediaDevices::videoInputs())
-        list << QVariantMap{{"label", d.description()}, {"id", QString::fromUtf8(d.id())}};
-    return list;
 }
 void Backend::newSession() {
     session = recoveryRoot + "/" + QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -298,16 +316,18 @@ void Backend::checkpoint() {
                                            {"lastExport", m_lastExport},
                                            {"original", m_original}});
 }
-void Backend::record(QString microphone, QString cam, bool desk, bool synthetic) {
-    if (m_phase != "recorder")
-        return;
+QString Backend::startRecording(const RecordRequest &request, bool synthetic) {
+    if (!mayReplace())
+        return "OmaCap is busy.";
+    // The stream is in the panel's orientation; cropping it is not supported yet.
+    if (request.transform != 0)
+        return "OmaCap can't record rotated displays yet.";
+    discard();
     newSession();
-    hasMic = !microphone.isEmpty();
-    hasDesktop = desk;
-    hasCamera = !cam.isEmpty();
-    lead = 0;
+    hasMic = !request.mic.isEmpty();
+    hasDesktop = request.desktopAudio;
+    hasCamera = !request.camera.isEmpty();
     captureError.clear();
-    workerBuffer.clear();
     // Captures are saved beside the user's other videos, outside the disposable session.
     const QString videos = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
     QDir().mkpath(videos);
@@ -316,37 +336,15 @@ void Backend::record(QString microphone, QString cam, bool desk, bool synthetic)
     m_original = name + ".mkv";
     for (int i = 2; QFile::exists(m_original); ++i)
         m_original = name + QString("-%1.mkv").arg(i);
-    QString script = session + "/capture.py";
-    QFile::copy(":/scripts/capture.py", script);
-    QStringList args{script, "--output", m_original};
-    if (hasMic)
-        args << "--mic" << microphone;
-    if (hasCamera)
-        args << "--camera" << cam;
-    if (desk && synthetic) {
-        args << "--desktop" << "test";
-    } else if (desk) {
-        QProcess p;
-        p.start("pactl", {"get-default-sink"});
-        if (p.waitForFinished(2000) && p.exitCode() == 0)
-            args << "--desktop"
-                 << QString::fromUtf8(p.readAllStandardOutput()).trimmed() + ".monitor";
-        else {
-            status("recorder", "Could not find the desktop audio output.");
-            return;
-        }
-    }
-    if (synthetic)
-        args << "--synthetic";
-    status("selecting", "Choose a window or display in the system picker.");
-    worker.setProcessEnvironment(QProcessEnvironment::systemEnvironment());
     writeJson(session + "/capture.json", {{"mic", hasMic},
                                           {"desktop", hasDesktop},
                                           {"camera", hasCamera},
                                           {"edit", state.json()},
                                           {"recording", m_original}});
-    ++workerRun;
-    worker.start("/usr/bin/python", args);
+    // The card or editor hides for the countdown, and a new one opens when it is done.
+    uiOpen = false;
+    recorder.start(request, m_original, synthetic);
+    return {};
 }
 void Backend::parseWorker() {
     workerBuffer += worker.readAllStandardOutput();
@@ -355,15 +353,7 @@ void Backend::parseWorker() {
         workerBuffer.remove(0, line.size() + 1);
         auto o = QJsonDocument::fromJson(line).object();
         QString e = o["event"].toString();
-        if (e == "ready") {
-            lead = o["lead"].toDouble();
-            auto recovery = readJson(session + "/capture.json");
-            recovery["lead"] = lead;
-            writeJson(session + "/capture.json", recovery);
-            m_countdown = 3;
-            status("countdown", "Recording starts after the countdown.");
-            countdownTimer.start();
-        } else if (e == "error") {
+        if (e == "error") {
             captureError = o["message"].toString();
             m_message = captureError;
             emit changed();
@@ -376,31 +366,22 @@ void Backend::parseWorker() {
     }
 }
 void Backend::stop() {
-    if (worker.state() != QProcess::NotRunning && m_phase != "exporting") {
-        countdownTimer.stop();
-        status("stopping", "Finishing the recording…");
-        ::kill(worker.processId(), SIGINT);
-        QTimer::singleShot(10000, this, [this, run = workerRun] {
-            if (run == workerRun && m_phase == "stopping" && worker.state() != QProcess::NotRunning)
-                worker.kill();
-        });
-    }
+    recorder.stop();
 }
 void Backend::importVideo() {
     QString path = QFileDialog::getOpenFileName(
-        nullptr, "Open an image or recording",
-        QStandardPaths::writableLocation(QStandardPaths::MoviesLocation),
-        "Images and videos (*.png *.jpg *.jpeg *.webp *.bmp *.mp4 *.mkv *.mov *.webm *.avi);;All "
-        "files (*)");
+        nullptr, "Open a recording", QStandardPaths::writableLocation(QStandardPaths::MoviesLocation),
+        "Videos (*.mp4 *.mkv *.mov *.webm *.avi *.gif);;All files (*)");
     if (!path.isEmpty())
         loadFile(path);
 }
 void Backend::loadFile(QString path) {
-    if (m_phase != "recorder")
+    if (!mayReplace())
         return;
+    replaceConfirmed = false;
+    discard();
     newSession();
     captureError.clear();
-    lead = 0;
     m_original = path;
     prepare(path, false);
 }
@@ -413,7 +394,7 @@ void Backend::prepare(QString path, bool captured) {
     probe->setChildProcessModifier([] { prctl(PR_SET_PDEATHSIG, SIGKILL); });
     connect(probe, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) {
         if (e == QProcess::FailedToStart)
-            status("recorder", "Could not start ffprobe.");
+            fail("Could not start ffprobe.");
     });
     QTimer::singleShot(15000, probe, [probe] {
         if (probe->state() != QProcess::NotRunning)
@@ -450,7 +431,7 @@ void Backend::prepare(QString path, bool captured) {
                 remux->setChildProcessModifier([] { prctl(PR_SET_PDEATHSIG, SIGKILL); });
                 connect(remux, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) {
                     if (e == QProcess::FailedToStart)
-                        status("recorder", "Could not start FFmpeg to recover the recording.");
+                        fail("Could not start FFmpeg to recover the recording.");
                 });
                 QTimer::singleShot(120000, remux, [remux] {
                     if (remux->state() != QProcess::NotRunning)
@@ -463,15 +444,14 @@ void Backend::prepare(QString path, bool captured) {
                         if (result == 0 && QFileInfo(repaired).size() > 1024)
                             prepare(repaired, captured);
                         else
-                            status("recorder",
-                                   "Could not recover the recording. Original media was retained.");
+                            fail("Could not recover the recording. Original media was retained.");
                     });
                 remux->start("ffmpeg", {"-v", "error", "-y", "-i", path, "-map", "0", "-c", "copy",
                                         repaired});
                 return;
             }
             if (code != 0 || video.isEmpty() || dur <= .1) {
-                status("recorder", "The recording could not be opened. Original "
+                fail("The recording could not be opened. Original "
                                    "media was retained.");
                 return;
             }
@@ -510,7 +490,7 @@ void Backend::prepare(QString path, bool captured) {
                 }
             }
             state.duration = dur;
-            state.spans = {{std::min(lead, std::max(0., dur - .2)), dur}};
+            state.spans = {{0, dur}};
             // OmaCap titles its capture tracks (see capture.py). In other files a second
             // track may be another language or commentary, so only the first is used.
             if (!captured) {
@@ -550,7 +530,7 @@ void Backend::prepare(QString path, bool captured) {
             demux->setChildProcessModifier([] { prctl(PR_SET_PDEATHSIG, SIGKILL); });
             connect(demux, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) {
                 if (e == QProcess::FailedToStart)
-                    status("recorder", "Could not start FFmpeg.");
+                    fail("Could not start FFmpeg.");
             });
             QTimer::singleShot(120000, demux, [demux] {
                 if (demux->state() != QProcess::NotRunning)
@@ -561,7 +541,7 @@ void Backend::prepare(QString path, bool captured) {
                         QString err = QString::fromUtf8(demux->readAllStandardError());
                         demux->deleteLater();
                         if (c != 0) {
-                            status("recorder", "Could not prepare media: " + err.right(1500));
+                            fail("Could not prepare media: " + err.right(1500));
                             return;
                         }
                         ready();
@@ -580,7 +560,7 @@ void Backend::ready() {
     connect(probe, &QProcess::errorOccurred, this,
             [this, openingSession](QProcess::ProcessError error) {
                 if (session == openingSession && error == QProcess::FailedToStart)
-                    status("recorder", "Could not start FFprobe. The recording is retained.");
+                    fail("Could not start FFprobe. The recording is retained.");
             });
     QTimer::singleShot(10000, probe, [probe] {
         if (probe->state() != QProcess::NotRunning)
@@ -598,9 +578,7 @@ void Backend::ready() {
             const double length = metadata["duration"].toString().toDouble() -
                                   metadata["start_time"].toString().toDouble();
             if (code != 0 || length <= 0) {
-                status(
-                    "recorder",
-                    "Could not read the recording's video timestamps. The recording is retained.");
+                fail("Could not read the recording's video timestamps. The recording is retained.");
                 return;
             }
             screenSeekEnd = std::max(0LL, qRound64(length * 1000) - 1);
@@ -619,6 +597,9 @@ void Backend::openPlayers() {
     if (QFile::exists(session + "/desktop.wav"))
         desktop.setSource(QUrl::fromLocalFile(session + "/desktop.wav"));
     status("editor", captureError);
+    uiOpen = true;
+    if (std::exchange(announceRecording, false))
+        emit recordingFinished();
     seek(0);
     emit editChanged();
     checkpoint();
@@ -1150,7 +1131,7 @@ void Backend::discard() {
     state = Edit();
     m_dirty = false;
     screenRevision = cameraRevision = 0;
-    status("recorder");
+    status("idle");
     emit editChanged();
     emit frameChanged();
     emit cameraFrameChanged();
@@ -1181,7 +1162,6 @@ void Backend::recover() {
             hasMic = capture["mic"].toBool();
             hasDesktop = capture["desktop"].toBool();
             hasCamera = capture["camera"].toBool();
-            lead = capture["lead"].toDouble();
             m_dirty = true;
             prepare(recording, true);
             return;

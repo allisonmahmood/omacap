@@ -1,5 +1,7 @@
 #include "../src/backend.h"
 #include "../src/exporter.h"
+#include "../src/recording-layout.h"
+#include "../src/video-ipc.h"
 #include <QApplication>
 #include <QDir>
 #include <QFile>
@@ -24,6 +26,16 @@
 #include <QAudioBuffer>
 #include <QAudioBufferOutput>
 #endif
+// A whole 1280×720 monitor with every device, as the synthetic worker records it.
+RecordRequest syntheticRequest() {
+    RecordRequest request;
+    request.monitor = "TEST-1";
+    request.monitorLogical = QRect(0, 0, 1280, 720);
+    request.area = request.monitorLogical;
+    request.mic = request.camera = "test";
+    request.desktopAudio = true;
+    return request;
+}
 class Integration : public QObject {
     Q_OBJECT
     QTemporaryDir themeRoot;
@@ -60,21 +72,20 @@ class Integration : public QObject {
         Backend b(&theme, &frames);
         b.newSession();
         b.hasMic = true;
-        b.lead = 3;
         b.prepare(QDir::current().absoluteFilePath("tests/out/unfinished-tail.mkv"), true);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
-        QVERIFY(b.duration() > 4.9);
-        b.seek(4.5);
+        QVERIFY(b.duration() > 7.9);
+        b.seek(7.5);
         QTRY_VERIFY_WITH_TIMEOUT(!b.seeking, 3000);
         QVERIFY(b.screenSink.videoFrame().startTime() < 1000000);
         QVERIFY(b.screenSink.videoFrame().endTime() >= 7990000);
-        QCOMPARE(b.position(), 4.5);
+        QCOMPARE(b.position(), 7.5);
         b.micOutput.setVolume(0);
         b.togglePlay();
-        QTRY_VERIFY_WITH_TIMEOUT(b.position() > 4.7, 2000);
+        QTRY_VERIFY_WITH_TIMEOUT(b.position() > 7.7, 2000);
         b.pause();
         QVERIFY(b.mic.position() > 7600);
-        b.trim(4, 5);
+        b.trim(7, 8);
         const QString output = QDir::current().absoluteFilePath("tests/out/recovered-tail.mp4");
         QFile::remove(output);
         b.startExport(output, false, 640, 30, 20);
@@ -264,8 +275,6 @@ class Integration : public QObject {
         auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
         auto cleanup = qScopeGuard([&] { delete win; });
         QVERIFY(QTest::qWaitForWindowExposed(win));
-        QCOMPARE(win->minimumSize(), QSize(520, 640));
-        QCOMPARE(win->maximumSize(), QSize(520, 640));
         b.status("editor");
         QTRY_COMPARE(win->minimumSize(), QSize(1000, 680));
         QVERIFY(win->maximumWidth() > 1280);
@@ -1087,7 +1096,6 @@ class Integration : public QObject {
         b.hasMic = true;
         b.hasCamera = true;
         b.hasDesktop = false;
-        b.lead = .5;
         b.prepare(QDir::current().absoluteFilePath("tests/out/delayed-origin.mkv"), true);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
         QVERIFY(std::abs(b.cameraStart - .4) < .002);
@@ -1168,6 +1176,129 @@ class Integration : public QObject {
         QVERIFY(!QDir(saved).exists());
         QVERIFY(QFile::exists(fixture));
     }
+    void recordingLayout_data() {
+        QTest::addColumn<QRect>("area");
+        QTest::addColumn<double>("scale");
+        QTest::addColumn<bool>("otherMonitor");
+        QTest::addColumn<QString>("hudMonitor");
+        QTest::newRow("middle") << QRect(300, 200, 640, 360) << 1. << false << "DP-1";
+        QTest::newRow("fractional") << QRect(301, 199, 641, 359) << 1.25 << false << "DP-1";
+        QTest::newRow("bottom edge") << QRect(300, 600, 640, 120) << 1.6 << false << "DP-1";
+        QTest::newRow("whole monitor") << QRect(0, 0, 1280, 720) << 1. << true << "DP-2";
+        QTest::newRow("whole, alone") << QRect(0, 0, 1280, 720) << 2. << false << "";
+    }
+    // Chrome shown while recording never touches the encoded area, and stays on screen.
+    void recordingLayout() {
+        QFETCH(QRect, area);
+        QFETCH(double, scale);
+        QFETCH(bool, otherMonitor);
+        QFETCH(QString, hudMonitor);
+        RecordRequest request;
+        request.monitor = "DP-1";
+        request.monitorLogical = QRect(1920, 0, 1280, 720);
+        request.scale = scale;
+        request.area = area;
+        QList<Monitor> monitors{{"DP-1", request.monitorLogical}};
+        if (otherMonitor)
+            monitors.append({"DP-2", QRect(0, 0, 1920, 1080)});
+        const auto layout = layoutRecording(request, monitors, QSize(124, 40), QSize(300, 150));
+        const QRect e = layout.encoded;
+        QCOMPARE(e.width() % 2, 0);
+        QCOMPARE(e.height() % 2, 0);
+        QVERIFY(QRect(QPoint(), request.nativeSize()).contains(e));
+        // Every encoded pixel's logical footprint lies inside the guard.
+        const QRectF footprint(request.monitorLogical.topLeft() + QPointF(e.topLeft()) / scale,
+                               QSizeF(e.size()) / scale);
+        QVERIFY(QRectF(layout.guard).contains(footprint));
+        for (const QRect &strip : layout.outline) {
+            QVERIFY(!strip.intersects(layout.guard));
+            QVERIFY(request.monitorLogical.contains(strip));
+        }
+        QCOMPARE(layout.hudMonitor, hudMonitor);
+        QCOMPARE(layout.hud.has_value(), !hudMonitor.isEmpty());
+        if (layout.hud) {
+            QVERIFY(!layout.hud->intersects(layout.guard));
+            const auto monitor = std::ranges::find(monitors, hudMonitor, &Monitor::name);
+            QVERIFY(monitor->logical.contains(*layout.hud));
+        }
+        QVERIFY(request.monitorLogical.contains(layout.countdown));
+    }
+    void recordHotkey() {
+        const auto binds = [](QJsonArray list) { return QJsonDocument(list).toJson(); };
+        QCOMPARE(::recordHotkey(binds({QJsonObject{{"modmask", 64}, {"key", "r"},
+                                                   {"dispatcher", "exec"},
+                                                   {"arg", "omacap --screenshot"}},
+                                       QJsonObject{{"modmask", 72}, {"key", "r"},
+                                                   {"dispatcher", "exec"},
+                                                   {"arg", "uwsm app -- omacap --record"},
+                                                   {"submap", ""}}})),
+                 QString("Super + Alt + R"));
+        // Lua binds only describe themselves.
+        QCOMPARE(::recordHotkey(binds({QJsonObject{{"modmask", 65}, {"key", "PRINT"},
+                                                   {"dispatcher", "__lua"}, {"arg", "272"},
+                                                   {"description", "Record with OmaCap"}}})),
+                 QString("Super + Shift + Print"));
+        QCOMPARE(::recordHotkey(binds({QJsonObject{{"modmask", 8}, {"key", "PRINT"},
+                                                   {"dispatcher", "__lua"},
+                                                   {"description", "Screenrecording"}}})),
+                 QString());
+    }
+    // The marker exists from the first countdown frame until capture ends; a cancelled
+    // countdown leaves no recording behind.
+    void recordingLifecycle() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        QSignalSpy finished(&b, &Backend::recordingFinished);
+        QSignalSpy exits(&b, &Backend::exitRequested);
+        const QString marker = recordingMarkerPath();
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        QCOMPARE(b.phase(), QString("countdown"));
+        QFile pid(marker);
+        QVERIFY(pid.open(QIODevice::ReadOnly));
+        QCOMPARE(pid.readAll().trimmed().toLongLong(), QCoreApplication::applicationPid());
+        QVERIFY(!b.startRecording(syntheticRequest(), true).isEmpty());
+        const QString cancelled = b.original();
+        b.stop();
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+        QVERIFY(!QFile::exists(marker));
+        QVERIFY(!QFile::exists(cancelled));
+        QVERIFY(b.sessionPath().isEmpty());
+        QCOMPARE(exits.count(), 1);
+        QCOMPARE(finished.count(), 0);
+
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recording"), 15000);
+        QVERIFY(QFile::exists(marker));
+        QTest::qWait(1000);
+        b.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(marker), 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 20000);
+        QCOMPARE(finished.count(), 1);
+        QVERIFY(b.duration() > .5 && b.duration() < 2.5);
+
+        // An edited session is only replaced once the UI agrees.
+        b.setValue("padding", .1);
+        QSignalSpy asked(&b, &Backend::replaceRequested);
+        std::optional<bool> answer;
+        b.confirmReplace([&](bool yes) { answer = yes; });
+        QCOMPARE(asked.count(), 1);
+        QVERIFY(!answer);
+        b.confirmReplace([](bool yes) { QVERIFY(!yes); }); // already asking
+        QVERIFY(!b.startRecording(syntheticRequest(), true).isEmpty());
+        b.answerReplace(false);
+        QCOMPARE(answer, std::optional(false));
+        QCOMPARE(b.phase(), QString("editor"));
+        b.confirmReplace([&](bool yes) { answer = yes; });
+        b.answerReplace(true);
+        QCOMPARE(answer, std::optional(true));
+        const QString first = b.original();
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        QVERIFY(QFile::exists(first));
+        b.stop();
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+        QFile::remove(first);
+    }
     void portalFixture() {
         const auto fixture = qEnvironmentVariable("OMACAP_PORTAL_FIXTURE");
         if (fixture.isEmpty())
@@ -1200,7 +1331,7 @@ class Integration : public QObject {
         QVERIFY(win);
         auto cleanup = qScopeGuard([&] { delete win; });
         QVERIFY(QTest::qWaitForWindowExposed(win));
-        b.record("test", "test", true, true);
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recording"), 15000);
         QTest::qWait(4000);
         b.stop();
@@ -1333,7 +1464,7 @@ class Integration : public QObject {
         b.discard();
         QVERIFY(!QDir(session).exists());
         QVERIFY(QFileInfo(recording).size() > 1024);
-        QCOMPARE(b.phase(), QString("recorder"));
+        QCOMPARE(b.phase(), QString("idle"));
         // Reopening the saved capture brings back both audio tracks.
         b.loadFile(recording);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
