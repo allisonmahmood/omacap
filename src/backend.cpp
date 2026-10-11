@@ -1163,8 +1163,6 @@ void Backend::pickRegion() {
     // Its own process group holds the freeze and slurp, so ending the group ends exactly
     // what this pick started, without trusting a PID it prints.
     picker->setChildProcessModifier([] { ::setpgid(0, 0); });
-    connect(picker, &QProcess::started, this,
-            [this, picker] { captureGroup = pid_t(picker->processId()); });
     connect(picker, &QProcess::errorOccurred, this, [this, picker](QProcess::ProcessError e) {
         if (e != QProcess::FailedToStart)
             return;
@@ -1190,6 +1188,11 @@ void Backend::pickRegion() {
                                  : ("The region picker failed. " + error.right(500)).trimmed());
         });
     picker->start("omarchy-capture-region", {"smart", "--keep-freeze"});
+    // Known as soon as start() returns, so quitting right away still ends the group. The
+    // parent sets the group too, in case it runs before the child does.
+    captureGroup = pid_t(picker->processId());
+    if (captureGroup > 0)
+        ::setpgid(captureGroup, captureGroup);
 }
 void Backend::endFreeze() {
     if (captureGroup > 0)
