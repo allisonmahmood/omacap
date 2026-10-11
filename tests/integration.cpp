@@ -944,6 +944,47 @@ class Integration : public QObject {
         QCOMPARE(b.state.windowTransparency, QString("off"));
         b.discard();
     }
+    // Each format shows its own remembered width and frame rate, which are what it exports.
+    void exportChoices() {
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
+        b.newSession();
+        b.status("editor");
+        QTRY_VERIFY(s.stage.editorWindow());
+        auto win = s.stage.editorWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(win));
+        QTest::qWait(100);
+        auto click = [&](const QString &name) {
+            auto button = find(win->contentItem(), name);
+            QVERIFY(button);
+            QTest::mouseClick(
+                win, Qt::LeftButton, Qt::NoModifier,
+                button->mapToScene(QPointF(button->width() / 2, button->height() / 2)).toPoint());
+            QTest::qWait(40);
+        };
+        const auto chosen = [&](const QString &name) {
+            auto segment = find(win->contentItem(), name);
+            return segment && segment->property("chosen").toBool();
+        };
+        b.remember("export/fpsIndex1", 0);
+        click("exportButton");
+        click("formatMP4");
+        click("rate60");
+        click("formatGIF");
+        QVERIFY(chosen("rate15"));
+        click("rate20");
+        click("formatMP4");
+        QVERIFY(chosen("rate60"));
+        click("formatGIF");
+        QVERIFY(chosen("rate20"));
+        QCOMPARE(b.preference("export/fpsIndex1").toInt(), 2);
+        // The defaults again, for the exports after this.
+        click("formatMP4");
+        click("rate30");
+        b.remember("export/fpsIndex1", 0);
+        b.discard();
+    }
     void cropEditor_data() {
         QTest::addColumn<double>("aspect");
         QTest::newRow("landscape") << 16. / 9;
