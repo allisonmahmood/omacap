@@ -81,8 +81,9 @@ class Backend : public QObject {
     void confirmReplace(std::function<void(bool)> answer);
     // Answers replaceRequested(). Yes discards the session at once, so it can be replaced.
     Q_INVOKABLE void answerReplace(bool replace);
-    // A failure that leaves nothing loaded: back to idle, with backgroundError() when no card
-    // or editor is open to show it.
+    // A failure that leaves nothing loaded: the session ends, and backgroundError() follows
+    // when no card or editor is open to show it. A session that never loaded anything is
+    // removed; one holding a recording or an edit stays recoverable.
     void fail(const QString &message);
     void loadFile(QString path);
     Q_INVOKABLE void seek(double seconds);
@@ -110,6 +111,7 @@ class Backend : public QObject {
     Q_INVOKABLE void cancelExport();
     Q_INVOKABLE void revealExport();
     Q_INVOKABLE void openExport();
+    // Ends the session and removes it. The recording it edits stays.
     Q_INVOKABLE void discard();
     Q_INVOKABLE void recover();
     Q_INVOKABLE QVariant preference(QString key, QVariant fallback = QVariant()) const;
@@ -176,6 +178,8 @@ class Backend : public QObject {
     void status(QString phase, QString message = {});
     bool mayReplace() const;
     void newSession();
+    // Ends the session, as discard() does, removing its folder only when `remove`.
+    void endSession(bool remove);
     void checkpoint();
     void push();
     void edited();

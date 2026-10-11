@@ -1390,6 +1390,27 @@ class Integration : public QObject {
         b.discard();
         QFile::remove(recording);
     }
+    // A file that can't be opened leaves no session behind.
+    void failedOpen() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        QSignalSpy errors(&b, &Backend::backgroundError);
+        const QDir scratch(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) +
+                           "/scratch");
+        const QStringList sessions = scratch.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        QTemporaryDir dir;
+        QFile broken(dir.filePath("broken.mp4"));
+        QVERIFY(broken.open(QIODevice::WriteOnly));
+        broken.write("not a video");
+        broken.close();
+        b.loadFile(broken.fileName());
+        QVERIFY(QDir(b.sessionPath()).exists());
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+        QCOMPARE(errors.count(), 1);
+        QVERIFY(b.sessionPath().isEmpty());
+        QCOMPARE(scratch.entryList(QDir::Dirs | QDir::NoDotAndDotDot), sessions);
+    }
     // How the video owner answers `omacap --record`, the capture overlay and opened files.
     void ownerCommands() {
         Theme t;

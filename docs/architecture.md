@@ -19,11 +19,11 @@ One `omacap` binary runs one of two apps, chosen in `src/main.cpp` before any
 | `omacap --record` | `record-key` to the video process; the picker in record mode (`--record-picker`) unless it stopped a recording or is busy. With no video process and an unfinished edit to recover, starts one on the recovery card instead |
 | `omacap --record-request <json>` | `record` to the video process, or starts one that records the request |
 | `omacap video.mp4` | `open` to the video process, or starts one with the video |
+| `omacap --export <job>` | the offscreen export worker |
+| `omacap --version` | prints the version |
 
 A video process that loses the race for the video lock forwards its arguments to the one
 that won, so a request or file is acted on once.
-| `omacap --export <job>` | the offscreen export worker |
-| `omacap --version` | prints the version |
 
 ## Recording, end to end
 
@@ -114,8 +114,10 @@ Signals and calls between `Backend` and the UI:
   for a recording. The backend alone ends the process: `exitRequested()` follows once that
   settles with nothing open and the phase `idle`, so it never exits while recording,
   preparing or exporting, or while a session passes through `idle` on its way to another.
-- Failures with nothing open to show them are reported as desktop notifications
-  (`backgroundError()`, sent with `omarchy-notification-send`).
+- A failure ends the session. One that never loaded anything, such as a file that won't
+  open, is removed; one holding a recording or an edit stays recoverable. Failures with
+  nothing open to show them are reported as desktop notifications (`backgroundError()`,
+  sent with `omarchy-notification-send`).
 
 ## Video UI
 

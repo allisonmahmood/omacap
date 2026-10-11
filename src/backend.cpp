@@ -233,6 +233,10 @@ void Backend::status(QString p, QString m) {
     emit changed();
 }
 void Backend::fail(const QString &message) {
+    // Nothing is loaded, so the session ends. One holding a recording or an edit stays
+    // recoverable; one that never loaded anything is removed.
+    endSession(!QFile::exists(session + "/capture.json") &&
+               !QFile::exists(session + "/recovery.json"));
     status("idle", message);
     if (!uiOpen)
         emit backgroundError(message);
@@ -1110,15 +1114,18 @@ void Backend::clearPlayers() {
     }
 }
 void Backend::discard() {
+    endSession(true);
+}
+void Backend::endSession(bool remove) {
     if (m_phase == "exporting" || worker.state() != QProcess::NotRunning)
         return;
     clearPlayers();
-    if (!session.isEmpty() && QFileInfo(session).absolutePath() == recoveryRoot)
+    if (remove && !session.isEmpty() && QFileInfo(session).absolutePath() == recoveryRoot)
         QDir(session).removeRecursively();
     session.clear();
     m_original.clear();
     state = Edit();
-    m_dirty = false;
+    m_dirty = recoveredEdits = false;
     screenRevision = cameraRevision = 0;
     status("idle");
     emit editChanged();
