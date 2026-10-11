@@ -135,7 +135,7 @@ bool runPngSmoke(QString &error) {
                                  QStringLiteral("4x4x4"), QStringLiteral("4.5x4"),
                                  QStringLiteral("999999999999999999x4"),
                                  QStringLiteral("4x4α")}) {
-    image.setText(QStringLiteral("Omasnap logical size"), invalid);
+    image.setText(QStringLiteral("OmaCap logical size"), invalid);
     if (!pngLogicalSize(image).isEmpty() || !roundTrip(image, error)) {
       error = QStringLiteral("Malformed logical size was accepted or damaged PNG metadata");
       return false;

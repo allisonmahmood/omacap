@@ -62,3 +62,8 @@ void drawAnchoredHotkeyLegend(QPainter &painter, const QRect &bounds,
 /// The instruction line along the bottom.
 void drawStatusPill(QPainter &painter, const QRect &bounds,
                     const QString &text);
+
+/// A compact tooltip over (or, near the top, under) `anchor`, shown at once
+/// rather than after a hover delay.
+void drawInstantTooltip(QPainter &painter, const QRect &bounds,
+                        const QRectF &anchor, const QString &text);

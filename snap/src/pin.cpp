@@ -5,6 +5,7 @@
 #include <QSaveFile>
 #include <QDateTime>
 #include "pin.hpp"
+#include "recording-state.hpp"
 #include "chrome-theme.hpp"
 #include "card-stack.hpp"
 #include "capture.hpp"
@@ -78,7 +79,7 @@ constexpr int kStackCloseMs = 360;
 // can recognize each other in the compositor's client list and a dispatcher
 // can name exactly one of them. Without the unique half a title pattern
 // matches every pin and the compositor acts on whichever it finds first.
-const QString kPinTitlePrefix = QStringLiteral("omasnap-pin");
+const QString kPinTitlePrefix = QStringLiteral("omacap-pin");
 
 QString pinTitle() {
   return QStringLiteral("%1 %2").arg(kPinTitlePrefix).arg(
@@ -252,7 +253,7 @@ QVector<CompositorPin> compositorPinRects() {
   for (const QJsonValue &value : clients) {
     const QJsonObject client = value.toObject();
     const QString title = client.value(QStringLiteral("title")).toString();
-    if (client.value(QStringLiteral("class")).toString() != QStringLiteral("omasnap") ||
+    if (client.value(QStringLiteral("class")).toString() != QStringLiteral("omacap") ||
         !title.startsWith(kPinTitlePrefix + QLatin1Char(' ')) ||
         client.value(QStringLiteral("address")).toString().isEmpty())
       continue;
@@ -588,6 +589,7 @@ struct PinPreview {
 
 class PinWindow final : public QWidget {
   friend bool runPinRevealSmoke(QString &error);
+  friend bool runPinRecordingSmoke(QString &error);
 public:
   explicit PinWindow(QImage image, QString path, const QSize &frame,
                       PinLifetime lifetime = PinLifetime::Persistent)
@@ -611,6 +613,15 @@ public:
     connect(&expiry_, &PinExpiry::expired, this, [this] {
       expired_ = true;
       close();
+    });
+    // Out of sight, and out of reach, while OmaCap records: the card paints
+    // nothing and takes no input, and a preview's countdown waits. The window
+    // stays mapped where it is; its rule draws no border, shadow, blur or
+    // dim, so a transparent card shows nothing.
+    connect(&recording_, &RecordingWatcher::recordingChanged, this, [this] {
+      updateCardMask();
+      updateExpiryPause();
+      update();
     });
     dragWatchTimer_.setInterval(80);
     connect(&dragWatchTimer_, &QTimer::timeout, this,
@@ -850,6 +861,11 @@ protected:
       painted_ = true;
     }
     QPainter painter(this);
+    if (recording_.recording()) {
+      painter.setCompositionMode(QPainter::CompositionMode_Source);
+      painter.fillRect(rect(), Qt::transparent);
+      return;
+    }
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
@@ -1325,7 +1341,7 @@ protected:
       const QStringList arguments{QStringLiteral("--file"), document->path(),
                                    QStringLiteral("--pin-document"), document->path()};
       if (!QProcess::startDetached(program, arguments))
-        return {QStringLiteral("Could not start omasnap"), {}, document};
+        return {QStringLiteral("Could not start OmaCap"), {}, document};
       return {{}, {}, document};
     }, {});
   }
@@ -1560,7 +1576,8 @@ private:
   void updateExpiryPause() {
     expiry_.setPaused(closing_ || hovered_ || stackInteracting_ || actionPending_ ||
                       fileDragActive_ || dragWatchTimer_.isActive() ||
-                      finishRequested_ || snapPending_);
+                      finishRequested_ || snapPending_ ||
+                      recording_.recording());
   }
 
   void toggleKept() {
@@ -1578,6 +1595,11 @@ private:
 
   void updateCardMask() {
     if (QWindow *handle = windowHandle()) {
+      // An empty region would mean no mask at all: keep one corner pixel.
+      if (recording_.recording()) {
+        handle->setMask(QRegion(0, 0, 1, 1));
+        return;
+      }
       const QPainterPath card = pinCardTransform(size(), tilt_).map(cardPath());
       handle->setMask(QRegion(card.toFillPolygon().toPolygon()));
     }
@@ -1664,6 +1686,7 @@ private:
   PinExpiry expiry_;
   qreal opacity_ = 1.0;
   bool expired_ = false;
+  RecordingWatcher recording_;
   bool stackInteracting_ = false;
   bool fileDragActive_ = false;
   qreal tilt_ = 0.0;
@@ -1730,13 +1753,13 @@ int runPinnedCapture(const QString &path, PinLifetime lifetime) {
       image.load(path);
   }
   if (image.isNull()) {
-    qWarning("omasnap: could not load pinned image %s", qUtf8Printable(path));
+    qWarning("omacap: could not load pinned image %s", qUtf8Printable(path));
     return 1;
   }
 
   PinWindow window(std::move(image), path, pinFrameSize({}), lifetime);
   if (!window.hasPinLock()) {
-    qWarning("omasnap: could not lock pinned image %s", qUtf8Printable(path));
+    qWarning("omacap: could not lock pinned image %s", qUtf8Printable(path));
     return 1;
   }
   auto *settle = new QTimer(&window);
@@ -1803,7 +1826,7 @@ int runPinnedCapture(const QString &path, PinLifetime lifetime) {
     }
     monitor->deleteLater();
     if (screen->isEmpty()) {
-      qWarning("omasnap: could not determine the pin monitor after retries");
+      qWarning("omacap: could not determine the pin monitor after retries");
       settle->deleteLater();
       watcher->deleteLater();
       return;
@@ -1819,11 +1842,11 @@ int runPinnedCapture(const QString &path, PinLifetime lifetime) {
     const QString output = runForOutput(
         QStringLiteral("hyprctl"),
         {QStringLiteral("eval"),
-         QStringLiteral("hl.window_rule({ name = \"omasnap-pins\", "
-                        "match = { class = \"^omasnap$\", title = \"^omasnap-pin [0-9]+$\" }, "
+         QStringLiteral("hl.window_rule({ name = \"omacap-pins\", "
+                        "match = { class = \"^omacap$\", title = \"^omacap-pin [0-9]+$\" }, "
                         "float = true, pin = true, no_initial_focus = true, "
                         "no_follow_mouse = false, border_size = 0, rounding = 0, "
-                        "no_shadow = true, no_blur = true })")}, &ok);
+                        "no_shadow = true, no_blur = true, no_dim = true })")}, &ok);
     return ok && !output.contains(QStringLiteral("error"), Qt::CaseInsensitive);
   };
   auto *rules = new QFutureWatcher<bool>(&window);
@@ -1835,7 +1858,7 @@ int runPinnedCapture(const QString &path, PinLifetime lifetime) {
           rules->setFuture(QtConcurrent::run(&pinPool(), applyRules));
         });
       } else {
-        qWarning("omasnap: could not configure floating pin window");
+        qWarning("omacap: could not configure floating pin window");
         QApplication::exit(1);
       }
       return;

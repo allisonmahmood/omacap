@@ -12,7 +12,7 @@ struct OutputConfig {
   QString directory;
   /** Filename pattern without extension. Tokens: `{date}` (yyyy-MM-dd),
    *  `{time}` (HH-mm-ss), `{app}` (slug of the app under the selection). */
-  QString filename = QStringLiteral("screenshot-{date}_{time}-{app}");
+  QString filename = QStringLiteral("omacap-{date}_{time}-{app}");
 };
 
 /** Reads [output] autosave, directory, and filename. A missing file or key
@@ -21,7 +21,7 @@ struct OutputConfig {
 
 /** Expands `pattern` for `when` and `appSlug` into a safe `.png` filename.
  *  An empty `appSlug` removes `{app}` together with one separator before it
- *  so `screenshot-{date}-{app}` yields `screenshot-<date>.png`, not a
+ *  so `omacap-{date}-{app}` yields `omacap-<date>.png`, not a
  *  trailing dash. Never returns an empty or path-like name. */
 [[nodiscard]] QString formatScreenshotFilename(const QString &pattern,
                                                const QDateTime &when,
@@ -44,5 +44,5 @@ struct OutputConfig {
  *  solid backdrop instead of the overlay's see-through dim. */
 [[nodiscard]] bool loadEditorWindowBackdropOpaque(const QString &filePath);
 
-/** ~/.config/omasnap/omasnap.conf (XDG config location). */
+/** ~/.config/omacap/omacap.conf (XDG config location). */
 [[nodiscard]] QString defaultConfigPath();

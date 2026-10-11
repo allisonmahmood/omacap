@@ -56,7 +56,7 @@ bool runTransformSmoke(QString &error) {
       "  printf '[{\"focused\":true,\"scale\":1.0,\"width\":300,"
       "\"height\":200,\"transform\":%s,\"name\":\"TEST-ROTATED\","
       "\"x\":0,\"y\":0,\"activeWorkspace\":{\"id\":7}}]\\n' "
-      "\"$OMASNAP_TEST_TRANSFORM\"\n"
+      "\"$OMACAP_TEST_TRANSFORM\"\n"
       "else\n"
       "  printf '[{\"workspace\":{\"id\":7},\"at\":[0,0],\"size\":[100,100],"
       "\"title\":\"Test window\",\"stableId\":\"w1\"}]\\n'\n"
@@ -76,17 +76,19 @@ bool runTransformSmoke(QString &error) {
 
   const QByteArray originalPath = qgetenv("PATH");
   qputenv("PATH", fakeCommands.path().toUtf8() + ':' + originalPath);
-  qputenv("OMASNAP_TEST_CAPTURE", capturePath.toUtf8());
+  qputenv("OMACAP_TEST_CAPTURE", capturePath.toUtf8());
   const auto restoreEnvironment = [&originalPath] {
     qputenv("PATH", originalPath);
-    qunsetenv("OMASNAP_TEST_CAPTURE");
-    qunsetenv("OMASNAP_TEST_TRANSFORM");
+    qunsetenv("OMACAP_TEST_CAPTURE");
+    qunsetenv("OMACAP_TEST_TRANSFORM");
   };
   for (const int transform : {1, 3, 5, 7}) {
-    qputenv("OMASNAP_TEST_TRANSFORM", QByteArray::number(transform));
+    qputenv("OMACAP_TEST_TRANSFORM", QByteArray::number(transform));
     CaptureData rotatedCapture;
     if (!captureFocusedMonitor(rotatedCapture, true, error) ||
         rotatedCapture.monitor.geometry.size() != QSize(200, 300) ||
+        // Recordings need the transform to map the area onto the stream.
+        rotatedCapture.monitor.transform != transform ||
         rotatedCapture.previewSize != QSize(200, 300) ||
         rotatedCapture.windows.size() != 1) {
       if (error.isEmpty())
@@ -97,7 +99,7 @@ bool runTransformSmoke(QString &error) {
   }
 
   // Callers that never show the overlay skip window discovery entirely.
-  qputenv("OMASNAP_TEST_TRANSFORM", QByteArrayLiteral("0"));
+  qputenv("OMACAP_TEST_TRANSFORM", QByteArrayLiteral("0"));
   CaptureData withoutWindows;
   if (!captureFocusedMonitor(withoutWindows, false, error) ||
       withoutWindows.source.size() != QSize(300, 200) ||
@@ -110,7 +112,7 @@ bool runTransformSmoke(QString &error) {
   }
 
   // Without a test capture, missing output-capture protocol must fail clearly.
-  qunsetenv("OMASNAP_TEST_CAPTURE");
+  qunsetenv("OMACAP_TEST_CAPTURE");
   CaptureData missingProtocol;
   QString protocolError;
   const bool captured =

@@ -1,16 +1,18 @@
 #include <functional>
 #pragma once
 
-#include "background-config.hpp"
 #include "capture.hpp"
 #include "cut.hpp"
 #include "overlay-chrome.hpp"
 #include "palette-config.hpp"
+#include "record-picker.hpp"
 #include "recent-snaps.hpp"
 #include "stroke-smoothing.hpp"
 
 #include <QElapsedTimer>
 #include <QFutureWatcher>
+#include <QHash>
+#include <QSet>
 #include <QPlainTextEdit>
 #include <QPixmap>
 #include <QPointer>
@@ -22,7 +24,7 @@
 #include <optional>
 #include <memory>
 
-class QFileDialog;
+class QDialog;
 class QKeyEvent;
 class QCloseEvent;
 class QEnterEvent;
@@ -110,7 +112,10 @@ public:
   const CaptureData &captureData() const { return capture_; }
   [[nodiscard]] QRectF currentSelection() const { return selection_; }
   /** Annotation-space canvas, including any strips grown past the source. */
-  [[nodiscard]] QRectF currentCanvasForTest() const { return canvasRect_; }
+  [[nodiscard]] QRectF currentCanvasForTest() const { return layout_.canvas; }
+  [[nodiscard]] const CaptureLook &currentLookForTest() const { return look_; }
+  /** Applies a look as one undoable step, as the look popovers do. */
+  void setLookForTest(const CaptureLook &look) { commitLook(look); }
   /** Canvas the edit view shows right now: the settled one, or the preview a
    *  carried layer or a label being typed gives it. */
   [[nodiscard]] QRectF liveCanvasForTest() const {
@@ -182,7 +187,8 @@ public:
   };
 
 private:
-  enum class Phase { Select, Export, Edit };
+  /// Record: an area is picked in record mode and the record bar is up.
+  enum class Phase { Select, Export, Edit, Record };
   enum class OutputMode { Copy, Save, Both, CopyAndPreview };
   enum class HighlighterMode { Snap, Normal };
 public:
@@ -250,8 +256,7 @@ private:
 
   struct EditState {
     QVector<Annotation> annotations;
-    BackgroundStyle backgroundStyle = BackgroundStyle::None;
-    bool imageShadow = true;
+    CaptureLook look = CaptureLook::plain();
     CanvasBoundaryMode canvasBoundary = CanvasBoundaryMode::Framed;
     QRectF selection;
     int selectedAnnotation = -1;
@@ -333,11 +338,8 @@ public:
   }
   /// Starts a new selection without invoking live scrolling capture.
   void returnToSelectForTest() { returnToSelect(); }
-  /// Simulates a configured custom backdrop still decoding on a worker.
-  void setBackdropFutureForTest(const QFuture<QImage> &future) {
-    configuredCustomDefaultPending_ = true;
-    backdropWatcher_.setFuture(future);
-  }
+  /// Blocks until the backdrop pictures this document refers to are loaded.
+  void waitForPictures();
   /// Holds output open to verify destruction preserves worker-owned files.
   void setFinishFutureForTest(QFuture<bool> future) {
     finishWatcher_.setFuture(future.then([](bool) { return FinishResult{}; }));
@@ -405,6 +407,14 @@ public:
     return customColorPickerOpen_;
   }
   [[nodiscard]] bool shapeMenuOpenForTest() const { return shapeMenuOpen_; }
+  /// The look popover open under the toolbar, if any.
+  enum class LookPopover { None, Backdrop, Frame, Glass };
+  [[nodiscard]] LookPopover lookPopoverForTest() const { return lookPopover_; }
+  [[nodiscard]] QRectF lookPopoverRectForTest() const { return lookPopoverRect(); }
+  /// Center of a control in the open look popover ("aurora", "padding",
+  /// "aspect-wide", …), or (-1,-1).
+  [[nodiscard]] QPoint lookControlCenterForTest(const QString &id) const;
+  [[nodiscard]] QRectF lookControlRectForTest(const QString &id) const;
   /// Whether window selection is active in the select phase. Test accessor.
   [[nodiscard]] bool windowModeForTest() const { return windowMode_; }
   /// Whether clicks are inferred as window/fullscreen while drags stay areas.
@@ -449,6 +459,29 @@ public:
   }
   [[nodiscard]] QRectF textSizePanelRectForTest() const {
     return textSizePanelRect();
+  }
+  /// Record mode: the picker hands its area to the video process instead of
+  /// capturing it (`omacap --record` opens it so). V toggles it.
+  void setRecordMode(bool record);
+  [[nodiscard]] bool recordModeForTest() const { return recordMode_; }
+  [[nodiscard]] QPoint modeSwitchCenterForTest(bool record) const {
+    return modeSwitchRects().value(record ? 1 : 0).center().toPoint();
+  }
+  /// Whether an area is picked and the record bar is up. Test accessor.
+  [[nodiscard]] bool recordBarShownForTest() const { return phase_ == Phase::Record; }
+  [[nodiscard]] QRectF recordBarRectForTest() const { return recordBarRect(); }
+  [[nodiscard]] QPoint recordBarItemCenterForTest(const QString &id) const;
+  /// The request Enter would hand off now. Test accessor.
+  [[nodiscard]] RecordRequest recordRequestForTest() const { return recordRequest(); }
+  /// Replaces the video-process handoff, as the smoke suite cannot run one.
+  void setRecordHandoffForTest(std::function<QString(const RecordRequest &)> handoff) {
+    recordHandoff_ = std::move(handoff);
+  }
+  /// Blocks until the record bar's devices are listed. Test accessor.
+  void waitForRecordDevices();
+  /// The handoff Enter started; finished once the video process has it.
+  [[nodiscard]] QFuture<QString> recordHandoffForTest() const {
+    return recordHandoffFuture_;
   }
   /// Whether the overlay is still in the select phase. Test accessor.
   [[nodiscard]] bool selectingForTest() const { return phase_ == Phase::Select; }
@@ -620,16 +653,25 @@ private:
   void paintRecents(QPainter &painter);
   void reopenRecent(int index);
   void completeReopenRecent(const ReopenResult &result);
-  void completeBackdropLoad();
-  void seedConfiguredBackground(BackgroundStyle style);
+  /// Starts a fresh document with the last-used look, the wallpaper it
+  /// shows being the one resolved when this overlay opened.
+  void seedLook();
+  /// Loads the pictures `ids` name, and with `resolveWallpaper` stores the
+  /// current Omarchy wallpaper first, all on a worker.
+  void requestPictures(QStringList ids, bool resolveWallpaper = false);
+  /// Whatever the current look's backdrop shows is loaded (or known to be
+  /// missing), so an export can render it.
+  [[nodiscard]] bool picturesReady() const;
+  /// The decoded picture `look`'s backdrop shows; null when it shows none or
+  /// it is not loaded.
+  [[nodiscard]] QImage lookPicture(const CaptureLook &look) const;
+  /// Flattens the document as it stands now, on whatever thread calls it.
+  [[nodiscard]] std::function<QImage()> renderer() const;
   void duplicateSelectedAnnotation();
   [[nodiscard]] EditState editState() const;
   void refreshCanvasRect();
-  [[nodiscard]] bool canvasGrown() const;
   /** Whether `canvas` reaches past the source frame on any side. */
   [[nodiscard]] bool exceedsSourceFrame(const QRectF &canvas) const;
-  [[nodiscard]] BackgroundStyle effectiveBackgroundStyle() const;
-  [[nodiscard]] bool hasCaptureBackground() const;
   void enterEdit(QString status);
   /// Routes a confirmed screen selection to quick export or the editor.
   void enterSelectedCapture(QString editStatus);
@@ -651,7 +693,9 @@ private:
   void commitCrop(const QRectF &crop);
   void commitCut(CutOp cut);
   [[nodiscard]] bool cutInsertHint() const;
-  void commitBackground(BackgroundStyle style, bool imageShadow);
+  /// Replaces the look as one undoable step and remembers it for the next
+  /// capture.
+  void commitLook(const CaptureLook &look, const QString &status = {});
   void commitCanvasBoundary(CanvasBoundaryMode mode);
   void cycleCanvasBoundary(bool reverse);
   void cycleBackground();
@@ -661,14 +705,71 @@ private:
   friend bool runSaveAsSmoke(QString &error);
   void cancelSaveAs();
   void restoreSaveAsFocus();
+  /// Shows a chooser the way every chooser over the overlay is shown: the
+  /// overlay hides and gives up the keyboard so the floating dialog can take
+  /// it, and returns once the dialog has fully closed. `done` then runs with
+  /// whether it was accepted, unless a newer chooser or closing the editor
+  /// made it stale.
+  void openChooser(QDialog *dialog, std::function<void(bool accepted)> done);
   void saveAs();
   void showSaveAsDialog(const QString &suggested);
   void saveAsToPath(const QString &path);
+  /// The Colour… and Image… backdrops: a floating chooser, then one Look.
+  void chooseBackdropColour();
+  void chooseBackdropImage();
   void finish(OutputMode mode);
   void completeFinish(const FinishResult &result);
   void handleEscape();
   void handleToolbar(const QString &action);
   void paintEdit(QPainter &painter);
+  /// A control in a look popover: a backdrop swatch, a slider, one segment
+  /// of a segmented row, or that row's label.
+  struct LookControl {
+    enum class Kind { Swatch, Slider, Segment, Label };
+    Kind kind = Kind::Swatch;
+    QRectF rect;
+    QString id;
+    QString label;
+    bool selected = false;
+  };
+  [[nodiscard]] QRectF lookPopoverRect() const;
+  [[nodiscard]] QVector<LookControl> lookControls() const;
+  void paintLookPopover(QPainter &painter);
+  /// Opens, keeps or closes the look popovers as the pointer moves, the way
+  /// the palette does. Returns whether anything shown changed.
+  bool trackLookPopover();
+  /// A press inside the open popover. Returns whether it was consumed.
+  bool pressLookPopover(const QPointF &point);
+  /// A slider drag previews the look live and commits it once, on release,
+  /// as one undo step.
+  void dragLookSlider(const QPointF &point);
+  void releaseLookSlider();
+  void applyLookControl(const QString &id);
+  [[nodiscard]] QString lookStatus(const CaptureLook &look) const;
+  /// The picker's Screenshot | Record switch, and which segment is where.
+  [[nodiscard]] QVector<QRectF> modeSwitchRects() const;
+  void paintModeSwitch(QPainter &painter);
+  /// A control on the record bar or in its open device menu.
+  struct RecordBarItem {
+    QRectF rect;
+    QString id;
+    QString label;
+    bool on = false;
+  };
+  [[nodiscard]] QRectF recordBarRect() const;
+  [[nodiscard]] QVector<RecordBarItem> recordBarItems() const;
+  [[nodiscard]] QVector<RecordBarItem> recordMenuItems() const;
+  void paintRecordBar(QPainter &painter);
+  /// The picked area, in logical pixels relative to the monitor.
+  [[nodiscard]] QRectF recordArea() const;
+  [[nodiscard]] RecordRequest recordRequest() const;
+  /// An area was picked in record mode: show the bar rather than capture.
+  void enterRecordSetup();
+  bool pressRecordBar(const QPointF &point);
+  bool recordKey(QKeyEvent *event);
+  /// Hands the request to the video process and leaves.
+  void startRecording();
+  void cycleRecordDevice(bool camera);
   void paintSelect(QPainter &painter);
   void refreshBackdropCache();
   void refreshComposedCapture();
@@ -693,11 +794,12 @@ private:
   struct LiveCanvas {
     /// The settled canvas, or the bounds a carried layer would settle to.
     QRectF rect;
-    /// `rect` is such a preview: the mat is laid over it, filled with
-    /// `backdrop`, instead of over the settled canvas while the layer is
-    /// carried, whether that makes the mat larger or smaller.
+    /// `rect` is such a preview: the mat is laid over it instead of over the
+    /// settled canvas while the layer is carried, whether that makes the mat
+    /// larger or smaller.
     bool previews = false;
-    BackgroundStyle backdrop = BackgroundStyle::None;
+    /// The look's backdrop paints `rect`.
+    bool backdrop = false;
     /// A spotlight has an opening in `rect`, so all the rest of it is dimmed.
     bool dimmed = false;
     bool operator==(const LiveCanvas &) const = default;
@@ -779,10 +881,10 @@ private:
   QElapsedTimer recentsAnimClock_;
   QTimer recentsAnimTimer_;
   QRectF selection_;
-  // Annotation coordinates stay anchored to the source frame at 0,0. This
-  // derived rect expands around them without translating either the source or
-  // existing layers; replaying the op log reconstructs it exactly.
-  QRectF canvasRect_;
+  // Annotation coordinates stay anchored to the source frame at 0,0. The
+  // derived canvas expands around them without translating either the source
+  // or existing layers; replaying the op log reconstructs it exactly.
+  CaptureLayout layout_;
   QPointF dragStart_;
   QRectF originalSelection_;
   /// Source frame at crop press, anchoring pointer mapping and live painting.
@@ -837,16 +939,22 @@ private:
   bool windowMode_ = false;
   /// Index into the region aspects Tab cycles: free, 1:1, 3:4, 16:9.
   int regionAspect_ = 0;
-  BackgroundStyle backgroundStyle_ = BackgroundStyle::None;
-  bool imageShadow_ = true;
+  CaptureLook look_ = CaptureLook::plain();
   CanvasBoundaryMode canvasBoundaryMode_ = CanvasBoundaryMode::Framed;
-  /** `[background]` config: custom image path and the style a fresh capture
-   *  starts with. Loaded once in the constructor. */
-  BackgroundConfig backgroundConfig_;
-  /** Loaded from `backgroundConfig_.imagePath`; null when unset or the file
-   *  failed to load, in which case `BackgroundStyle::Custom` is unavailable. */
-  QImage customBackdrop_;
-  bool configuredCustomDefaultPending_ = false;
+  /// The look fresh documents start with: the last one used, remembered
+  /// across runs (capture-state.hpp).
+  CaptureLook lastLook_;
+  /// Decoded backdrop pictures by asset id.
+  QHash<QString, QImage> pictures_;
+  /// The Omarchy wallpaper as this overlay found it; empty until resolved,
+  /// or when there is none.
+  QString wallpaperId_;
+  /// Pictures being decoded, and whether the wallpaper is still being
+  /// resolved. Exports wait only for what the look shows (picturesReady()).
+  QSet<QString> pendingPictures_;
+  bool wallpaperPending_ = false;
+  /// The seeded look still waits for wallpaperId_.
+  bool seedAwaitsWallpaper_ = false;
   std::optional<QString> pendingSelectedCapture_;
   bool busy_ = false;
   bool colorPaletteOpen_ = false;
@@ -984,12 +1092,28 @@ private:
   QFutureWatcher<FinishResult> finishWatcher_;
   bool saveAsActive_ = false;
   quint64 saveAsRequest_ = 0;
-  QPointer<QFileDialog> saveAsDialog_;
+  /// The open chooser (Save As, backdrop colour or image), if any.
+  QPointer<QDialog> chooser_;
+  LookPopover lookPopover_ = LookPopover::None;
+  bool recordMode_ = false;
+  /// The mode switch segment a press started on, or -1.
+  int modeSwitchPress_ = -1;
+  RecordDevices recordDevices_;
+  bool recordDevicesListed_ = false;
+  RecordChoices recordChoices_;
+  /// "mic" or "camera" while that device menu is open.
+  QString recordMenu_;
+  QFutureWatcher<std::pair<RecordDevices, RecordChoices>> recordDevicesWatcher_;
+  std::function<QString(const RecordRequest &)> recordHandoff_;
+  QFuture<QString> recordHandoffFuture_;
+  QPointF lookIntentOrigin_;
+  /// The slider being dragged, and the look before the drag.
+  QString lookSlider_;
+  CaptureLook lookBeforeSlider_;
   QString saveAsDirectory_;
   QFuture<QString> saveAsFuture_;
   QFuture<QString> dismissFuture_;
   QFutureWatcher<ReopenResult> reopenWatcher_;
-  QFutureWatcher<QImage> backdropWatcher_;
   bool reopenPending_ = false;
   /// The region being read (annotation coordinates). While tesseract runs a
   /// scan band sweeps it; once done the recognized text sits over it for a

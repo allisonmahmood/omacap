@@ -58,7 +58,7 @@ void configureCaptureCommandLine(QCommandLineParser &parser, bool beforeQt) {
       "it, or Edit to annotate.\n"
       "Use --editor to edit before output.\n"
       "\n"
-      "Only one capture overlay runs at a time. Starting omasnap again while "
+      "Only one capture overlay runs at a time. Starting omacap again while "
       "an\noverlay is open dismisses it: the running instance is asked to "
       "quit and the\nnew process exits without capturing, so the same hotkey "
       "opens and closes the\noverlay. Quick output (--copy, --save) dismisses "
@@ -114,7 +114,7 @@ void configureCaptureCommandLine(QCommandLineParser &parser, bool beforeQt) {
       QStringLiteral("editor"),
       QStringLiteral("Edit before output, using overlay (fullscreen) or "
                      "window (a normal compositor window). Also configurable "
-                     "as [editor] mode in omasnap.conf; W switches a live "
+                     "as [editor] mode in omacap.conf; W switches a live "
                      "editor between the two."),
       QStringLiteral("mode"));
   parser.addOption(editorOption);
@@ -126,6 +126,10 @@ void configureCaptureCommandLine(QCommandLineParser &parser, bool beforeQt) {
                                   QStringLiteral("token"));
   handoffToken.setFlags(QCommandLineOption::HiddenFromHelp);
   parser.addOption(handoffToken);
+  // `omacap --record` opens the picker in record mode through this.
+  QCommandLineOption recordPicker(QStringLiteral("record-picker"));
+  recordPicker.setFlags(QCommandLineOption::HiddenFromHelp);
+  parser.addOption(recordPicker);
   QCommandLineOption pinDocument(QStringLiteral("pin-document"), QString(),
                                  QStringLiteral("path"));
   pinDocument.setFlags(QCommandLineOption::HiddenFromHelp);

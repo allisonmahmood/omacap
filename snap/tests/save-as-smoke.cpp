@@ -49,7 +49,7 @@ template <typename Predicate> bool waitUntil(Predicate ready) {
 }
 QFileDialog *saveDialog() {
   for (QWidget *widget : QApplication::topLevelWidgets()) {
-    if (widget->objectName() == QStringLiteral("omasnap-save-as"))
+    if (widget->objectName() == QStringLiteral("omacap-save-as"))
       return qobject_cast<QFileDialog *>(widget);
   }
   return nullptr;
@@ -62,14 +62,14 @@ bool runSaveAsSmoke(QString &error) {
     error = QStringLiteral("Could not create Save As test directory");
     return false;
   }
-  const QByteArray previousRecents = qgetenv("OMASNAP_RECENT_DIR");
+  const QByteArray previousRecents = qgetenv("OMACAP_RECENT_DIR");
   const auto restoreRecents = qScopeGuard([&] {
     if (previousRecents.isNull())
-      qunsetenv("OMASNAP_RECENT_DIR");
+      qunsetenv("OMACAP_RECENT_DIR");
     else
-      qputenv("OMASNAP_RECENT_DIR", previousRecents);
+      qputenv("OMACAP_RECENT_DIR", previousRecents);
   });
-  qputenv("OMASNAP_RECENT_DIR", directory.filePath(QStringLiteral("recent")).toUtf8());
+  qputenv("OMACAP_RECENT_DIR", directory.filePath(QStringLiteral("recent")).toUtf8());
   const QString target = directory.filePath(QStringLiteral("chosen.png"));
   QImage original(100, 80, QImage::Format_ARGB32);
   original.fill(Qt::red);
@@ -299,18 +299,28 @@ bool runSaveAsSmoke(QString &error) {
   {
     CaptureEditor editor(capture, CaptureEditor::CaptureMode::File);
     editor.show();
+    editor.waitForPictures();
     // A chooser must not steal the mouse release that commits a live gesture,
-    // or export before the configured backdrop has established the document.
-    for (bool *pending : {&editor.dragging_, &editor.panning_,
-                          &editor.configuredCustomDefaultPending_}) {
-      *pending = true;
+    // or export before the backdrop pictures have loaded.
+    const auto refuses = [&] {
       editor.saveAs();
-      if (editor.busy_ || editor.saveAsActive_) {
+      return !editor.busy_ && !editor.saveAsActive_;
+    };
+    for (bool *pending : {&editor.dragging_, &editor.panning_}) {
+      *pending = true;
+      if (!refuses()) {
         error = QStringLiteral("Save As interrupted an unfinished edit");
         return false;
       }
       *pending = false;
     }
+    editor.look_.backdrop = BackgroundStyle::Wallpaper;
+    editor.wallpaperPending_ = true;
+    if (!refuses()) {
+      error = QStringLiteral("Save As did not wait for the wallpaper");
+      return false;
+    }
+    editor.wallpaperPending_ = false;
     editor.close();
   }
   // A finished worker may still have its GUI completion queued when close

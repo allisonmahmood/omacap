@@ -1,6 +1,7 @@
 #include "recent-persistence-smoke.hpp"
 
 #include "capture.hpp"
+#include "capture-state.hpp"
 #include "cli-path.hpp"
 #include "editor.hpp"
 #include "recent-snaps.hpp"
@@ -82,36 +83,57 @@ bool checkReplacement(const QImage &image, const QDir &, QString &error) {
   return true;
 }
 
-bool checkBackdrop(QApplication &application, const CaptureData &capture,
-                   QString &error) {
+/// A fresh capture is styled with the wallpaper it was taken under: the
+/// picture is stored with the document, so a later wallpaper change never
+/// restyles it, and output waits until that picture is ready.
+bool checkWallpaperBackdrop(const CaptureData &capture, QString &error) {
+  const QTemporaryDir theme;
+  const QByteArray previousTheme = qgetenv("OMACAP_THEME_ROOT");
+  const auto restore = qScopeGuard([&] {
+    previousTheme.isNull() ? qunsetenv("OMACAP_THEME_ROOT")
+                           : qputenv("OMACAP_THEME_ROOT", previousTheme);
+    saveLastLook(CaptureLook::plain());
+  });
+  QImage wallpaper(64, 64, QImage::Format_RGB32);
+  wallpaper.fill(QColor(200, 30, 40));
+  const QString background = QDir(theme.path()).filePath(QStringLiteral("background"));
+  if (!theme.isValid() || !wallpaper.save(background, "PNG")) {
+    error = QStringLiteral("Could not prepare the wallpaper fixture");
+    return false;
+  }
+  qputenv("OMACAP_THEME_ROOT", theme.path().toUtf8());
+  CaptureLook look;
+  look.backdrop = BackgroundStyle::Wallpaper;
+  look.shadow = 0.0;
+  saveLastLook(look);
+
   CaptureEditor editor(capture, CaptureEditor::CaptureMode::Fullscreen);
-  editor.resize(800, 600);
-  editor.show();
-  if (!editor.waitForSnapshot()) {
-    error = QStringLiteral("Could not persist backdrop fixture");
-    return false;
-  }
-  QPromise<QImage> pending;
-  pending.start();
-  editor.setBackdropFutureForTest(pending.future());
-  const auto initialLog = editor.operationLog();
   editor.setProcessLauncherForTest([](const QString &, const QStringList &) { return true; });
+  // No event has been processed: the wallpaper is still being stored.
   QTest::keyClick(&editor, Qt::Key_S, Qt::ControlModifier);
-  const bool started =
-      editor.statusForTest().contains(QStringLiteral("Saving screenshot"));
-  // Finish the held decode before any failure return destroys its promise.
-  pending.addResult(capture.source);
-  pending.finish();
-  application.processEvents();
-  if (started || !editor.isVisible() || editor.operationLog() == initialLog) {
+  if (editor.statusForTest().contains(QStringLiteral("Saving screenshot"))) {
     editor.waitForExport();
-    error = QStringLiteral("Output did not wait for the configured backdrop");
+    error = QStringLiteral("Output did not wait for the wallpaper");
     return false;
   }
-  const auto ready = editor.operationLog();
-  if (ready.isEmpty() || ready.first().type != Operation::Type::Background ||
-      ready.first().background != BackgroundStyle::Custom) {
-    error = QStringLiteral("Ready backdrop was not included in document history");
+  editor.waitForPictures();
+  const auto log = editor.operationLog();
+  if (log.isEmpty() || log.first().type != Operation::Type::Look ||
+      log.first().look.backdrop != BackgroundStyle::Wallpaper ||
+      log.first().look.wallpaper.isEmpty() ||
+      editor.currentLookForTest().wallpaper != log.first().look.wallpaper) {
+    error = QStringLiteral("The capture did not record its wallpaper");
+    return false;
+  }
+  wallpaper.fill(QColor(20, 40, 220));
+  if (!wallpaper.save(background, "PNG")) {
+    error = QStringLiteral("Could not change the wallpaper fixture");
+    return false;
+  }
+  const QImage output = editor.renderCurrentOutput();
+  if (output.pixelColor(2, 2) != QColor(200, 30, 40)) {
+    error = QStringLiteral("A wallpaper change restyled an existing capture: %1")
+                .arg(output.pixelColor(2, 2).name());
     return false;
   }
   return true;
@@ -298,16 +320,16 @@ bool runRecentPersistenceSmoke(QApplication &application, QString &error) {
     return false;
   }
   const QDir root(directory.path());
-  const QByteArray previousShelf = qgetenv("OMASNAP_RECENT_DIR");
-  const QByteArray previousOutput = qgetenv("OMASNAP_SCREENSHOT_DIR");
+  const QByteArray previousShelf = qgetenv("OMACAP_RECENT_DIR");
+  const QByteArray previousOutput = qgetenv("OMACAP_SCREENSHOT_DIR");
   const auto restore = qScopeGuard([&] {
-    qputenv("OMASNAP_RECENT_DIR", previousShelf);
-    qputenv("OMASNAP_SCREENSHOT_DIR", previousOutput);
+    qputenv("OMACAP_RECENT_DIR", previousShelf);
+    qputenv("OMACAP_SCREENSHOT_DIR", previousOutput);
   });
   const QString shelf = root.filePath(QStringLiteral("recent"));
   const QString output = root.filePath(QStringLiteral("output"));
-  qputenv("OMASNAP_RECENT_DIR", shelf.toUtf8());
-  qputenv("OMASNAP_SCREENSHOT_DIR", output.toUtf8());
+  qputenv("OMACAP_RECENT_DIR", shelf.toUtf8());
+  qputenv("OMACAP_SCREENSHOT_DIR", output.toUtf8());
 
   CaptureData capture;
   capture.monitor.name = QStringLiteral("TEST");
@@ -320,7 +342,7 @@ bool runRecentPersistenceSmoke(QApplication &application, QString &error) {
   if (!checkPublication(capture.source, root, error) ||
       !checkReplacement(capture.source, root, error) ||
       !checkDestruction(capture, error) ||
-      !checkBackdrop(application, capture, error))
+      !checkWallpaperBackdrop(capture, error))
     return false;
 
   auto editorOwner = std::make_unique<CaptureEditor>(
@@ -390,7 +412,7 @@ bool runRecentPersistenceSmoke(QApplication &application, QString &error) {
     return false;
   }
   blocker.close();
-  qputenv("OMASNAP_RECENT_DIR", blockedShelf.toUtf8());
+  qputenv("OMACAP_RECENT_DIR", blockedShelf.toUtf8());
   QTimer watchdog;
   watchdog.setSingleShot(true);
   QObject::connect(&watchdog, &QTimer::timeout, &application, release);
@@ -448,7 +470,7 @@ bool runRecentPersistenceSmoke(QApplication &application, QString &error) {
     error = QStringLiteral("Closed editor removed the retained recovery document");
     return false;
   }
-  qputenv("OMASNAP_RECENT_DIR", shelf.toUtf8());
+  qputenv("OMACAP_RECENT_DIR", shelf.toUtf8());
   CaptureData recoveryCapture;
   describeFileCapture(recoveryCapture, QImage(source), log);
   CaptureEditor recovered(recoveryCapture, CaptureEditor::CaptureMode::File,

@@ -12,6 +12,7 @@
 #include "pin.hpp"
 #include "pin-file.hpp"
 #include "recent-snaps.hpp"
+#include "recording-state.hpp"
 #include "startup-timing.hpp"
 
 #include <LayerShellQt/Window>
@@ -128,9 +129,8 @@ QByteArray hyprctlOutput(const QStringList &arguments) {
 
 int snapMain(int argc, char **argv) {
   startupTimingMark("entered main");
-  QCoreApplication::setApplicationName(QStringLiteral("omasnap"));
-  QCoreApplication::setApplicationVersion(QString::fromLatin1(OMASNAP_VERSION));
-  QCoreApplication::setOrganizationName(QStringLiteral("Omarchy"));
+  QCoreApplication::setApplicationName(QStringLiteral("omacap"));
+  QCoreApplication::setApplicationVersion(QString::fromLatin1(OMACAP_VERSION));
   // Resolve editor presentation before Qt consumes its own command-line flags.
   QStringList rawArguments;
   for (int index = 0; index < argc; ++index)
@@ -153,7 +153,7 @@ int snapMain(int argc, char **argv) {
   // from the theme. `-platformtheme gtk3` on the command line still
   // overrides this for debugging.
   qputenv("QT_QPA_PLATFORMTHEME", "generic");
-  QGuiApplication::setDesktopFileName(QStringLiteral("omasnap"));
+  QGuiApplication::setDesktopFileName(QStringLiteral("omacap"));
   QApplication application(argc, argv);
   startupTimingMark("QApplication constructed");
   // With the external desktop theme bypassed, Qt's default font would be
@@ -161,7 +161,6 @@ int snapMain(int argc, char **argv) {
   // widget is created, so painter/widget default-font text keeps its size and
   // face.
   QApplication::setFont(chromeDefaultFont());
-  initializeChromeTheme();
 
   // A stitched scroll capture (or any tall pinned image) exceeds Qt's default
   // 256 MB image-decode allocation limit; lift it so --file/--pin can open it.
@@ -172,6 +171,9 @@ int snapMain(int argc, char **argv) {
   configureCaptureCommandLine(parser);
   parser.process(application);
   startupTimingMark("command line parsed");
+  // After parsing: --help and --version exit() at once, which must not race
+  // the theme loader's worker thread.
+  initializeChromeTheme();
 
   QString filePath = parser.value(QStringLiteral("file"));
   const bool clipboardInput = parser.isSet(QStringLiteral("clipboard"));
@@ -228,6 +230,12 @@ int snapMain(int argc, char **argv) {
     qCritical() << "Only one capture target may be specified";
     return 2;
   }
+  // Pins and previews hide themselves during a recording; nothing else of
+  // the screenshot side may appear in one.
+  if (recordingInProgress()) {
+    qCritical() << "OmaCap is recording; stop the recording first";
+    return 1;
+  }
   if (!positional.isEmpty()) {
     const QString localTarget = resolveLocalImagePath(positional.first());
     if (filePath.isEmpty() && !localTarget.isEmpty()) {
@@ -266,6 +274,14 @@ int snapMain(int argc, char **argv) {
     return 2;
   }
   const bool editingImage = clipboardInput || !filePath.isEmpty();
+  // Record mode picks an area for the video process; it captures nothing.
+  const bool recordPicker = parser.isSet(QStringLiteral("record-picker"));
+  if (recordPicker && (editingImage || requestedModes > 0 ||
+                       quickOutputMode != QuickOutputMode::None)) {
+    qCritical() << "--record-picker cannot be combined with a capture, an "
+                   "image or quick output";
+    return 2;
+  }
   if (editingImage && quickOutputMode != QuickOutputMode::None) {
     qCritical()
         << "Quick output options cannot be combined with an image input";
@@ -286,8 +302,10 @@ int snapMain(int argc, char **argv) {
     qCritical() << "Could not create private runtime directory";
     return 1;
   }
+  // Separate from the video process's lock: a second capture SIGTERMs
+  // whoever holds this one.
   QLockFile instanceLock(
-      QDir(runtime).filePath(QStringLiteral("omasnap.instance")));
+      QDir(runtime).filePath(QStringLiteral("capture.lock")));
   // Every capture, quick output included, dismisses a running overlay instead
   // of starting a second one: a late capture would otherwise photograph that overlay.
   // Editing an image always takes over so the requested editor can open.
@@ -296,7 +314,7 @@ int snapMain(int argc, char **argv) {
                                  : InstanceMode::Capture);
   startupTimingMark("instance lock acquired");
   if (lockResult.signalledPid != 0)
-    qInfo().noquote() << QStringLiteral("Asked the running omasnap (pid %1) to "
+    qInfo().noquote() << QStringLiteral("Asked the running OmaCap overlay (pid %1) to "
                                         "quit")
                              .arg(lockResult.signalledPid);
   if (!lockResult.proceed) {
@@ -396,7 +414,7 @@ int snapMain(int argc, char **argv) {
                               ? capture.source
                               : renderCapture(capture,
                                               QRectF(QPointF(), capture.previewSize), {},
-                                              BackgroundStyle::None);
+                                              CaptureLook::plain());
     if (!quickOutput(output, quickOutputMode, outputError, capture.previewSize)) {
       qCritical().noquote() << outputError;
       return 1;
@@ -424,7 +442,19 @@ int snapMain(int argc, char **argv) {
   const QSize editingPreview = capture.previewSize;
   CaptureEditor editor(std::move(capture), captureMode, quickOutputMode,
                        restoredLog, nullptr, editorWindowMode && !editingImage);
+  // A recording that starts while the editor is open (from the video side)
+  // must not show it; it comes back when the recording ends.
+  RecordingWatcher recording;
+  QObject::connect(&recording, &RecordingWatcher::recordingChanged, &editor,
+                   [&editor](bool active) {
+                     if (active)
+                       editor.hide();
+                     else
+                       editor.show();
+                   });
   editor.setPinDocument(std::move(pinDocument));
+  if (recordPicker)
+    editor.setRecordMode(true);
   startupTimingMark("CaptureEditor constructed");
   editor.setScreen(targetScreen);
   if (windowedEditorProcess && editingImage) {
@@ -435,8 +465,8 @@ int snapMain(int argc, char **argv) {
     editor.setWindowedBackdropOpaque(
         loadEditorWindowBackdropOpaque(defaultConfigPath()));
     editor.setWindowTitle(
-        filePath.isEmpty() ? QStringLiteral("omasnap")
-                           : QStringLiteral("omasnap %1")
+        filePath.isEmpty() ? QStringLiteral("omacap")
+                           : QStringLiteral("omacap %1")
                                  .arg(QFileInfo(filePath).fileName()));
     // Size to the visible selection, not the pristine canvas: a handed-off
     // capture keeps its whole monitor underneath, but the window should hug
@@ -523,8 +553,8 @@ int snapMain(int argc, char **argv) {
     rules->setFuture(QtConcurrent::run([floatingWindow] {
       hyprctlOutput({QStringLiteral("eval"), editorFloatRuleScript(floatingWindow)});
       hyprctlOutput({QStringLiteral("eval"),
-                     QStringLiteral("hl.window_rule({ name = \"omasnap-editor-opaque\", "
-                                    "match = { title = \"^omasnap( .+)?$\" }, opacity = 1 })")});
+                     QStringLiteral("hl.window_rule({ name = \"omacap-editor-opaque\", "
+                                    "match = { title = \"^omacap( .+)?$\" }, opacity = 1 })")});
     }));
     const int result = application.exec();
     // The closed editor may still be retaining its recent document. A fresh
@@ -541,7 +571,7 @@ int snapMain(int argc, char **argv) {
     qCritical() << "Could not create capture overlay layer";
     return 1;
   }
-  layerWindow->setScope(QStringLiteral("omasnap"));
+  layerWindow->setScope(QStringLiteral("omacap"));
   layerWindow->setScreen(targetScreen);
   layerWindow->setLayer(LayerShellQt::Window::LayerOverlay);
   LayerShellQt::Window::Anchors anchors;

@@ -7,8 +7,11 @@
 #include "pin-file.hpp"
 #include "pin-layout.hpp"
 #include "pin-interaction-smoke.hpp"
+#include "video-ipc.h"
 
 #include <QByteArray>
+#include <QDeadlineTimer>
+#include <QProcess>
 #include <QHelpEvent>
 #include <QImage>
 #include <QJsonArray>
@@ -76,13 +79,13 @@ bool runPinRevealSmoke(QString &error) {
     return false;
   const QByteArray oldPath = qgetenv("PATH");
   const QByteArray oldRuntime = qgetenv("XDG_RUNTIME_DIR");
-  const QByteArray oldScreenshots = qgetenv("OMASNAP_SCREENSHOT_DIR");
+  const QByteArray oldScreenshots = qgetenv("OMACAP_SCREENSHOT_DIR");
   const auto restore = qScopeGuard([&] {
     pinPool().waitForDone();
     QThreadPool::globalInstance()->waitForDone();
     for (const auto &variable : {qMakePair("PATH", oldPath),
                                  qMakePair("XDG_RUNTIME_DIR", oldRuntime),
-                                 qMakePair("OMASNAP_SCREENSHOT_DIR", oldScreenshots)}) {
+                                 qMakePair("OMACAP_SCREENSHOT_DIR", oldScreenshots)}) {
       if (variable.second.isNull())
         qunsetenv(variable.first);
       else
@@ -121,7 +124,7 @@ bool runPinRevealSmoke(QString &error) {
   qputenv("PATH", files.path().toUtf8());
   qputenv("XDG_RUNTIME_DIR", files.path().toUtf8());
   const QString screenshots = files.filePath(QStringLiteral("shots # ' ü"));
-  qputenv("OMASNAP_SCREENSHOT_DIR", screenshots.toUtf8());
+  qputenv("OMACAP_SCREENSHOT_DIR", screenshots.toUtf8());
   const auto drain = [] {
     for (int pass = 0; pass < 3; ++pass) {
       pinPool().waitForDone();
@@ -318,8 +321,80 @@ bool runPinRevealSmoke(QString &error) {
 }
 } // namespace
 
+namespace {
+/// Pins and previews conceal themselves while OmaCap records: the marker
+/// must exist and name a live process, and a recorder that dies without
+/// removing it gives the cards back.
+bool runPinRecordingSmoke(QString &error) {
+  QTemporaryDir runtime;
+  const QByteArray previous = qgetenv("OMACAP_RUNTIME_DIR");
+  const auto restore = qScopeGuard([&] {
+    previous.isNull() ? qunsetenv("OMACAP_RUNTIME_DIR")
+                      : qputenv("OMACAP_RUNTIME_DIR", previous);
+  });
+  qputenv("OMACAP_RUNTIME_DIR", runtime.path().toUtf8());
+  const auto writeMarker = [](qint64 pid) {
+    QFile marker(recordingMarkerPath());
+    return marker.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+           marker.write(QByteArray::number(pid) + '\n') > 0;
+  };
+  QImage source(240, 140, QImage::Format_ARGB32_Premultiplied);
+  source.fill(Qt::darkCyan);
+  const QString sourcePath = runtime.filePath(QStringLiteral("source.png"));
+  if (!runtime.isValid() || !source.save(sourcePath)) {
+    error = QStringLiteral("Could not prepare the recording fixture");
+    return false;
+  }
+  PinWindow pin(source, sourcePath, source.size(), PinLifetime::Timed);
+  const auto painted = [&] {
+    QImage card(pin.size(), QImage::Format_ARGB32_Premultiplied);
+    card.fill(Qt::transparent);
+    pin.render(&card);
+    return card.pixelColor(card.rect().center()).alpha() > 0;
+  };
+  const auto settles = [&](bool recording) {
+    QDeadlineTimer deadline(3000);
+    while (pin.recording_.recording() != recording && !deadline.hasExpired())
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    return pin.recording_.recording() == recording;
+  };
+  if (!painted() || recordingInProgress()) {
+    error = QStringLiteral("A pin was hidden with no recording");
+    return false;
+  }
+
+  // A marker left by a process that is gone is ignored.
+  QProcess finished;
+  finished.start(QStringLiteral("/bin/true"));
+  finished.waitForFinished();
+  if (!writeMarker(finished.processId() ? finished.processId() : 999999) ||
+      recordingInProgress()) {
+    error = QStringLiteral("A stale recording marker counted");
+    return false;
+  }
+
+  QProcess recorder;
+  recorder.start(QStringLiteral("/bin/sleep"), {QStringLiteral("30")});
+  if (!recorder.waitForStarted() || !writeMarker(recorder.processId()) ||
+      !settles(true) || painted()) {
+    recorder.kill();
+    recorder.waitForFinished();
+    error = QStringLiteral("A pin stayed on screen during a recording");
+    return false;
+  }
+  // The recorder dies without removing its marker.
+  recorder.kill();
+  recorder.waitForFinished();
+  if (!settles(false) || !painted()) {
+    error = QStringLiteral("A pin did not come back after the recorder died");
+    return false;
+  }
+  return true;
+}
+} // namespace
+
 bool runPinInteractionSmoke(QString &error) {
-  if (!runPinRevealSmoke(error))
+  if (!runPinRevealSmoke(error) || !runPinRecordingSmoke(error))
     return false;
   QTemporaryDir runtime;
   if (!runtime.isValid()) {
@@ -438,7 +513,7 @@ bool runPinInteractionSmoke(QString &error) {
   monitors.close();
   const QRect screen(0, 0, 1200, 900);
   const QRect origin(986, 773, 200, 113);
-  const CompositorPin older{QStringLiteral("omasnap-pin older"),
+  const CompositorPin older{QStringLiteral("omacap-pin older"),
                             QStringLiteral("0x222"), QRect(986, 640, 200, 113),
                             true, true};
   const auto pinsAt = [&](const QRect &rect) {
@@ -449,7 +524,7 @@ bool runPinInteractionSmoke(QString &error) {
     QJsonArray clients;
     for (const CompositorPin &pin : pinsAt(rect))
       clients.push_back(QJsonObject{
-          {QStringLiteral("class"), QStringLiteral("omasnap")},
+          {QStringLiteral("class"), QStringLiteral("omacap")},
           {QStringLiteral("title"), pin.title},
           {QStringLiteral("address"), pin.address},
           {QStringLiteral("at"), QJsonArray{pin.rect.x(), pin.rect.y()}},

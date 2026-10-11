@@ -23,7 +23,7 @@
 #include <memory>
 
 namespace {
-constexpr QLatin1StringView kLogicalSizeKey("Omasnap logical size");
+constexpr QLatin1StringView kLogicalSizeKey("OmaCap logical size");
 
 QString logicalSizeText(const QSize &size) {
   return QStringLiteral("%1x%2").arg(size.width()).arg(size.height());

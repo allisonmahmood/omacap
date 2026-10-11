@@ -49,8 +49,16 @@ add_library(omasnap-core STATIC
   src/cut.hpp
   src/palette-config.cpp
   src/palette-config.hpp
-  src/background-config.cpp
-  src/background-config.hpp
+  src/backdrop-assets.cpp
+  src/backdrop-assets.hpp
+  src/capture-state.cpp
+  src/capture-state.hpp
+  src/look.cpp
+  src/look.hpp
+  src/record-picker.cpp
+  src/record-picker.hpp
+  src/recording-state.cpp
+  src/recording-state.hpp
   src/recent-snaps.cpp
   src/recent-snaps.hpp
   src/output-config.cpp
@@ -82,7 +90,9 @@ add_library(omasnap-core STATIC
   src/stroke-smoothing.hpp
   ${PROTOCOL_SOURCES}
   src/editor.cpp
-  src/editor-save-as.cpp
+  src/editor-choosers.cpp
+  src/editor-look.cpp
+  src/editor-record.cpp
   src/editor.hpp
   src/main.cpp
   src/snap-main.hpp
@@ -137,13 +147,14 @@ target_link_libraries(omasnap-core PUBLIC
   Qt6::Concurrent
   Qt6::Core
   Qt6::Gui
+  Qt6::Multimedia
   Qt6::Widgets
   LayerShellQt::Interface
   PkgConfig::WaylandClient
   PkgConfig::Libdeflate
 )
 
-target_compile_definitions(omasnap-core PRIVATE OMASNAP_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(omasnap-core PRIVATE OMACAP_VERSION="${PROJECT_VERSION}")
 
 if(BUILD_TESTING)
 qt_add_executable(omasnap-smoke
@@ -198,6 +209,10 @@ qt_add_executable(omasnap-smoke
   tests/scroll-startup-smoke.hpp
   tests/save-as-smoke.cpp
   tests/save-as-smoke.hpp
+  tests/look-smoke.cpp
+  tests/look-smoke.hpp
+  tests/record-smoke.cpp
+  tests/record-smoke.hpp
 )
 target_include_directories(omasnap-smoke PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/tests"

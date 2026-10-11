@@ -2,6 +2,7 @@
 #pragma once
 
 #include "cut.hpp"
+#include "look.hpp"
 #include "pin.hpp"
 
 #include <cstdint>
@@ -27,6 +28,8 @@ struct MonitorInfo {
   QRect geometry;
   QSize pixelSize;
   qreal scale = 1.0;
+  /// Hyprland's output transform, 0–7.
+  int transform = 0;
   int workspaceId = 0;
 };
 
@@ -48,17 +51,6 @@ struct CaptureData {
   bool preserveSourceResolution = false;
 };
 
-enum class BackgroundStyle {
-  None,
-  Off,
-  Slate,
-  Aurora,
-  Sunset,
-  Lagoon,
-  Violet,
-  Custom
-};
-enum class CanvasBoundaryMode { Framed, Overflow, Image };
 enum class QuickOutputMode { None, Copy, Save, Both, CopyAndPreview };
 
 enum class SpotlightShape { Ellipse, Rectangle, RoundedRectangle };
@@ -116,7 +108,8 @@ struct Annotation {
 struct Operation {
   enum class Type {
     Crop,
-    Background,
+    /// The whole look, replacing the one before it.
+    Look,
     CanvasBoundary,
     Annotate,
     Patch,
@@ -126,8 +119,7 @@ struct Operation {
 
   Type type = Type::Annotate;
   QRectF crop;
-  BackgroundStyle background = BackgroundStyle::None;
-  bool imageShadow = true;
+  CaptureLook look;
   CanvasBoundaryMode canvasBoundary = CanvasBoundaryMode::Framed;
   QVector<Annotation> annotations;
   QVector<quint64> ids;
@@ -164,7 +156,7 @@ enum class AnnotationLayer { Redaction, Default };
 [[nodiscard]] bool loadCaptureFonts();
 /** User-facing name for a bundled annotation typeface. */
 [[nodiscard]] QString annotationTextFontName(TextFont textFont);
-/** Bundled annotation font at Omasnap's logical text size. */
+/** Bundled annotation font at the editor's logical text size. */
 [[nodiscard]] QFont annotationTextFont(qreal size,
                                        TextFont textFont = TextFont::Neucha);
 /**
@@ -216,17 +208,21 @@ inline constexpr qreal kMinimumTextWrapWidth = 48.0;
  * redaction, which only ever replaces source pixels.
  */
 [[nodiscard]] QRectF annotationPaintedBounds(const Annotation &annotation);
+/** Union of what `annotations` paint (annotationPaintedBounds); null when
+ *  none paints anything. */
+[[nodiscard]] QRectF annotationsPaintedBounds(
+    const QVector<Annotation> &annotations);
 /**
- * Pixel-aligned annotation space selected by `boundaryMode`. Grow contains
- * every painted extent, Frame stops at the normal backdrop frame, and Image
- * stops at the source frame. The source always starts at 0,0; a negative
- * top/left means background was added before it. Keeping this as a derived
- * value avoids translating layers or repeatedly copying the source.
+ * The shared layout (look.hpp) for a screenshot and its layers. The source
+ * always starts at 0,0; a negative canvas top/left means backdrop was added
+ * before it. Keeping this derived avoids translating layers or repeatedly
+ * copying the source.
  */
-[[nodiscard]] QRectF
-captureCanvasRect(const QSizeF &sourceFrameSize,
-                  const QVector<Annotation> &annotations,
-                  CanvasBoundaryMode boundaryMode = CanvasBoundaryMode::Framed);
+[[nodiscard]] CaptureLayout
+captureLayout(const QSizeF &sourceFrameSize,
+              const QVector<Annotation> &annotations,
+              CanvasBoundaryMode boundaryMode = CanvasBoundaryMode::Framed,
+              const CaptureLook &look = CaptureLook::plain());
 /** Captures the named output through ext-image-copy-capture. */
 /** A live native capture session for one output (`MonitorInfo::name`, e.g.
  *  "DP-3") over its own Wayland connection: open once, then grab frames
@@ -274,29 +270,19 @@ void describeFileCapture(CaptureData &capture, QImage image,
 /** Returns an upright image for captured Wayland buffer contents. */
 [[nodiscard]] QImage normalizeWaylandCapture(const QImage &image,
                                              std::uint32_t transform);
-/** `customBackdrop` is the image drawn for `BackgroundStyle::Custom`; unused
- *  (and safe to omit) for every other style. */
+/** Flattens a document at the source's native pixels. `picture` is what
+ *  the look's backdrop shows (CaptureLook::pictureId()), when it shows one. */
 [[nodiscard]] QImage renderCapture(const CaptureData &capture,
                                    const QRectF &selection,
                                    const QVector<Annotation> &annotations,
-                                   BackgroundStyle backgroundStyle,
-                                   bool imageShadow = true,
+                                   const CaptureLook &look,
                                    CanvasBoundaryMode boundaryMode =
                                        CanvasBoundaryMode::Framed,
-                                   const QImage &customBackdrop = {});
+                                   const QImage &picture = {});
 /** Logical size of a flattened render, including backdrop and canvas growth,
  *  using the same pixel scale as renderCapture. */
 [[nodiscard]] QSize renderedCaptureLogicalSize(const CaptureData &capture,
                                                 const QSize &renderedSize);
-/** Lowercase serialization name ("aurora", "custom", ...) for a backdrop
- *  style, used in the operation log and the `[background] default` config
- *  key. */
-[[nodiscard]] QString backgroundStyleName(BackgroundStyle style);
-/** Parses a backdrop style from its lowercase config/JSON name ("aurora",
- *  "custom", ...). Leaves `style` untouched and returns false when `name`
- *  doesn't match one. */
-[[nodiscard]] bool backgroundStyleFromName(const QString &name,
-                                           BackgroundStyle &style);
 /** Loads the current Wayland clipboard image. */
 [[nodiscard]] bool loadClipboardImage(QImage &image, QString &error);
 [[nodiscard]] bool copyPngFileToClipboard(const QString &path, QString &error);
@@ -348,19 +334,6 @@ void paintDefaultLayer(QPainter &painter, const QImage &redacted,
                        qreal arrowDisplayScale = 1.0,
                        const QRectF &sourceRect = {},
                        const QPoint &sourceOrigin = {});
-// Logical image-frame dimensions, shared by the editor and native-pixel export.
-inline constexpr qreal kBackdropMargin = 64.0;
-inline constexpr qreal kCaptureImageRadius = 14.0;
-
-/** `customBackdrop` is the image drawn (cover-fit) for
- *  `BackgroundStyle::Custom`; a null image there paints nothing, same as
- *  `BackgroundStyle::None`. */
-void paintCaptureBackground(QPainter &painter, const QRectF &bounds,
-                            BackgroundStyle backgroundStyle,
-                            const QImage &customBackdrop = {});
-/** Paints the app's soft ambient-plus-key shadow around `imageRect`. */
-void paintCaptureImageShadow(QPainter &painter, const QRectF &imageRect,
-                             qreal scaleX = 1.0, qreal scaleY = 1.0);
 /**
  * Renders the selection region at `targetSize` for the redaction layer. The
  * result carries no annotations; callers overlay redactions with
@@ -378,7 +351,8 @@ QImage applyRedactionsScaled(QImage image, const QVector<Annotation> &redactions
                              const QRectF &selection, const QSizeF &targetSize);
 /** Creates or repairs a private directory owned by the current user. */
 [[nodiscard]] bool ensurePrivateDirectory(const QString &path);
-/** Returns Omasnap's private runtime directory, or empty on failure. */
+/** OmaCap's private screenshot runtime directory, `omacapRuntimeDir()/snap`,
+ *  or empty on failure. */
 [[nodiscard]] QString secureRuntimeDirectory();
 /**
  * Filename-safe token for a window class: lowercase, `[a-z0-9-]` only,
