@@ -1076,6 +1076,7 @@ CaptureEditor::~CaptureEditor() {
   dismissFuture_.waitForFinished();
   // A recording request is handed off after the overlay has gone.
   recordHandoffFuture_.waitForFinished();
+  lookSaves_.waitForFinished();
   // An accepted Save As owns its pixels. Finish it before application/static
   // teardown, after the editor surface and instance lock have been released.
   saveAsFuture_.waitForFinished();
@@ -3001,10 +3002,12 @@ void CaptureEditor::commitLook(const CaptureLook &look, const QString &status) {
   op.look = look;
   lastLook_ = look;
   lastLook_.wallpaper.clear();
+  // One write at a time, in order, so the file ends up with the last look.
   if (remembersLooks())
-    static_cast<void>(QtConcurrent::run([remembered = lastLook_] {
-      saveLastLook(remembered);
-    }));
+    lookSaves_ = lookSaves_.then(QtFuture::Launch::Async,
+                                 [remembered = lastLook_] {
+                                   saveLastLook(remembered);
+                                 });
   commitOp(std::move(op));
 }
 

@@ -951,8 +951,9 @@ private:
   CaptureLook look_ = CaptureLook::plain();
   CanvasBoundaryMode canvasBoundaryMode_ = CanvasBoundaryMode::Framed;
   /// The look fresh documents start with: the last one used, remembered
-  /// across runs (capture-state.hpp).
+  /// across runs (capture-state.hpp), and the chain of writes doing so.
   CaptureLook lastLook_;
+  QFuture<void> lookSaves_ = QtFuture::makeReadyVoidFuture();
   /// Decoded backdrop pictures by asset id.
   QHash<QString, QImage> pictures_;
   /// The Omarchy wallpaper as this overlay found it; empty until resolved,

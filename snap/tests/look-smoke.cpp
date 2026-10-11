@@ -216,6 +216,16 @@ bool checkLookPersistence(QApplication &application, QString &error) {
     error = QStringLiteral("The editor did not remember its look");
     return false;
   }
+  // A quick run of looks is remembered in order: the last one wins.
+  for (int step = 1; step <= 24; ++step) {
+    remembered.padding = step / 100.0;
+    editor.setLookForTest(remembered);
+  }
+  QThreadPool::globalInstance()->waitForDone();
+  if (loadLastLook() != remembered) {
+    error = QStringLiteral("Quick looks were remembered out of order");
+    return false;
+  }
   static_cast<void>(editor.waitForSnapshot());
   editor.close();
   CaptureEditor next(capture, CaptureEditor::CaptureMode::Smart);
