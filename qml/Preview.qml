@@ -15,6 +15,11 @@ Item {
     // A press on the zoom aim, which keeps that zoom selected.
     signal aimPressed()
 
+    // Ends a gesture still running on the preview, before undo or redo steps past it.
+    function settle() {
+        aim.settle();
+    }
+
     Item {
         id: fit
 
@@ -81,6 +86,8 @@ Item {
         }
 
         ZoomAim {
+            id: aim
+
             anchors.fill: parent
             visible: preview.aiming
             index: preview.zoomIndex

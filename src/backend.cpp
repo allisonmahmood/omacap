@@ -894,6 +894,9 @@ void Backend::undo() {
     if (m_phase != "editor")
         return;
     pause();
+    // A gesture still open is settled first, so it is the step undone and its end can't
+    // clear the redo history.
+    endEdit();
     if (past.isEmpty())
         return;
     future.append(state);
@@ -905,6 +908,7 @@ void Backend::redo() {
     if (m_phase != "editor")
         return;
     pause();
+    endEdit(); // as undo() does
     if (future.isEmpty())
         return;
     past.append(state);

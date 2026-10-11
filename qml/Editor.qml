@@ -42,9 +42,11 @@ FocusScope {
             return;
         switch (action) {
         case "undo":
+            preview.settle();
             backend.undo();
             break;
         case "redo":
+            preview.settle();
             backend.redo();
             break;
         case "backdrop":
@@ -169,9 +171,9 @@ FocusScope {
         else if (cropping && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter))
             cropView.confirm();
         else if (control && event.key === Qt.Key_Z && open && editable)
-            shift ? backend.redo() : backend.undo();
+            act(shift ? "redo" : "undo");
         else if (control && event.key === Qt.Key_Y && open && editable)
-            backend.redo();
+            act("redo");
         else if (!plain)
             handled = false;
         else if (event.key === Qt.Key_Space && open && editable)

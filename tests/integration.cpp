@@ -617,6 +617,24 @@ class Integration : public QObject {
         }
         QTRY_VERIFY(std::abs(b.state.zooms[0].amount - 2.1) < .001);
         QTRY_COMPARE_WITH_TIMEOUT(b.past.size(), beforeWheel + 1, 1000);
+        // Undo within a run undoes the run. Its timer then ends nothing: a press held past it
+        // stays one open edit, and redo still restores the run.
+        QWheelEvent notch(at(.5, .5), win->mapToGlobal(at(.5, .5)), {}, {0, 120}, Qt::NoButton,
+                          Qt::NoModifier, Qt::NoScrollPhase, false);
+        QGuiApplication::sendEvent(win, &notch);
+        QVERIFY(std::abs(b.state.zooms[0].amount - 2.2) < .001);
+        QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(b.state.zooms.size(), 1);
+        QVERIFY(std::abs(b.state.zooms[0].amount - 2.1) < .001);
+        const auto view =
+            aim->mapToScene(aim->parentItem()->property("view").toRectF().center()).toPoint();
+        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, view);
+        QTest::qWait(500);
+        QVERIFY(b.grouping);
+        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, view);
+        QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+        QVERIFY(std::abs(b.state.zooms[0].amount - 2.2) < .001);
+        b.undo();
         // Clicking footage keeps the aim, ends aiming and seeks.
         click(track, .8);
         QVERIFY(!aim->isVisible());

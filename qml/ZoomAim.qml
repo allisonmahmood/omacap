@@ -39,6 +39,15 @@ Item {
         aimAt(view.x + view.width / 2, view.y + view.height / 2, Math.max(1, Math.min(4, next)));
     }
 
+    // Ends a run of wheel notches now, before undo or redo steps past it, so its timer can't
+    // end whatever edit comes next.
+    function settle() {
+        if (!wheelRun.running)
+            return;
+        wheelRun.stop();
+        backend.endEdit();
+    }
+
     // Dims everything around the view.
     Repeater {
         model: [Qt.rect(0, 0, aim.width, aim.view.y), Qt.rect(0, aim.view.y + aim.view.height, aim.width, aim.height - aim.view.y - aim.view.height), Qt.rect(0, aim.view.y, aim.view.x, aim.view.height), Qt.rect(aim.view.x + aim.view.width, aim.view.y, aim.width - aim.view.x - aim.view.width, aim.view.height)]
