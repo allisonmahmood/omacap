@@ -6,6 +6,7 @@
 #include <QCursor>
 #include <QEvent>
 #include <QFontMetrics>
+#include <QFontMetricsF>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPair>
@@ -20,6 +21,7 @@
 #include <QtTypes>
 
 #include <algorithm>
+#include <cmath>
 
 namespace {
 constexpr int kPadding = 12;
@@ -45,14 +47,17 @@ void ShortcutGuide::setEntries(
   entries_ = entries;
   firstRow_ = 0;
   keyWidth_ = 0;
-  int actionWidth = 0;
+  qreal actionWidth = 0;
   const QFontMetrics keys(chromeMonoFont(12, true));
-  const QFontMetrics actions(chromeFont(13));
+  // Exact widths: painting elides a row that is a fraction of a pixel wider
+  // than its rounded width, which cuts the longest rows short.
+  const QFontMetricsF actions(chromeFont(13));
   for (const auto &entry : entries_) {
     keyWidth_ = std::max(keyWidth_, keys.horizontalAdvance(entry.first) + 12);
     actionWidth = std::max(actionWidth, actions.horizontalAdvance(entry.second));
   }
-  contentWidth_ = kPadding * 2 + keyWidth_ + kKeyGap + actionWidth + 6;
+  contentWidth_ = kPadding * 2 + keyWidth_ + kKeyGap +
+                  static_cast<int>(std::ceil(actionWidth)) + 6;
   reflow();
   update();
 }

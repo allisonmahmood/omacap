@@ -3,47 +3,81 @@
 
 #include "video-ipc.h"
 
+#include <QApplication>
+#include <QEvent>
 #include <QFile>
 #include <QFileInfo>
+#include <QList>
+#include <QMetaObject>
 #include <QSocketNotifier>
+#include <QWidget>
+#include <QWindow>
 
+#include <algorithm>
 #include <cerrno>
 #include <csignal>
 #include <poll.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <utility>
 
 namespace {
-/// The process the marker names: its first line, in decimal. 0 when there
-/// is no marker or it names nothing.
-qint64 markerPid() {
+/// The processes the marker names, one decimal PID per line. Empty when
+/// there is no marker or it names nothing. The writer replaces it whole
+/// (rename), so a line is never half a PID.
+QList<qint64> markerPids() {
   QFile marker(recordingMarkerPath());
   if (!marker.open(QIODevice::ReadOnly))
-    return 0;
-  bool ok = false;
-  const qint64 pid = marker.readLine(32).trimmed().toLongLong(&ok);
-  return ok && pid > 0 ? pid : 0;
+    return {};
+  QList<qint64> pids;
+  for (const QByteArray &line : marker.readAll().split('\n')) {
+    bool ok = false;
+    const qint64 pid = line.trimmed().toLongLong(&ok);
+    if (ok && pid > 0 && !pids.contains(pid))
+      pids.append(pid);
+  }
+  return pids;
 }
 
-/// Whether `pid` is still running. A pidfd says so even for a process that
-/// has exited but not been reaped yet, where kill(pid, 0) still succeeds.
-bool alive(qint64 pid) {
-  if (pid <= 0)
+int openPidfd(qint64 pid) {
+  return static_cast<int>(::syscall(SYS_pidfd_open, pid, 0));
+}
+
+/// Whether the process behind `pidfd` is still running. A pidfd says so even
+/// for a process that has exited but not been reaped yet, where kill(pid, 0)
+/// still succeeds.
+bool running(int pidfd) {
+  pollfd exited{pidfd, POLLIN, 0};
+  return ::poll(&exited, 1, 0) == 0;
+}
+
+/// Whether `pid` is still running, where pidfd_open() failed with `error`.
+bool runningWithoutPidfd(qint64 pid, int error) {
+  if (error == ESRCH)
     return false;
-  const int fd = static_cast<int>(::syscall(SYS_pidfd_open, pid, 0));
-  if (fd < 0) {
-    if (errno == ESRCH)
-      return false;
-    return ::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
-  }
-  pollfd exited{fd, POLLIN, 0};
-  const bool running = ::poll(&exited, 1, 0) == 0;
+  return ::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
+}
+
+bool alive(qint64 pid) {
+  const int fd = openPidfd(pid);
+  if (fd < 0)
+    return runningWithoutPidfd(pid, errno);
+  const bool result = running(fd);
   ::close(fd);
-  return running;
+  return result;
+}
+
+/// Stops and closes an exit notifier. This can run inside its own signal:
+/// retire it, then close its pidfd.
+void retire(QSocketNotifier *exit) {
+  const int fd = static_cast<int>(exit->socket());
+  exit->setEnabled(false);
+  exit->deleteLater();
+  ::close(fd);
 }
 } // namespace
 
-bool recordingInProgress() { return alive(markerPid()); }
+bool recordingInProgress() { return std::ranges::any_of(markerPids(), alive); }
 
 RecordingWatcher::RecordingWatcher(QObject *parent) : QObject(parent) {
   files_.addPath(omacapRuntimeDir());
@@ -53,45 +87,115 @@ RecordingWatcher::RecordingWatcher(QObject *parent) : QObject(parent) {
   refresh();
 }
 
-RecordingWatcher::~RecordingWatcher() { watchRecorder(0); }
+RecordingWatcher::~RecordingWatcher() {
+  for (QSocketNotifier *exit : std::as_const(exits_))
+    retire(exit);
+}
 
 void RecordingWatcher::refresh() {
-  // The marker's own writes change no directory entry; watch it too while
-  // it exists (a removed path drops out of the watcher by itself).
+  // The marker's own writes change no directory entry, so watch the file
+  // too. Re-arm that watch each time: one replaced by a rename still points
+  // at the file it replaced.
   const QString marker = recordingMarkerPath();
-  if (QFileInfo::exists(marker) && !files_.files().contains(marker))
+  if (files_.files().contains(marker))
+    files_.removePath(marker);
+  if (QFileInfo::exists(marker))
     files_.addPath(marker);
-  const qint64 pid = markerPid();
-  const bool recording = alive(pid);
-  watchRecorder(recording ? pid : 0);
+
+  // Each live process keeps a notifier, readable once it exits: a crashed
+  // recorder never removes its marker, and nothing else would tell us.
+  // running() then sees it exited, so this retires its notifier rather than
+  // spinning on it.
+  QHash<qint64, QSocketNotifier *> watched;
+  bool unwatched = false;
+  for (const qint64 pid : markerPids()) {
+    QSocketNotifier *exit = exits_.take(pid);
+    if (!exit) {
+      const int fd = openPidfd(pid);
+      if (fd < 0) {
+        unwatched = runningWithoutPidfd(pid, errno) || unwatched;
+        continue;
+      }
+      exit = new QSocketNotifier(fd, QSocketNotifier::Read, this);
+      connect(exit, &QSocketNotifier::activated, this, [this] { refresh(); });
+    }
+    if (running(static_cast<int>(exit->socket())))
+      watched.insert(pid, exit);
+    else
+      retire(exit);
+  }
+  // Processes the marker no longer names, or with it gone.
+  for (QSocketNotifier *exit : std::as_const(exits_))
+    retire(exit);
+  exits_ = std::move(watched);
+
+  const bool recording = unwatched || !exits_.isEmpty();
   if (recording != recording_) {
     recording_ = recording;
     emit recordingChanged(recording_);
   }
 }
 
-void RecordingWatcher::watchRecorder(qint64 pid) {
-  if (pid == watchedPid_)
-    return;
-  if (recorderExit_) {
-    // This can run inside the notifier's own signal: retire it, then close.
-    const int fd = static_cast<int>(recorderExit_->socket());
-    recorderExit_->setEnabled(false);
-    recorderExit_->deleteLater();
-    recorderExit_ = nullptr;
-    ::close(fd);
+RecordingConcealment::RecordingConcealment(const RecordingWatcher &recording,
+                                           QWidget *self)
+    : self_(self) {
+  qApp->installEventFilter(this);
+  connect(&recording, &RecordingWatcher::recordingChanged, this,
+          &RecordingConcealment::setConcealed);
+  setConcealed(recording.recording());
+}
+
+bool RecordingConcealment::eventFilter(QObject *watched, QEvent *event) {
+  // A window's Show event comes before it maps; concealed now, it never does.
+  if (active_ && event->type() == QEvent::Show && watched->isWidgetType()) {
+    auto *widget = static_cast<QWidget *>(watched);
+    if (widget->isWindow())
+      conceal(widget);
   }
-  watchedPid_ = 0;
-  if (pid <= 0)
+  return QObject::eventFilter(watched, event);
+}
+
+void RecordingConcealment::setConcealed(bool concealed) {
+  if (concealed == active_)
     return;
-  // Readable once the process exits: a crashed recorder never removes its
-  // marker, and nothing else would tell us. alive() then sees it exited, so
-  // refresh() retires this notifier rather than spinning on it.
-  const int fd = static_cast<int>(::syscall(SYS_pidfd_open, pid, 0));
-  if (fd < 0)
+  active_ = concealed;
+  if (concealed) {
+    for (QWidget *window : QApplication::topLevelWidgets()) {
+      if (window->isVisible())
+        conceal(window);
+    }
     return;
-  watchedPid_ = pid;
-  recorderExit_ = new QSocketNotifier(fd, QSocketNotifier::Read, this);
-  connect(recorderExit_, &QSocketNotifier::activated, this,
-          [this] { refresh(); });
+  }
+  // Parents first: each window comes back over the one it belongs to.
+  QList<QPointer<QWidget>> windows = std::exchange(concealed_, {});
+  const auto depth = [](const QPointer<QWidget> &window) {
+    int levels = 0;
+    for (QWidget *parent = window ? window->parentWidget() : nullptr; parent;
+         parent = parent->parentWidget())
+      ++levels;
+    return levels;
+  };
+  std::ranges::stable_sort(windows, {}, depth);
+  for (const QPointer<QWidget> &window : std::as_const(windows)) {
+    if (!window)
+      continue;
+    window->setAttribute(Qt::WA_DontShowOnScreen, false);
+    // The widget never stopped being visible: this maps its window again.
+    // One hidden meanwhile shows as usual next time.
+    if (window->isVisible())
+      window->windowHandle()->setVisible(true);
+  }
+}
+
+void RecordingConcealment::conceal(QWidget *window) {
+  // A window kept off screen for its own reasons stays as it is.
+  if (window == self_ || window->testAttribute(Qt::WA_DontShowOnScreen))
+    return;
+  // On a visible window this unmaps it, and nothing else.
+  window->setAttribute(Qt::WA_DontShowOnScreen, true);
+  concealed_.append(window);
+  // A menu or tooltip would be stale by the time the recording ends.
+  const Qt::WindowType type = window->windowType();
+  if (type == Qt::Popup || type == Qt::ToolTip)
+    QMetaObject::invokeMethod(window, &QWidget::close, Qt::QueuedConnection);
 }

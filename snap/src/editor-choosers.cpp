@@ -82,24 +82,6 @@ void CaptureEditor::cancelSaveAs() {
   }
 }
 
-void CaptureEditor::setVisible(bool visible) {
-  shown_ = visible;
-  QWidget::setVisible(visible && !concealed_);
-}
-
-void CaptureEditor::setConcealed(bool concealed) {
-  if (concealed == concealed_)
-    return;
-  concealed_ = concealed;
-  // The chooser is its own window: hiding the editor leaves it mapped. It
-  // goes first and comes back last, over its editor.
-  if (concealed && chooser_)
-    chooser_->hide();
-  QWidget::setVisible(shown_ && !concealed);
-  if (!concealed && chooser_)
-    chooser_->open();
-}
-
 void CaptureEditor::openChooser(QDialog *dialog,
                                 std::function<void(bool accepted)> done) {
   chooser_ = dialog;
@@ -114,7 +96,6 @@ void CaptureEditor::openChooser(QDialog *dialog,
   connect(this, &QObject::destroyed, dialog, &QObject::deleteLater);
   connect(dialog, &QDialog::finished, this,
           [this, dialog, request, done = std::move(done)](int result) {
-    // Closed: the end of a recording must not open it again.
     if (chooser_ == dialog)
       chooser_.clear();
     if (request != saveAsRequest_)
@@ -147,9 +128,7 @@ void CaptureEditor::openChooser(QDialog *dialog,
           LayerShellQt::Window::KeyboardInteractivityNone);
     hide();
   }
-  // A recording that started meanwhile opens it once it ends.
-  if (!concealed_)
-    dialog->open();
+  dialog->open();
 }
 
 void CaptureEditor::saveAs() {

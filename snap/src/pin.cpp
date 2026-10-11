@@ -1687,6 +1687,8 @@ private:
   qreal opacity_ = 1.0;
   bool expired_ = false;
   RecordingWatcher recording_;
+  /// The card conceals itself; its tooltip, and anything else, goes.
+  RecordingConcealment concealment_{recording_, this};
   bool stackInteracting_ = false;
   bool fileDragActive_ = false;
   qreal tilt_ = 0.0;

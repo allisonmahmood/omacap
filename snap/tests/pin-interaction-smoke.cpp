@@ -17,6 +17,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QList>
 #include <QPoint>
 #include <QRectF>
 #include <QSaveFile>
@@ -410,6 +411,47 @@ bool runPinRecordingSmoke(QString &error) {
   ::waitid(P_PID, static_cast<id_t>(zombie), nullptr, WEXITED | WNOWAIT);
   if (!settles(false) || !painted() || recordingInProgress()) {
     error = QStringLiteral("An exited, unreaped recorder kept pins hidden");
+    return false;
+  }
+
+  // The marker names the video process, then its capture worker too, one
+  // per line, and is replaced whole. The worker can outlive the video
+  // process; pins stay hidden until both are gone.
+  const auto replaceMarker = [](const QList<qint64> &pids) {
+    QByteArray text;
+    for (const qint64 pid : pids)
+      text += QByteArray::number(pid) + '\n';
+    QSaveFile marker(recordingMarkerPath());
+    return marker.open(QIODevice::WriteOnly) && marker.write(text) == text.size() &&
+           marker.commit();
+  };
+  QProcess owner;
+  QProcess worker;
+  const auto stop = qScopeGuard([&] {
+    for (QProcess *process : {&owner, &worker}) {
+      process->kill();
+      process->waitForFinished();
+    }
+  });
+  owner.start(QStringLiteral("/bin/sleep"), {QStringLiteral("30")});
+  worker.start(QStringLiteral("/bin/sleep"), {QStringLiteral("30")});
+  if (!owner.waitForStarted() || !worker.waitForStarted() ||
+      !replaceMarker({owner.processId()}) || !settles(true) ||
+      !replaceMarker({owner.processId(), worker.processId()})) {
+    error = QStringLiteral("Could not start the recording processes");
+    return false;
+  }
+  owner.kill();
+  owner.waitForFinished();
+  QTest::qWait(300);
+  if (!pin.recording_.recording() || painted() || !recordingInProgress()) {
+    error = QStringLiteral("A pin came back while the capture worker still ran");
+    return false;
+  }
+  worker.kill();
+  worker.waitForFinished();
+  if (!settles(false) || !painted() || recordingInProgress()) {
+    error = QStringLiteral("A pin stayed hidden after the capture worker exited");
     return false;
   }
   return true;

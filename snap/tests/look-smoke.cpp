@@ -5,6 +5,10 @@
 #include "editor.hpp"
 
 #include <QApplication>
+#include <QDir>
+#include <QMouseEvent>
+#include <QTemporaryDir>
+#include <QtEnvironmentVariables>
 #include <QJsonObject>
 #include <QScopeGuard>
 #include <QThreadPool>
@@ -505,11 +509,91 @@ bool checkPopovers(QApplication &application, QString &error) {
   editor.close();
   return true;
 }
+
+/// A slider drag's look is live, not yet in the log. The wallpaper arriving
+/// meanwhile gives it the picture rather than replacing it with the log's
+/// look, so releasing keeps the drag and cancelling returns to a look that
+/// has the wallpaper.
+bool checkSliderSurvivesWallpaper(QString &error) {
+  const QTemporaryDir theme;
+  const QByteArray previousTheme = qgetenv("OMACAP_THEME_ROOT");
+  const auto restore = qScopeGuard([&] {
+    previousTheme.isNull() ? qunsetenv("OMACAP_THEME_ROOT")
+                           : qputenv("OMACAP_THEME_ROOT", previousTheme);
+    saveLastLook(CaptureLook::plain());
+  });
+  QImage wallpaper(64, 64, QImage::Format_RGB32);
+  wallpaper.fill(QColor(200, 30, 40));
+  if (!theme.isValid() ||
+      !wallpaper.save(QDir(theme.path()).filePath(QStringLiteral("background")), "PNG")) {
+    error = QStringLiteral("Could not prepare the wallpaper fixture");
+    return false;
+  }
+  qputenv("OMACAP_THEME_ROOT", theme.path().toUtf8());
+  CaptureLook remembered;
+  remembered.backdrop = BackgroundStyle::Wallpaper;
+  saveLastLook(remembered);
+
+  for (const bool release : {true, false}) {
+    CaptureEditor editor(solidCapture({480, 300}, 1.0, Qt::darkCyan),
+                         CaptureEditor::CaptureMode::Fullscreen);
+    editor.resize(800, 600);
+    editor.show();
+    // Sent directly, so no event loop runs and the wallpaper, resolved on a
+    // worker, can only arrive when the test lets it.
+    const auto send = [&](QEvent::Type type, const QPointF &at,
+                          Qt::MouseButtons held) {
+      QMouseEvent event(type, at, editor.mapToGlobal(at),
+                        type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
+                        held, Qt::NoModifier);
+      QCoreApplication::sendEvent(&editor, &event);
+    };
+    send(QEvent::MouseMove,
+         editor.toolbarButtonCenterForTest(QStringLiteral("look-frame")), Qt::NoButton);
+    const QRectF track = editor.lookControlRectForTest(QStringLiteral("padding"));
+    const qsizetype before = editor.operationLog().size();
+    const auto along = [&](qreal t) {
+      return QPointF(track.left() + track.width() * t, track.center().y());
+    };
+    send(QEvent::MouseButtonPress, along(0.2), Qt::LeftButton);
+    send(QEvent::MouseMove, along(0.8), Qt::LeftButton);
+    const qreal dragged = editor.currentLookForTest().padding;
+    if (track.isEmpty() || !editor.currentLookForTest().wallpaper.isEmpty()) {
+      error = QStringLiteral("The drag did not start before the wallpaper");
+      return false;
+    }
+    editor.waitForPictures();
+    const QString resolved = editor.operationLog().value(0).look.wallpaper;
+    if (resolved.isEmpty() || editor.currentLookForTest().padding != dragged ||
+        editor.currentLookForTest().wallpaper != resolved) {
+      error = QStringLiteral("The wallpaper replaced a slider drag's live look");
+      return false;
+    }
+    if (release) {
+      send(QEvent::MouseButtonRelease, along(0.8), Qt::NoButton);
+      const auto log = editor.operationLog();
+      if (log.size() != before + 1 || log.last().look.padding != dragged ||
+          log.last().look.wallpaper != resolved) {
+        error = QStringLiteral("Releasing the drag lost it to the wallpaper");
+        return false;
+      }
+    } else {
+      QTest::keyClick(&editor, Qt::Key_Escape);
+      if (editor.currentLookForTest() != editor.operationLog().value(0).look ||
+          editor.currentLookForTest().wallpaper != resolved) {
+        error = QStringLiteral("Cancelling the drag lost the wallpaper");
+        return false;
+      }
+    }
+    editor.close();
+  }
+  return true;
+}
 } // namespace
 
 bool runLookSmoke(QApplication &application, QString &error) {
   return checkLayoutMaths(error) && checkLookPersistence(application, error) &&
          checkCardPainting(error) &&
          checkSpotlightOverGlass(application, error) &&
-         checkPopovers(application, error);
+         checkPopovers(application, error) && checkSliderSurvivesWallpaper(error);
 }

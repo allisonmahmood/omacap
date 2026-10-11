@@ -4,6 +4,8 @@
 #include "editor.hpp"
 #include "recent-snaps.hpp"
 #include "pin-file.hpp"
+#include "recording-state.hpp"
+#include "video-ipc.h"
 
 #include <QApplication>
 #include <QCloseEvent>
@@ -17,9 +19,16 @@
 #include <QObject>
 #include <QRectF>
 #include <QScopeGuard>
+#include <QStandardPaths>
 #include <QString>
 #include <QStringList>
 #include <QWidget>
+#include <QPushButton>
+#include <QPoint>
+#include <QToolTip>
+#include <QTimer>
+#include <QProcess>
+#include <QMessageBox>
 #include <QWindow>
 #include <QElapsedTimer>
 #include <QFile>
@@ -35,6 +44,8 @@
 #include <QtTest/qtestkeyboard.h>
 
 #include <memory>
+
+#include <sys/stat.h>
 
 namespace {
 template <typename Predicate> bool waitUntil(Predicate ready) {
@@ -79,6 +90,47 @@ bool runSaveAsSmoke(QString &error) {
   replacement.fill(Qt::blue);
   if (!savePngFile(replacement, target, error) || QImage(target).convertToFormat(QImage::Format_ARGB32) != replacement) {
     error = QStringLiteral("Save As did not atomically replace existing PNG");
+    return false;
+  }
+  // Saved screenshots are for sharing: a new file gets the umask's
+  // permissions, as any program's would, and a replaced one keeps its own.
+  // A quick save moves a private working snapshot into place, so it too.
+  const mode_t mask = ::umask(0);
+  ::umask(mask);
+  const auto mode = [](const QString &path) {
+    struct stat info {};
+    return ::stat(QFile::encodeName(path).constData(), &info) == 0
+               ? info.st_mode & 0777
+               : 0u;
+  };
+  const QString snapshot = temporarySnapshotPath();
+  if (mode(target) != (0666 & ~mask) ||
+      !saveTemporarySnapshot(original, snapshot, error) || mode(snapshot) != 0600) {
+    error = QStringLiteral("Save As or a working snapshot had the wrong permissions: %1")
+                .arg(mode(target), 0, 8);
+    return false;
+  }
+  {
+    const QByteArray previousScreenshots = qgetenv("OMACAP_SCREENSHOT_DIR");
+    qputenv("OMACAP_SCREENSHOT_DIR", directory.path().toUtf8());
+    // The move reads the real config path; keep the developer's out of it.
+    QStandardPaths::setTestModeEnabled(true);
+    const auto restoreScreenshots = qScopeGuard([&] {
+      QStandardPaths::setTestModeEnabled(false);
+      previousScreenshots.isNull()
+          ? qunsetenv("OMACAP_SCREENSHOT_DIR")
+          : qputenv("OMACAP_SCREENSHOT_DIR", previousScreenshots);
+    });
+    const QString quick = moveSnapshotToScreenshots(snapshot, error);
+    const auto removeQuick = qScopeGuard([&] { QFile::remove(quick); });
+    if (quick.isEmpty() || mode(quick) != (0666 & ~mask)) {
+      error = QStringLiteral("A quick save kept its snapshot's private permissions");
+      return false;
+    }
+  }
+  if (::chmod(QFile::encodeName(target).constData(), 0640) != 0 ||
+      !savePngFile(replacement, target, error) || mode(target) != 0640) {
+    error = QStringLiteral("Replacing a file changed its permissions");
     return false;
   }
   if (savePngFile({}, target, error) || error.isEmpty() ||
@@ -323,49 +375,114 @@ bool runSaveAsSmoke(QString &error) {
     editor.wallpaperPending_ = false;
     editor.close();
   }
-  // A recording hides the editor and its chooser. Closing the chooser or
-  // asking the editor to show meanwhile puts nothing on screen; both come
-  // back as they were when it ends.
-  for (const bool windowed : {false, true}) {
-    CaptureEditor editor(capture, CaptureEditor::CaptureMode::File);
-    editor.setWindowedPresentation(windowed);
-    editor.resize(800, 600);
-    editor.show();
-    QCoreApplication::processEvents();
-    editor.saveAs();
-    if (!waitUntil([] { return saveDialog() != nullptr; })) {
-      error = QStringLiteral("Save As did not open before the recording");
+  // A recording takes every window off screen: the editor, its chooser and
+  // the chooser's overwrite question, still waiting in exec(). Windows shown
+  // meanwhile never map, and a tooltip closes. The rest come back as they
+  // were when it ends.
+  {
+    QProcess recorder;
+    recorder.start(QStringLiteral("/bin/sleep"), {QStringLiteral("30")});
+    const auto stopRecorder = qScopeGuard([&] {
+      recorder.kill();
+      recorder.waitForFinished();
+      QFile::remove(recordingMarkerPath());
+    });
+    if (!recorder.waitForStarted()) {
+      error = QStringLiteral("Could not start the recorder fixture");
       return false;
     }
-    QFileDialog *dialog = saveDialog();
-    editor.setConcealed(true);
-    if (editor.isVisible() || dialog->isVisible()) {
-      error = QStringLiteral("A recording left the editor or its chooser on screen");
-      return false;
+    RecordingWatcher recording;
+    const RecordingConcealment concealment(recording);
+    const auto setRecording = [&](bool on) {
+      QFile marker(recordingMarkerPath());
+      const bool written =
+          on ? marker.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+                   marker.write(QByteArray::number(recorder.processId()) + '\n') > 0
+             : marker.remove();
+      marker.close();
+      return written && waitUntil([&] { return recording.recording() == on; });
+    };
+    const auto onScreen = [](const QWidget *window) {
+      return window && window->isVisible() && window->windowHandle() &&
+             window->windowHandle()->isVisible();
+    };
+    for (const bool windowed : {false, true}) {
+      CaptureEditor editor(capture, CaptureEditor::CaptureMode::File);
+      editor.setWindowedPresentation(windowed);
+      editor.resize(800, 600);
+      editor.show();
+      QCoreApplication::processEvents();
+      editor.saveAs();
+      if (!waitUntil([] { return saveDialog() != nullptr; })) {
+        error = QStringLiteral("Save As did not open before the recording");
+        return false;
+      }
+      QFileDialog *dialog = saveDialog();
+      dialog->findChild<QLineEdit *>(QStringLiteral("fileNameEdit"))->setText(target);
+      // Accepting an existing file asks in a nested exec(); the recording
+      // starts and ends while it waits.
+      QString failure;
+      bool asked = false;
+      QTimer::singleShot(0, [&] {
+        auto *question = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+        asked = question != nullptr;
+        if (!question || !onScreen(question)) {
+          failure = QStringLiteral("Save As did not ask before replacing a file");
+        } else if (!setRecording(true)) {
+          failure = QStringLiteral("The recording did not start");
+        } else if (onScreen(&editor) || onScreen(dialog) || onScreen(question)) {
+          failure = QStringLiteral("A recording left Save As on screen");
+        } else {
+          QWidget later;
+          later.show();
+          QToolTip::showText(QPoint(10, 10), QStringLiteral("tip"));
+          QCoreApplication::processEvents();
+          QWidget *tip = nullptr;
+          for (QWidget *window : QApplication::topLevelWidgets()) {
+            if (window->windowType() == Qt::ToolTip)
+              tip = window;
+          }
+          if (onScreen(&later) || onScreen(tip))
+            failure = QStringLiteral("A window showed during a recording");
+          else if (tip && !waitUntil([&] { return !tip->isVisible(); }))
+            failure = QStringLiteral("A tooltip stayed open during a recording");
+          else if (!setRecording(false))
+            failure = QStringLiteral("The recording did not end");
+          else if (!onScreen(dialog) || !onScreen(question) ||
+                   onScreen(&editor) != windowed)
+            failure = QStringLiteral("Save As did not come back after the recording");
+        }
+        if (question)
+          question->button(QMessageBox::No)->click();
+      });
+      static_cast<QDialog *>(dialog)->accept();
+      if (!asked || !failure.isEmpty()) {
+        error = asked ? failure
+                      : QStringLiteral("Save As did not ask before replacing a file");
+        return false;
+      }
+      if (saveDialog() != dialog || !onScreen(dialog)) {
+        error = QStringLiteral("Declining to replace closed Save As");
+        return false;
+      }
+      // Closing the chooser, and so showing the editor, during a recording
+      // puts nothing on screen; the editor comes back when it ends.
+      if (!setRecording(true)) {
+        error = QStringLiteral("The recording did not start");
+        return false;
+      }
+      dialog->reject();
+      if (!waitUntil([&] { return !editor.busy_ && saveDialog() == nullptr; }) ||
+          onScreen(&editor)) {
+        error = QStringLiteral("Closing a chooser during a recording showed the editor");
+        return false;
+      }
+      if (!setRecording(false) || !onScreen(&editor) || saveDialog() != nullptr) {
+        error = QStringLiteral("The editor did not come back after the recording");
+        return false;
+      }
+      editor.close();
     }
-    editor.setConcealed(false);
-    if (!dialog->isVisible() || editor.isVisible() != windowed) {
-      error = QStringLiteral("The chooser did not come back after the recording");
-      return false;
-    }
-    editor.setConcealed(true);
-    dialog->reject();
-    if (!waitUntil([&] { return !editor.busy_ && saveDialog() == nullptr; }) ||
-        editor.isVisible()) {
-      error = QStringLiteral("Closing a chooser during a recording showed the editor");
-      return false;
-    }
-    editor.show();
-    if (editor.isVisible()) {
-      error = QStringLiteral("The editor showed during a recording");
-      return false;
-    }
-    editor.setConcealed(false);
-    if (!editor.isVisible() || saveDialog() != nullptr) {
-      error = QStringLiteral("The editor did not come back after the recording");
-      return false;
-    }
-    editor.close();
   }
   // A finished worker may still have its GUI completion queued when close
   // arrives. Closing must invalidate that completion, even without destruction.

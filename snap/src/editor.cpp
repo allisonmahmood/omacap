@@ -3120,10 +3120,18 @@ void CaptureEditor::adoptWallpaper() {
       op.look.wallpaper = wallpaperId_;
   if (phase_ == Phase::Select) {
     look_.wallpaper = wallpaperId_;
-  } else {
-    replayLog();
-    scheduleSnapshot();
+    return;
   }
+  if (lookSlider_.isEmpty()) {
+    replayLog();
+  } else {
+    // A slider drag's live look is not in the log, so replaying would drop
+    // it. It, and the look it started from, wait as the log's looks did.
+    for (CaptureLook *look : {&look_, &lookBeforeSlider_})
+      if (look->wallpaper.isEmpty())
+        look->wallpaper = wallpaperId_;
+  }
+  scheduleSnapshot();
 }
 
 void CaptureEditor::requestPictures(QStringList ids, bool resolveWallpaper) {

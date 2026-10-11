@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 
+#include <QFileDevice>
 #include <QPainterPath>
 #include <QColor>
 #include <QImage>
@@ -370,18 +371,23 @@ QImage applyRedactionsScaled(QImage image, const QVector<Annotation> &redactions
  * Reads config: call on a worker. */
 [[nodiscard]] QString suggestedScreenshotPath(const QString &appSlug = {});
 /** Atomically saves flattened PNG pixels, preserving an existing file on
- * failure. PNG encoding and disk I/O must run on a worker. */
+ * failure. The file gets `permissions` if given; otherwise a new file gets
+ * the umask's, as any file the user makes would, and a replaced one keeps its
+ * own. PNG encoding and disk I/O must run on a worker. */
 [[nodiscard]] bool savePngFile(const QImage &image, const QString &path,
-                              QString &error);
+                              QString &error,
+                              QFileDevice::Permissions permissions = {});
 /**
  * Moves a finished export into the screenshots directory as
- * `screenshot-<yyyy-MM-dd_HH-mm-ss>[-<appSlug>].png`. The date leads so the
- * folder always sorts chronologically.
+ * `omacap-<yyyy-MM-dd_HH-mm-ss>[-<appSlug>].png`. The date leads so the
+ * folder always sorts chronologically. The private snapshot becomes a file
+ * for sharing, with the umask's permissions.
  */
 [[nodiscard]] QString moveSnapshotToScreenshots(const QString &sourcePath,
                                                 QString &error,
                                                 const QString &appSlug = {});
-/** Saves an already-rendered PNG without consuming the live pin's source. */
+/** Saves an already-rendered PNG without consuming the live pin's source,
+ *  with the umask's permissions. */
 [[nodiscard]] QString copySnapshotToScreenshots(const QString &sourcePath,
                                                 QString &error);
 [[nodiscard]] QString temporarySnapshotPath();
@@ -428,5 +434,6 @@ bool removeEditorHandoff(const QString &path, const QString &token);
 [[nodiscard]] QStringList
 captureNotificationArguments(const QString &message,
                              const QString &imagePath = {});
+/** Notifies the desktop; while OmaCap records, logs the message instead. */
 void sendCaptureNotification(const QString &message,
                              const QString &imagePath = {});
