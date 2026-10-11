@@ -27,6 +27,9 @@ constexpr qreal kItemGap = 6.0;
 constexpr qreal kMenuRow = 28.0;
 constexpr qreal kChipTextWidth = 150.0;
 
+const QString kListingDevices =
+    QStringLiteral("Finding microphones and cameras…");
+
 QString deviceLabel(const QVector<RecordDevice> &devices, const QString &id,
                     const QString &none) {
   if (id.isEmpty())
@@ -288,7 +291,13 @@ bool CaptureEditor::pressRecordBar(const QPointF &point) {
   for (const RecordBarItem &item : recordBarItems()) {
     if (!item.rect.contains(point))
       continue;
-    if (item.id == QStringLiteral("mic") || item.id == QStringLiteral("camera"))
+    // The listing replaces every device choice: none is made before it.
+    const bool device = item.id == QStringLiteral("mic") ||
+                        item.id == QStringLiteral("camera") ||
+                        item.id == QStringLiteral("desktop");
+    if (device && !recordDevicesListed_)
+      setStatus(kListingDevices);
+    else if (item.id == QStringLiteral("mic") || item.id == QStringLiteral("camera"))
       recordMenu_ = item.id;
     else if (item.id == QStringLiteral("desktop"))
       recordChoices_.desktopAudio = !recordChoices_.desktopAudio;
@@ -321,7 +330,14 @@ bool CaptureEditor::recordKey(QKeyEvent *event) {
   if (event->modifiers() & (Qt::ControlModifier | Qt::AltModifier |
                             Qt::MetaModifier))
     return false;
-  switch (event->key()) {
+  const int key = event->key();
+  if ((key == Qt::Key_M || key == Qt::Key_C || key == Qt::Key_D) &&
+      !recordDevicesListed_) {
+    // The listing replaces every device choice: none is made before it.
+    setStatus(kListingDevices);
+    return true;
+  }
+  switch (key) {
   case Qt::Key_Return:
   case Qt::Key_Enter:
     startRecording();
@@ -360,8 +376,12 @@ bool CaptureEditor::recordKey(QKeyEvent *event) {
 }
 
 void CaptureEditor::startRecording() {
-  if (busy_ || !recordDevicesListed_)
+  if (busy_)
     return;
+  if (!recordDevicesListed_) {
+    setStatus(kListingDevices);
+    return;
+  }
   const RecordRequest request = recordRequest();
   if (request.area.width() < 2 || request.area.height() < 2) {
     setStatus(QStringLiteral("Pick an area to record"));

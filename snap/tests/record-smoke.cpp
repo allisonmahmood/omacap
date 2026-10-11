@@ -123,6 +123,28 @@ bool checkPicker(QApplication &application, QString &error) {
   }
   saveRecordChoices({});
 
+  // Until the devices are listed no device choice can be made: the listing
+  // would replace it with the remembered one.
+  CaptureEditor early(capture, CaptureEditor::CaptureMode::Smart,
+                      QuickOutputMode::CopyAndPreview);
+  early.resize(800, 600);
+  early.show();
+  early.setRecordMode(true);
+  // No event is processed until waitForRecordDevices(), so nothing is
+  // listed yet.
+  QTest::mouseClick(&early, Qt::LeftButton, Qt::NoModifier, QPoint(500, 380));
+  QTest::keyClick(&early, Qt::Key_D);
+  const bool ignored = !early.recordRequestForTest().desktopAudio;
+  early.waitForRecordDevices();
+  QTest::keyClick(&early, Qt::Key_D);
+  if (!early.recordBarShownForTest() || !ignored ||
+      !early.recordRequestForTest().desktopAudio) {
+    error = QStringLiteral("A device choice made before the devices were "
+                           "listed was overwritten");
+    return false;
+  }
+  early.close();
+
   // V turns a picked area into an ordinary screenshot instead.
   CaptureEditor instead(capture, CaptureEditor::CaptureMode::Smart,
                         QuickOutputMode::CopyAndPreview);
