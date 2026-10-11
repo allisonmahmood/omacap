@@ -40,7 +40,9 @@ private:
 
 /// Keeps every window of this process out of OmaCap's recordings. While
 /// `recording` says one runs, each top-level window goes off screen, and one
-/// shown meanwhile never reaches it; popups and tooltips close. The others
+/// shown meanwhile never reaches it; popups and tooltips close. A drag in
+/// progress is cancelled, taking its icon with it, and windows off screen
+/// take no pointer motion, which could start another. The others
 /// come back, parents first, when it ends. Going off screen is not hiding:
 /// nothing about the window changes, so a dialog waiting in exec(), such as
 /// Save As's overwrite question, keeps waiting, and one closed meanwhile

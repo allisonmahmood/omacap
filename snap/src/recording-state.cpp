@@ -4,6 +4,7 @@
 #include "video-ipc.h"
 
 #include <QApplication>
+#include <QDrag>
 #include <QEvent>
 #include <QFileInfo>
 #include <QList>
@@ -128,12 +129,18 @@ RecordingConcealment::RecordingConcealment(const RecordingWatcher &recording,
 }
 
 bool RecordingConcealment::eventFilter(QObject *watched, QEvent *event) {
+  if (!active_ || !watched->isWidgetType())
+    return QObject::eventFilter(watched, event);
+  auto *widget = static_cast<QWidget *>(watched);
   // A window's Show event comes before it maps; concealed now, it never does.
-  if (active_ && event->type() == QEvent::Show && watched->isWidgetType()) {
-    auto *widget = static_cast<QWidget *>(watched);
-    if (widget->isWindow())
-      conceal(widget);
-  }
+  if (event->type() == QEvent::Show && widget->isWindow())
+    conceal(widget);
+  // Widgets start drags on pointer motion, and a drag's icon is a window
+  // of its own. A window off screen takes none, though motion queued before
+  // it went can still arrive.
+  if (event->type() == QEvent::MouseMove &&
+      widget->window()->testAttribute(Qt::WA_DontShowOnScreen))
+    return true;
   return QObject::eventFilter(watched, event);
 }
 
@@ -142,6 +149,8 @@ void RecordingConcealment::setConcealed(bool concealed) {
     return;
   active_ = concealed;
   if (concealed) {
+    // A drag's icon is not a widget: end the drag, which takes it down.
+    QDrag::cancel();
     for (QWidget *window : QApplication::topLevelWidgets()) {
       if (window->isVisible())
         conceal(window);
