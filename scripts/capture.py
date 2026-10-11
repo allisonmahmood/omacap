@@ -77,8 +77,8 @@ MAX_WIDTH, MAX_HEIGHT = 3840, 2160
 HOLD = Gst.SECOND
 # How often Hyprland is asked about the recorded monitor, and how long an answer may take, in
 # seconds. A screen frame needs an answer asked for after it before it leaves the hold, so HOLD
-# is comfortably longer than both together.
-POLL, POLL_TIMEOUT = 0.25, 0.3
+# is comfortably longer than both together. A change undone within one POLL goes unseen.
+POLL, POLL_TIMEOUT = 0.1, 0.3
 # How long a stop waits for an answer newer than its cut before cutting at the last one.
 SETTLE = Gst.SECOND
 # The sources besides the screen, as a failure names them.
