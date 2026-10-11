@@ -4,7 +4,6 @@
 #include <QCoreApplication>
 #include <QFileInfo>
 #include <QJsonDocument>
-#include <QProcess>
 #include <QTimer>
 #include <algorithm>
 #include <cerrno>
@@ -78,9 +77,7 @@ void handle(Backend &backend, const QJsonObject &command, const VideoOwnerServer
 // As Omasnap does, says what went wrong when nothing is open to say it.
 void notifyError(const QString &message) {
     std::fprintf(stderr, "%s\n", qPrintable(message));
-    if (std::ranges::none_of(recordingMarkerPids(), processRunning))
-        QProcess::startDetached("omarchy-notification-send",
-                                {"--app-name", "omacap", "-t", "4500", "OmaCap", message});
+    sendNotification({"--app-name", "omacap", "-t", "4500", "OmaCap", message});
 }
 
 VideoOwner::VideoOwner() : lock(omacapRuntimeDir() + "/video.lock") {}

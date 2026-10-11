@@ -3,6 +3,9 @@
 #include "recording-layout.h"
 #include "video-ipc.h"
 #include <QCoreApplication>
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDBusPendingCall>
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
@@ -13,6 +16,7 @@
 #include <QWindow>
 #include <signal.h>
 #include <sys/prctl.h>
+#include <algorithm>
 #include <unistd.h>
 
 namespace {
@@ -31,6 +35,32 @@ std::optional<QByteArray> hyprctl(const QStringList &args) {
         process.exitCode() != 0)
         return std::nullopt;
     return process.readAllStandardOutput();
+}
+
+// How long Omarchy's shell may keep a toast up: five seconds, for the low urgency OmaCap
+// sends, plus its fade. It keeps a toast a sender has closed until then.
+constexpr qint64 toastLifetimeMs = 6000;
+
+// Closes every notification an OmaCap process has shown (notificationIdsPath()): one sent just
+// before the request may still be on screen, and must be gone before the first kept frame.
+// Returns once every close is answered, within a second, with when the last may still show
+// all the same: a notification daemon need not take a toast down when its sender closes it.
+QDeadlineTimer closeNotifications() {
+    const ShownNotifications shown = takeShownNotifications();
+    QList<QDBusPendingCall> closing;
+    for (const quint32 id : shown.ids) {
+        QDBusMessage close = QDBusMessage::createMethodCall(
+            "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications", "CloseNotification");
+        close << id;
+        closing << QDBusConnection::sessionBus().asyncCall(close, 1000);
+    }
+    for (QDBusPendingCall &call : closing)
+        call.waitForFinished();
+    if (!shown.newest.isValid())
+        return QDeadlineTimer(0);
+    return QDeadlineTimer(std::max<qint64>(
+        0, QDateTime::currentDateTime().msecsTo(shown.newest.addMSecs(toastLifetimeMs))));
 }
 
 // Nothing but the recording chrome may be on screen once a recording starts. The editor and
@@ -135,6 +165,8 @@ QString Recorder::start(const RecordRequest &next, const QString &path, bool syn
     if (const QString problem = publishMarker({QCoreApplication::applicationPid()});
         !problem.isEmpty())
         return "OmaCap can't record: " + problem;
+    // Then none is shown any more, and those still on screen go before the countdown ends.
+    toastsGone = closeNotifications();
     request = next;
     output = path;
     error.clear();
@@ -254,6 +286,8 @@ void Recorder::parseWorker() {
         } else if (event == "streaming" && m_state == State::Countdown) {
             if (hideWindows)
                 hideOtherWindows(*chrome);
+            // The countdown outlasts any OmaCap notification still on screen.
+            m_countdown = std::max<int>(m_countdown, (toastsGone.remainingTime() + 999) / 1000);
             chrome->showCountdown(m_countdown);
             countdownTimer.start();
         } else if (event == "recording") {

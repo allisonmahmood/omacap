@@ -1,5 +1,6 @@
 #pragma once
 #include "record-request.h"
+#include <QDeadlineTimer>
 #include <QObject>
 #include <QProcess>
 #include <QSettings>
@@ -58,6 +59,7 @@ class Recorder : public QObject {
     QByteArray buffer;
     QProcess worker;
     QTimer countdownTimer;
+    QDeadlineTimer toastsGone;
     QSettings settings;
     std::unique_ptr<RecordingChrome> chrome;
     std::unique_ptr<WindowGuard> guard;
