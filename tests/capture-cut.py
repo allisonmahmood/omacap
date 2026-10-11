@@ -4,6 +4,7 @@
 import importlib.util
 import json
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -24,6 +25,44 @@ assert cut.screen(170, 2) and cut.epoch == 170
 assert not cut.track(165) and cut.track(170)
 cut.until = 300
 assert cut.screen(300, 3) and not cut.screen(310, 4) and not cut.track(301)
+cut.end(400)  # an earlier end stands
+assert cut.until == 300
+
+# Other tracks only pass buffers once every offset is in place.
+cut = capture.Cut()
+cut.after = 0
+seen = []
+assert cut.screen(5, 1, lambda epoch: seen.append((epoch, cut.epoch, cut.track(5))))
+assert seen == [(5, None, False)] and cut.track(5)
+
+# A screen stream that changes size keeps nothing more, and never passes the new caps on.
+Gst, OK, DROP = capture.Gst, capture.Gst.PadProbeReturn.OK, capture.Gst.PadProbeReturn.DROP
+
+
+class Info:
+    def __init__(self, width, height):
+        self.event = Gst.Event.new_caps(
+            Gst.Caps.from_string(f"video/x-raw,width={width},height={height}"))
+
+    def get_event(self):
+        return self.event
+
+
+capture.cut = capture.Cut()
+capture.cut.after = 0
+assert capture.screen_events(None, Info(1920, 1080), (1920, 1080)) == OK
+assert capture.cut.screen(10, 1)
+assert capture.screen_events(None, Info(2560, 1440), (1920, 1080)) == DROP
+assert not capture.cut.screen(20, 2) and not capture.cut.track(11) and capture.cut.until == 10
+capture.cut = capture.Cut()  # a change before the first frame keeps nothing at all
+capture.cut.after = 0
+assert capture.screen_events(None, Info(1280, 720), (1920, 1080)) == DROP
+assert not capture.cut.screen(20, 1) and capture.cut.epoch is None
+# XDPH's renegotiation flushes; a flush would empty what is held back and truncate the file.
+for flush in [Gst.Event.new_flush_start(), Gst.Event.new_flush_stop(True)]:
+    info = Info(1920, 1080)
+    info.event = flush
+    assert capture.screen_events(None, info, (1920, 1080)) == DROP
 
 capture.a = capture.p.parse_args(["--output", "x", "--crop", "100,50,640,480"])
 assert capture.crop_box(1920, 1080) == (100, 50, 1180, 550)
@@ -91,4 +130,68 @@ expect("streaming")
 send(cmd="stop")
 expect("finished")
 assert worker.wait(timeout=10) == 0 and not cancelled.exists()
-print(f"PASS: worker cut {duration:.3f}s, track starts {starts}")
+
+
+def now():
+    return time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+
+
+def sleep_until(at):
+    time.sleep(max(0, (at - now()) / 1e9))
+
+
+def duration_of(path):
+    return float(json.loads(subprocess.check_output(
+        ["ffprobe", "-v", "error", "-show_format", "-of", "json", str(path)]))["format"]["duration"])
+
+
+def exits(process, timeout):
+    """Whether the worker behind `process`'s pipes exits (closes stdout) within `timeout`."""
+    reader = threading.Thread(target=process.stdout.read, daemon=True)
+    reader.start()
+    reader.join(timeout)
+    return not reader.is_alive()
+
+
+# A stop can name a moment the worker already passed: frames encoded since are still dropped.
+late = out / "late-stop.mkv"
+late.unlink(missing_ok=True)
+worker = subprocess.Popen(
+    ["/usr/bin/python", str(repo / "scripts/capture.py"), "--synthetic", "--output", str(late)],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+)
+expect("streaming")
+start = now() + 300_000_000
+send(cmd="start", after=start)
+expect("recording")
+sleep_until(start + 1_600_000_000)
+send(cmd="stop", at=start + 1_000_000_000)
+expect("finished")
+assert worker.wait(timeout=10) == 0
+late_duration = duration_of(late)
+assert 0.9 < late_duration < 1.1, late_duration
+
+# Once the parent dies nothing more is kept, and the worker stops by itself: here neither a
+# signal nor stdin closing tells it, only being re-parented.
+orphan = out / "orphan.mkv"
+orphan.unlink(missing_ok=True)
+worker = subprocess.Popen(
+    ["/usr/bin/python", "-c",
+     "import subprocess, sys, time; subprocess.Popen(sys.argv[1:]); time.sleep(60)",
+     "/usr/bin/python", str(repo / "scripts/capture.py"), "--synthetic", "--output", str(orphan)],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+)
+expect("streaming")
+start = now() + 300_000_000
+send(cmd="start", after=start)
+expect("recording")
+sleep_until(start + 1_000_000_000)
+worker.kill()
+killed = now()
+expect("stopping")
+expect("finished")
+assert exits(worker, 10), "the orphaned worker kept running"
+orphan_duration = duration_of(orphan)
+assert abs(orphan_duration - (killed - start) / 1e9) < 0.1, (orphan_duration, killed - start)
+print(f"PASS: worker cut {duration:.3f}s, track starts {starts}; a late stop "
+      f"{late_duration:.3f}s, an orphan {orphan_duration:.3f}s")
