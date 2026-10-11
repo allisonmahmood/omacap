@@ -1,5 +1,4 @@
 #include "model.h"
-#include <QColor>
 #include <QJsonArray>
 #include <algorithm>
 #include <cmath>
@@ -8,30 +7,6 @@ double Edit::length() const {
     for (auto s : spans)
         n += s.end - s.start;
     return n;
-}
-// Composition pads every side by padding × canvas width and fits the cropped frame
-// inside. An auto canvas is exactly that frame plus its padding.
-double Edit::canvasAspect(double sourceAspect) const {
-    if (canvas == "16:9")
-        return 16. / 9;
-    if (canvas == "4:3")
-        return 4. / 3;
-    if (canvas == "1:1")
-        return 1;
-    const double ratio = sourceAspect * crop.width() / crop.height();
-    return 1 / ((1 - 2 * padding) / ratio + 2 * padding);
-}
-// A styled screenshot keeps the cropped shot at its source resolution. The canvas grows
-// around it, capped at 8192 px on its longer side.
-QSize Edit::stillSize(QSize source) const {
-    const double aspect = canvasAspect(double(source.width()) / std::max(1, source.height()));
-    const double ratio =
-        source.width() * crop.width() / std::max(1., source.height() * crop.height());
-    // The share of the canvas width the frame fills, from Composition's fit.
-    const double fill = std::min(1 - 2 * padding, ratio * (1 / aspect - 2 * padding));
-    const double w = source.width() * crop.width() / fill, h = w / aspect;
-    const double scale = std::min(1., 8192 / std::max(w, h));
-    return {std::max(1, int(std::lround(w * scale))), std::max(1, int(std::lround(h * scale)))};
 }
 double Edit::sourceTime(double t) const {
     t = std::max(0., t);
@@ -163,45 +138,8 @@ QVector<Span> Edit::runs() const {
     }
     return result;
 }
-QJsonObject Annotation::json() const {
-    QJsonArray ps;
-    for (auto p : points)
-        ps.append(QJsonArray{p.x(), p.y()});
-    return {{"id", id},     {"kind", kind}, {"points", ps}, {"color", color},
-            {"size", size}, {"fill", fill}, {"text", text}, {"pill", pill}};
-}
-Annotation Annotation::fromJson(const QJsonObject &o) {
-    Annotation a;
-    static const QStringList pairs{"box", "ellipse", "arrow", "line", "redact"},
-        anchored{"text", "step"}, paths{"pen", "marker"};
-    const QString kind = o["kind"].toString();
-    const auto ps = o["points"].toArray();
-    for (auto v : ps) {
-        const auto p = v.toArray();
-        if (p.size() == 2 && std::isfinite(p[0].toDouble()) && std::isfinite(p[1].toDouble()))
-            a.points.append(
-                {std::clamp(p[0].toDouble(), -1e5, 1e5), std::clamp(p[1].toDouble(), -1e5, 1e5)});
-    }
-    const bool valid = (pairs.contains(kind) && a.points.size() == 2) ||
-                       (anchored.contains(kind) && a.points.size() == 1) ||
-                       (paths.contains(kind) && a.points.size() >= 2 && a.points.size() <= 5000);
-    if (!valid || (kind == "text" && o["text"].toString().trimmed().isEmpty()))
-        return {};
-    a.kind = kind;
-    if (QColor::isValidColorName(o["color"].toString()))
-        a.color = o["color"].toString();
-    a.size = std::clamp(o["size"].toDouble(a.size), 1., 1000.);
-    const auto fill = o["fill"].toString();
-    if (fill == "solid" || fill == "tint")
-        a.fill = fill;
-    a.text = o["text"].toString().left(2000);
-    a.pill = o["pill"].toBool(true);
-    if (!o["id"].toString().isEmpty())
-        a.id = o["id"].toString();
-    return a;
-}
 QJsonObject Edit::json() const {
-    QJsonArray ss, zs, as;
+    QJsonArray ss, zs;
     for (auto s : spans)
         ss.append(QJsonArray{s.start, s.end, s.id});
     for (auto z : zooms)
@@ -211,8 +149,6 @@ QJsonObject Edit::json() const {
                               {"x", z.x},
                               {"y", z.y},
                               {"amount", z.amount}});
-    for (const auto &a : annotations)
-        as.append(a.json());
     return {{"duration", duration},
             {"spans", ss},
             {"zooms", zs},
@@ -232,9 +168,7 @@ QJsonObject Edit::json() const {
             {"mic", mic},
             {"desktop", desktop},
             {"background", background},
-            {"color", color},
-            {"canvas", canvas},
-            {"annotations", as}};
+            {"color", color}};
 }
 Edit Edit::fromJson(const QJsonObject &o) {
     Edit e;
@@ -291,11 +225,5 @@ Edit Edit::fromJson(const QJsonObject &o) {
     e.desktop = o["desktop"].toBool(true);
     e.background = o["background"].toString();
     e.color = o["color"].toString(e.color);
-    const auto canvas = o["canvas"].toString();
-    if (canvas == "16:9" || canvas == "4:3" || canvas == "1:1")
-        e.canvas = canvas;
-    for (auto v : o["annotations"].toArray())
-        if (auto a = Annotation::fromJson(v.toObject()); !a.kind.isEmpty())
-            e.annotations.append(a);
     return e;
 }
