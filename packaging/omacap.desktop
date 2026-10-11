@@ -1,12 +1,12 @@
 [Desktop Entry]
 Type=Application
 Name=OmaCap
-GenericName=Screen recorder and demo editor
-Comment=Record, crop, style, trim and export local demo videos
+GenericName=Screen recorder, screenshot tool and demo editor
+Comment=Record or screenshot, then crop, style, annotate and export locally
 Exec=omacap %f
 Icon=omacap
 Terminal=false
 Categories=AudioVideo;Video;Recorder;
-MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;
+MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;image/png;image/jpeg;image/webp;
 StartupNotify=true
 StartupWMClass=omacap

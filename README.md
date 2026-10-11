@@ -1,10 +1,10 @@
 # OmaCap
 
-Screen recordings worth sharing. Made for Omarchy.
+Screen recordings and screenshots worth sharing. Made for Omarchy.
 
-Record a window, clean up the take, and give it a background, padding and smooth zooms. Export an MP4 or GIF for a demo, tutorial or product update. Everything stays on your computer.
+Record a window, clean up the take, and give it a background, padding and smooth zooms. Export an MP4 or GIF for a demo, tutorial or product update. Screenshots get the same frame, plus boxes, arrows, text, numbered steps and redaction. Everything stays on your computer.
 
-[Install](#install) · [How to use it](#record-and-edit) · [MIT license](https://github.com/allisonmahmood/omacap/blob/main/LICENSE)
+[Install](#install) · [How to use it](#record-and-edit) · [Screenshots](#style-a-screenshot) · [MIT license](https://github.com/allisonmahmood/omacap/blob/main/LICENSE)
 
 ![OmaCap Studio showing a translucent terminal demo over a wallpaper, custom opacity controls and a zoom section on the timeline](docs/images/studio.webp)
 
@@ -17,6 +17,7 @@ Record a window, clean up the take, and give it a background, padding and smooth
 - **Zoom on purpose.** Keep the whole window visible by default. Add a zoom section, choose its focus, and adjust its timing on the timeline.
 - **Include yourself when you want.** Record your microphone, desktop audio and camera. Move the camera overlay, choose rounded corners or a circle, add a shadow, and mute either audio track.
 - **Take the file anywhere.** Export MP4 or GIF with your chosen size and frame rate. No account, upload or project library.
+- **Screenshots too.** Take one with Omarchy's region picker, mark it up with Omasnap's annotation tools, then copy or save a PNG at full resolution, up to 8192 px on its longer side.
 
 The controls follow your Omarchy theme. Changing themes updates the app without changing the video you're editing.
 
@@ -94,6 +95,10 @@ There is no saved-project format. An interrupted edit has a recovery checkpoint.
 
 ## Style a screenshot
 
+![OmaCap's screenshot editor with a box, arrow, text pill, numbered steps, a highlighted log line and a redacted API key over a dashboard](docs/images/screenshot.webp)
+
+*The real screenshot editor, shown with a generated dashboard.*
+
 Click **Take screenshot** in the start window, or run `omacap --screenshot`. OmaCap gets out of the way and opens Omarchy's region picker: drag a region, click a window, or click empty space for the whole screen. Press Escape to cancel. The shot opens in the editor at your display's native resolution.
 
 To take one from a key, add a binding to `~/.config/hypr/bindings.lua`. Print stays with Omarchy's own screenshot tool:
@@ -104,9 +109,11 @@ o.bind("SHIFT + PRINT", "OmaCap screenshot", "omacap --screenshot")
 
 The binding works while OmaCap is open, too. If the current edit hasn't been copied, saved or exported, OmaCap asks before replacing it.
 
-To style a screenshot you already have, open a PNG, JPEG or WebP with `omacap shot.png`, or click **Open image or video**. The screenshot gets the same crop, background, padding, corners, shadow and window transparency as a recording, with no timeline. Choose a **Canvas**: **Auto** fits the shot plus its padding, and **16:9**, **4:3** and **1:1** suit posts.
+To open a screenshot you already have, run `omacap shot.png` with a PNG, JPEG or WebP, or click **Open image or video**. An animated GIF opens on the timeline like a recording; other animated images open as their first frame. OmaCap edits its own copy, so the original image is never changed.
 
-The styled shot keeps the screenshot's own resolution. The status bar shows its size. **Copy** puts a PNG on the clipboard, which stays there after OmaCap closes. **Save** writes `omacap-<date>_<time>.png` to the folder Omarchy saves screenshots in: `$OMARCHY_SCREENSHOT_DIR` if it is set, or `~/Pictures/Screenshots`. OmaCap edits its own copy, so the original image is never changed.
+A screenshot gets the same crop, background, padding, corners, shadow and window transparency as a recording, with no timeline. Choose a **Canvas**: **Auto** fits the shot plus its padding, and **16:9**, **4:3** and **1:1** suit posts.
+
+The styled shot keeps the screenshot's own resolution, up to 8192 px on its longer side, and the status bar shows its size. **Copy** puts a PNG on the clipboard, which stays there after OmaCap closes. **Save** writes `omacap-<date>_<time>.png` to the folder Omarchy saves screenshots in: `$OMARCHY_SCREENSHOT_DIR` if it is set, or `~/Pictures/Screenshots`.
 
 ### Annotate
 

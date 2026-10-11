@@ -1362,20 +1362,30 @@ class Integration : public QObject {
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recorder"), 5000);
         QVERIFY2(b.message().contains("omarchy-capture-region"), qPrintable(b.message()));
     }
-    void animatedImageOpensAsVideo() {
+    void animatedImages() {
         QTemporaryDir dir;
-        const QString gif = dir.path() + "/loop.gif";
-        QProcess ffmpeg;
-        ffmpeg.start("ffmpeg", {"-v", "error", "-f", "lavfi", "-i", "testsrc=size=160x90:rate=5",
-                                "-t", "1", gif});
-        QVERIFY(ffmpeg.waitForFinished(15000) && ffmpeg.exitCode() == 0);
+        const auto make = [&](const QString &name) {
+            QProcess ffmpeg;
+            ffmpeg.start("ffmpeg",
+                         {"-v", "error", "-f", "lavfi", "-i", "testsrc=size=160x90:rate=5", "-t",
+                          "1", "-loop", "0", dir.path() + "/" + name});
+            return ffmpeg.waitForFinished(15000) && ffmpeg.exitCode() == 0;
+        };
+        QVERIFY(make("loop.gif") && make("loop.webp"));
         Theme t;
         Frames f;
         Backend b(&t, &f);
-        b.loadFile(gif);
+        // GIFs play on the timeline.
+        b.loadFile(dir.path() + "/loop.gif");
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
         QCOMPARE(b.kind(), QString("video"));
         QVERIFY(b.duration() > .5);
+        b.discard();
+        // FFmpeg can't open an animated WebP as a recording, so it opens as a still.
+        b.loadFile(dir.path() + "/loop.webp");
+        QCOMPARE(b.phase(), QString("editor"));
+        QCOMPARE(b.kind(), QString("image"));
+        QCOMPARE(b.sourceSize(), QSize(160, 90));
         b.discard();
     }
     void annotationModel() {
