@@ -1,7 +1,9 @@
 #include "recent-snaps.hpp"
 #include "png.hpp"
 
+#include "backdrop-assets.hpp"
 #include "capture.hpp"
+#include "capture-state.hpp"
 #include "startup-timing.hpp"
 
 #include <QDateTime>
@@ -228,6 +230,21 @@ bool RecentSnapWriter::record(const QImage &source, const OperationLog &log,
   const QStringList names = thumbNamesNewestFirst(dir);
   for (qsizetype index = kRecentSnapLimit; index < names.size(); ++index)
     removeRecentSnap(snapForStem(dir, stemOf(names.at(index))));
+  // Backdrop pictures live as long as a kept capture or the remembered look
+  // shows them.
+  QSet<QString> pictures{loadLastLook().image};
+  for (const QString &name : names.mid(0, kRecentSnapLimit)) {
+    const RecentSnap kept = snapForStem(dir, stemOf(name));
+    OperationLog keptLog;
+    QString ignored;
+    if (kept.logPath.isEmpty() ||
+        !loadOperationLog(kept.logPath, keptLog, ignored))
+      continue;
+    for (const Operation &op : keptLog.ops)
+      if (op.type == Operation::Type::Look)
+        pictures << op.look.wallpaper << op.look.image;
+  }
+  pruneBackdropAssets(pictures);
   return true;
 }
 

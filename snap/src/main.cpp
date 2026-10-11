@@ -397,7 +397,7 @@ int snapMain(int argc, char **argv) {
                               ? capture.source
                               : renderCapture(capture,
                                               QRectF(QPointF(), capture.previewSize), {},
-                                              BackgroundStyle::None);
+                                              CaptureLook::plain());
     if (!quickOutput(output, quickOutputMode, outputError, capture.previewSize)) {
       qCritical().noquote() << outputError;
       return 1;

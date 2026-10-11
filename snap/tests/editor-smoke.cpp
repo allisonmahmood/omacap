@@ -3,6 +3,8 @@
 /** @fileoverview Exercises capture editor behavior without a live compositor.
  */
 #include "capture.hpp"
+#include "capture-state.hpp"
+#include "backdrop-assets.hpp"
 #include "scroll-focus-smoke.hpp"
 #include "output-config.hpp"
 #include "overlay-chrome.hpp"
@@ -12,6 +14,7 @@
 #include "chrome-theme-smoke.hpp"
 #include "cut-mapping-smoke.hpp"
 #include "cut-smoke.hpp"
+#include "look-smoke.hpp"
 #include "editor.hpp"
 #include "shortcut-guide.hpp"
 #include "selection-repaint-smoke.hpp"
@@ -913,7 +916,7 @@ bool runHighlighterRenderingCheck(QString &error) {
   highlight.size = 4;
   highlight.points = {{50, 50}, {90, 50}, {130, 50}, {170, 50}};
   const QImage rendered = renderCapture(capture, QRectF(0, 0, 200, 100),
-                                        {highlight}, BackgroundStyle::None);
+                                        {highlight}, CaptureLook::plain());
   if (rendered.isNull())
     return false;
 
@@ -1462,9 +1465,9 @@ bool runSecureRedactionChecks(QString &error) {
   pixelate.redactionSeed = 0x1234abcdU;
   const QRect redactionBounds(12, 12, 72, 48);
   const QImage first = renderCapture(capture, QRectF(0, 0, 96, 72), {pixelate},
-                                     BackgroundStyle::None);
+                                     CaptureLook::plain());
   const QImage repeated = renderCapture(capture, QRectF(0, 0, 96, 72),
-                                        {pixelate}, BackgroundStyle::None);
+                                        {pixelate}, CaptureLook::plain());
   if (first.isNull() || first != repeated ||
       first.pixelColor(2, 2) != capture.source.pixelColor(2, 2))
     return false;
@@ -1503,21 +1506,21 @@ bool runSecureRedactionChecks(QString &error) {
   }
   mirroredCapture.previewSize = mirroredCapture.source.size();
   const QImage mirrored = renderCapture(mirroredCapture, QRectF(0, 0, 96, 72),
-                                        {pixelate}, BackgroundStyle::None);
+                                        {pixelate}, CaptureLook::plain());
   if (first.copy(redactionBounds) != mirrored.copy(redactionBounds))
     return false;
 
   Annotation differentSeed = pixelate;
   ++differentSeed.redactionSeed;
   const QImage reseeded = renderCapture(capture, QRectF(0, 0, 96, 72),
-                                        {differentSeed}, BackgroundStyle::None);
+                                        {differentSeed}, CaptureLook::plain());
   if (first.copy(redactionBounds) == reseeded.copy(redactionBounds))
     return false;
 
   Annotation solid = pixelate;
   solid.redactionStyle = RedactionStyle::Solid;
   const QImage solidOutput = renderCapture(capture, QRectF(0, 0, 96, 72),
-                                           {solid}, BackgroundStyle::None);
+                                           {solid}, CaptureLook::plain());
   const QColor solidColor(QStringLiteral("#121216"));
   for (int y = redactionBounds.top(); y <= redactionBounds.bottom(); ++y) {
     for (int x = redactionBounds.left(); x <= redactionBounds.right(); ++x) {
@@ -1533,7 +1536,7 @@ bool runSecureRedactionChecks(QString &error) {
   line.color = Qt::white;
   line.size = 4;
   const QImage annotated = renderCapture(capture, QRectF(0, 0, 96, 72),
-                                         {solid, line}, BackgroundStyle::None);
+                                         {solid, line}, CaptureLook::plain());
   if (annotated.pixelColor(48, 36) != QColor(Qt::white))
     return false;
 
@@ -1541,7 +1544,7 @@ bool runSecureRedactionChecks(QString &error) {
   clipped.start = {-10, -10};
   clipped.end = {20, 20};
   const QImage clippedOutput = renderCapture(capture, QRectF(0, 0, 96, 72),
-                                             {clipped}, BackgroundStyle::None);
+                                             {clipped}, CaptureLook::plain());
   if (clippedOutput.pixelColor(0, 0) != solidColor ||
       clippedOutput.pixelColor(21, 21) != capture.source.pixelColor(21, 21))
     return false;
@@ -1556,7 +1559,7 @@ bool runSecureRedactionChecks(QString &error) {
   highDpiSolid.start = {10, 10};
   highDpiSolid.end = {30, 30};
   const QImage highDpiOutput = renderCapture(
-      highDpi, QRectF(0, 0, 96, 72), {highDpiSolid}, BackgroundStyle::None);
+      highDpi, QRectF(0, 0, 96, 72), {highDpiSolid}, CaptureLook::plain());
   if (highDpiOutput.size() != QSize(192, 144) ||
       highDpiOutput.pixelColor(20, 20) != solidColor ||
       highDpiOutput.pixelColor(59, 59) != solidColor ||
@@ -1582,7 +1585,7 @@ bool runSecureRedactionChecks(QString &error) {
   fractionalSolid.end = {30, 30};
   const QImage fractionalOutput =
       renderCapture(fractional, QRectF(1, 1, 81, 81), {fractionalSolid},
-                    BackgroundStyle::None);
+                    CaptureLook::plain());
   const QColor outsideHorizontal = fractionalOutput.pixelColor(12, 11);
   const QColor outsideVertical = fractionalOutput.pixelColor(11, 12);
   if (fractionalOutput.size() != QSize(101, 101) ||
@@ -1609,7 +1612,7 @@ bool runSecureRedactionChecks(QString &error) {
   matchingSolid.end = {20.75, 20.75};
   const QImage matchingOutput =
       renderCapture(matchingFractional, QRectF(0.08, 0.08, 79.68, 79.68),
-                    {matchingSolid}, BackgroundStyle::None);
+                    {matchingSolid}, CaptureLook::plain());
   if (matchingOutput.size() != QSize(100, 100) ||
       matchingOutput.pixelColor(26, 26) != solidColor)
     return false;
@@ -1628,7 +1631,7 @@ bool runSecureRedactionChecks(QString &error) {
   sourceScaleSolid.end = {1000, 100};
   const QImage sourceScaleOutput =
       renderCapture(nonIntegralSourceScale, QRectF(0, 0, 1707, 100),
-                    {sourceScaleSolid}, BackgroundStyle::None);
+                    {sourceScaleSolid}, CaptureLook::plain());
   if (sourceScaleOutput.pixelColor(1500, 50) != solidColor)
     return false;
   return true;
@@ -1787,42 +1790,55 @@ bool runPointerDamageRepaintSmoke(QApplication &application, QString &error) {
 
   struct Case {
     QString name;
-    BackgroundStyle background;
+    CaptureLook look;
     CanvasBoundaryMode boundary;
     QVector<Annotation> annotations;
     QPointF grab;
     QPointF travel;
     Qt::Key tool = Qt::Key_V; // Select carries a layer; a tool draws one
   };
+  CaptureLook aurora;
+  aurora.backdrop = BackgroundStyle::Aurora;
+  // A styled card: padding, rounded corners, a shadow, and see-through
+  // glass that shows the backdrop laid out against the live canvas.
+  CaptureLook glass = aurora;
+  glass.glass = Glass::Custom;
+  glass.opacity = 0.6;
+  glass.aspect = CanvasAspect::Wide;
   const QVector<Case> cases{
       // An ellipse leaves its bounding rectangle everywhere but four points.
-      {QStringLiteral("hollow ellipse"), BackgroundStyle::None,
+      {QStringLiteral("hollow ellipse"), CaptureLook::plain(),
        CanvasBoundaryMode::Framed,
        {layer(Annotation::Kind::Ellipse, {120, 100}, {330, 260}, 1)},
        {120, 180},
        {150, 90}},
       // A stroke's dashed bounds and handles sit well away from its ink.
-      {QStringLiteral("selected stroke"), BackgroundStyle::None,
+      {QStringLiteral("selected stroke"), CaptureLook::plain(),
        CanvasBoundaryMode::Framed, {wave}, {120, 200}, {150, 90}},
       // Overflow lays its backdrop out against the canvas being previewed.
-      {QStringLiteral("overflow backdrop"), BackgroundStyle::Aurora,
+      {QStringLiteral("overflow backdrop"), aurora,
        CanvasBoundaryMode::Overflow, {arrow}, {440, 190}, {260, 20}},
       // A spotlight dims the canvas its layers would settle to.
-      {QStringLiteral("spotlight"), BackgroundStyle::None,
+      {QStringLiteral("spotlight"), CaptureLook::plain(),
        CanvasBoundaryMode::Framed,
        {layer(Annotation::Kind::Spotlight, {80, 220}, {260, 360}, 1), arrow},
        {440, 190},
        {260, 20}},
       // A canvas that has already grown gives its mat back as the layer
       // that grew it is carried home.
-      {QStringLiteral("framed shrink"), BackgroundStyle::None,
+      {QStringLiteral("framed shrink"), CaptureLook::plain(),
        CanvasBoundaryMode::Framed,
        {layer(Annotation::Kind::Arrow, {560, 150}, {700, 230}, 1)},
        {630, 190},
        {-260, 20}},
+      {QStringLiteral("styled glass shrink"), glass,
+       CanvasBoundaryMode::Framed,
+       {layer(Annotation::Kind::Arrow, {560, 150}, {760, 230}, 1)},
+       {660, 190},
+       {-300, 20}},
       // The first pixel of a lens being dragged out dims the whole canvas,
       // and it arrives on a pointer move rather than on the press.
-      {QStringLiteral("spotlight drawn"), BackgroundStyle::None,
+      {QStringLiteral("spotlight drawn"), CaptureLook::plain(),
        CanvasBoundaryMode::Framed, {}, {150, 120}, {240, 160}, Qt::Key_S},
   };
 
@@ -1857,8 +1873,8 @@ bool runPointerDamageRepaintSmoke(QApplication &application, QString &error) {
 
   for (const Case &test : cases) {
     Operation background;
-    background.type = Operation::Type::Background;
-    background.background = test.background;
+    background.type = Operation::Type::Look;
+    background.look = test.look;
     Operation boundary;
     boundary.type = Operation::Type::CanvasBoundary;
     boundary.canvasBoundary = test.boundary;
@@ -1950,9 +1966,14 @@ bool runFramedLiveGrowthSmoke(QApplication &application, QString &error) {
   Operation annotate;
   annotate.type = Operation::Type::Annotate;
   annotate.annotations = {arrow};
+  // Window gray without padding: no mat until a layer grows the canvas.
+  Operation slate;
+  slate.type = Operation::Type::Look;
+  slate.look.backdrop = BackgroundStyle::Slate;
+  slate.look.padding = 0.0;
   OperationLog log;
-  log.ops = {annotate};
-  log.index = 1;
+  log.ops = {slate, annotate};
+  log.index = 2;
   log.nextId = 2;
   log.previewSize = capture.previewSize;
 
@@ -2040,7 +2061,8 @@ bool runFramedLiveGrowthSmoke(QApplication &application, QString &error) {
                       grip + QPoint(200, 0));
   application.processEvents();
   if (!editor.currentCanvasForTest().contains(
-          QRectF(QPointF(), QSizeF(capture.previewSize)).adjusted(-1, -1, 1, 1)) ||
+          QRectF(QPointF(), QSizeF(capture.previewSize))) ||
+      editor.currentCanvasForTest().right() <= capture.previewSize.width() ||
       !matAt(matProbe())) {
     error = QStringLiteral("Released outside, the Framed canvas did not settle "
                            "grown with its mat");
@@ -2098,7 +2120,17 @@ bool runTextDraftGrowsCanvasSmoke(QApplication &application, QString &error) {
   capture.source.fill(QColor(QStringLiteral("#d8dde6")));
   capture.previewSize = capture.source.size();
 
-  CaptureEditor editor(capture, CaptureEditor::CaptureMode::File);
+  // Window gray without padding: no mat until a layer grows the canvas.
+  Operation slate;
+  slate.type = Operation::Type::Look;
+  slate.look.backdrop = BackgroundStyle::Slate;
+  slate.look.padding = 0.0;
+  OperationLog log;
+  log.ops = {slate};
+  log.index = 1;
+  log.previewSize = capture.previewSize;
+  CaptureEditor editor(capture, CaptureEditor::CaptureMode::File,
+                       QuickOutputMode::None, log);
   editor.resize(1400, 700);
   editor.show();
   application.processEvents();
@@ -2131,7 +2163,9 @@ bool runTextDraftGrowsCanvasSmoke(QApplication &application, QString &error) {
     return false;
   }
   const QRectF placed = editor.liveCanvasForTest();
-  if (placed.right() < source.right() + 64.0 || !matAt(insideRightEdge())) {
+  // The caret sits 40 px out; Framed keeps its margin of mat beyond it.
+  if (placed.right() < source.right() + 40.0 + kFramedLayerMargin ||
+      !matAt(insideRightEdge())) {
     error = QStringLiteral("Placing the text caret outside the image did not "
                            "grow the canvas at once");
     return false;
@@ -2226,11 +2260,11 @@ bool runSpotlightTextDraftCanvasSmoke(QApplication &application, QString &error)
         spotlight.end = {alreadyGrown ? 680.0 : 320.0, 260};
         spotlight.magnification = 2.0;
         Operation background;
-        background.type = Operation::Type::Background;
-        background.background = boundaryMode == CanvasBoundaryMode::Framed
-                                    ? BackgroundStyle::None
-                                    : BackgroundStyle::Slate;
-        background.imageShadow = false;
+        background.type = Operation::Type::Look;
+        // A flat gray mat without padding: dimming shows as one colour.
+        background.look.backdrop = BackgroundStyle::Slate;
+        background.look.padding = 0.0;
+        background.look.shadow = 0.0;
         Operation boundary;
         boundary.type = Operation::Type::CanvasBoundary;
         boundary.canvasBoundary = boundaryMode;
@@ -2926,9 +2960,10 @@ bool runPostCaptureChecks(QString &error, bool autosave) {
       OperationLog edits;
       edits.previewSize = framed.previewSize;
       Operation background;
-      background.type = Operation::Type::Background;
-      background.background = layout == 0 ? BackgroundStyle::Off
-                                           : BackgroundStyle::Aurora;
+      background.type = Operation::Type::Look;
+      background.look = CaptureLook::plain();
+      if (layout != 0)
+        background.look.backdrop = BackgroundStyle::Aurora;
       edits.ops.push_back(background);
       if (layout >= 2) {
         Annotation arrow;
@@ -3426,7 +3461,7 @@ bool runSpotlightAndSampleChecks(QString &error) {
   lens.color = Qt::white;
   const QImage rendered =
       renderCapture(capture, QRectF(0, 0, 80, 40), {line, lens},
-                    BackgroundStyle::None);
+                    CaptureLook::plain());
   if (rendered.isNull() || rendered.pixelColor(40, 2).alpha() < 100) {
     error = QStringLiteral("Spotlight did not dim the surrounding image");
     return false;
@@ -3550,7 +3585,7 @@ bool runTextOutlineCheck(QString &error) {
   };
 
   const QImage outlined = renderCapture(capture, QRectF(0, 0, 400, 200), {text},
-                                        BackgroundStyle::None);
+                                        CaptureLook::plain());
   if (count(outlined, halo) < 20) {
     error = QStringLiteral("Outlined text drew no white halo");
     return false;
@@ -3561,7 +3596,7 @@ bool runTextOutlineCheck(QString &error) {
   }
   text.textBackground = TextBackground::Plain;
   const QImage plain = renderCapture(capture, QRectF(0, 0, 400, 200), {text},
-                                     BackgroundStyle::None);
+                                     CaptureLook::plain());
   if (count(plain, halo) != 0) {
     error = QStringLiteral("Plain text grew a halo");
     return false;
@@ -4695,7 +4730,7 @@ bool runTextClickAwayCommitCheck(QApplication &application, QString &error) {
   QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, toScreen({125, 280}));
   application.processEvents();
   if (!snapshotMatches(
-          renderCapture(capture, selection, {}, BackgroundStyle::None))) {
+          renderCapture(capture, selection, {}, CaptureLook::plain()))) {
     error = QStringLiteral("Clicking away from empty text added an annotation");
     return false;
   }
@@ -4725,7 +4760,7 @@ bool runTextClickAwayCommitCheck(QApplication &application, QString &error) {
   QTest::mouseClick(&editor, Qt::LeftButton, Qt::NoModifier, toScreen({325, 180}));
   application.processEvents();
   if (!snapshotMatches(
-          renderCapture(capture, selection, {clicked}, BackgroundStyle::None))) {
+          renderCapture(capture, selection, {clicked}, CaptureLook::plain()))) {
     error = QStringLiteral("Clicking the canvas discarded multiline text");
     return false;
   }
@@ -4744,7 +4779,7 @@ bool runTextClickAwayCommitCheck(QApplication &application, QString &error) {
   QTest::mouseMove(&editor, toScreen({275, 120}), 10);
   application.processEvents();
   if (!snapshotMatches(renderCapture(capture, selection, {clicked, toolbar},
-                                     BackgroundStyle::None)) ||
+                                     CaptureLook::plain())) ||
       editor.cursor().shape() != Qt::CrossCursor) {
     error = QStringLiteral("Clicking the toolbar discarded in-progress text");
     return false;
@@ -4954,7 +4989,7 @@ bool runAnnotationLayerChecks(QApplication &application, QString &error) {
 
   const QImage spotlightExport =
       renderCapture(capture, QRectF(0, 0, 80, 40), {redaction, lens},
-                    BackgroundStyle::None);
+                    CaptureLook::plain());
   if (spotlightExport.isNull() ||
       showsSecretRed(spotlightExport.pixelColor(30, 20)) ||
       spotlightExport.pixelColor(30, 20) != solid) {
@@ -4979,12 +5014,12 @@ bool runAnnotationLayerChecks(QApplication &application, QString &error) {
   label.textBackground = TextBackground::Plain;
   const QImage redactionOnly =
       renderCapture(capture, QRectF(0, 0, 80, 40), {redaction},
-                    BackgroundStyle::None);
+                    CaptureLook::plain());
   const QImage overlayExport =
       renderCapture(capture, QRectF(0, 0, 80, 40), {redaction, arrow, label},
-                    BackgroundStyle::None);
+                    CaptureLook::plain());
   const QRectF overlayCanvas =
-      captureCanvasRect(QSizeF(80, 40), {redaction, arrow, label});
+      captureLayout(QSizeF(80, 40), {redaction, arrow, label}).canvas;
   const QPoint overlayOrigin = (-overlayCanvas.topLeft()).toPoint();
   const QColor overlayFill =
       overlayExport.pixelColor(overlayOrigin + QPoint(22, 12));
@@ -6902,74 +6937,79 @@ bool runCanvasBoundaryModeSmoke(QApplication &application, QString &error) {
   log.previewSize = capture.previewSize;
 
   const QRectF sourceFrame(QPointF(), QSizeF(capture.previewSize));
-  const QRectF framedCanvas = captureCanvasRect(
-      sourceFrame.size(), {outside}, CanvasBoundaryMode::Framed);
-  const QRectF overflowCanvas = captureCanvasRect(
-      sourceFrame.size(), {outside}, CanvasBoundaryMode::Overflow);
-  const QRectF imageCanvas = captureCanvasRect(
-      sourceFrame.size(), {outside}, CanvasBoundaryMode::Image);
-  if (captureCanvasRect(sourceFrame.size(), {outside}) != framedCanvas ||
-      // Right edge: the box's stroke ends at 263, plus Framed's 15 px of mat
-      // beyond a layer that outgrows the normal 64 px frame.
-      framedCanvas != QRectF(-64, -64, 342, 228) ||
+  const QRectF framedCanvas = captureLayout(
+      sourceFrame.size(), {outside}, CanvasBoundaryMode::Framed).canvas;
+  const QRectF overflowCanvas = captureLayout(
+      sourceFrame.size(), {outside}, CanvasBoundaryMode::Overflow).canvas;
+  const QRectF imageCanvas = captureLayout(
+      sourceFrame.size(), {outside}, CanvasBoundaryMode::Image).canvas;
+  CaptureLook aurora;
+  aurora.backdrop = BackgroundStyle::Aurora;
+  // The box's stroke ends at x 263. Framed keeps 15 px of mat beyond a layer
+  // that outgrows the frame: around the bare screenshot when plain, around
+  // its 7% padding (8.14 px on a 100 px shot) when styled.
+  if (captureLayout(sourceFrame.size(), {outside}).canvas != framedCanvas ||
+      framedCanvas != QRectF(0, 0, 278, 100) ||
+      captureLayout(sourceFrame.size(), {outside}, CanvasBoundaryMode::Framed,
+                    aurora).canvas != QRectF(-9, -9, 287, 118) ||
       overflowCanvas != QRectF(0, 0, 263, 100) ||
+      captureLayout(sourceFrame.size(), {outside},
+                    CanvasBoundaryMode::Overflow, aurora).canvas !=
+          overflowCanvas ||
       imageCanvas != sourceFrame ||
-      captureCanvasRect(sourceFrame.size(), {},
-                        CanvasBoundaryMode::Overflow) != sourceFrame) {
+      captureLayout(sourceFrame.size(), {},
+                    CanvasBoundaryMode::Overflow).canvas != sourceFrame) {
     error = QStringLiteral("Canvas boundary geometry reached the wrong bounds");
     return false;
   }
 
-  const auto expectedOutput = [&](CanvasBoundaryMode mode) {
-    return renderCapture(capture, sourceFrame, {outside},
-                         BackgroundStyle::None, true, mode);
+  const auto expectedOutput = [&](CanvasBoundaryMode mode,
+                                  const CaptureLook &look = CaptureLook::plain(),
+                                  const QImage &picture = {}) {
+    return renderCapture(capture, sourceFrame, {outside}, look, mode, picture);
   };
   const QImage framedOutput = expectedOutput(CanvasBoundaryMode::Framed);
   const QImage overflowOutput = expectedOutput(CanvasBoundaryMode::Overflow);
   const QImage imageOutput = expectedOutput(CanvasBoundaryMode::Image);
-  const QImage framedOff =
-      renderCapture(capture, sourceFrame, {outside}, BackgroundStyle::Off, true,
-                    CanvasBoundaryMode::Framed);
-  const QImage overflowColor = renderCapture(
-      capture, sourceFrame, {outside}, BackgroundStyle::Aurora, true,
-      CanvasBoundaryMode::Overflow);
-  const QImage imageColor = renderCapture(capture, sourceFrame, {outside},
-                                          BackgroundStyle::Aurora, true,
-                                          CanvasBoundaryMode::Image);
-  QImage customBackdrop(20, 20, QImage::Format_ARGB32_Premultiplied);
-  const QColor customGreen(QStringLiteral("#18a558"));
-  customBackdrop.fill(customGreen);
-  const QImage framedCustom =
-      renderCapture(capture, sourceFrame, {outside}, BackgroundStyle::Custom,
-                    true, CanvasBoundaryMode::Framed, customBackdrop);
-  const QImage overflowCustom =
-      renderCapture(capture, sourceFrame, {outside}, BackgroundStyle::Custom,
-                    true, CanvasBoundaryMode::Overflow, customBackdrop);
-  const QImage imageCustom =
-      renderCapture(capture, sourceFrame, {outside}, BackgroundStyle::Custom,
-                    true, CanvasBoundaryMode::Image, customBackdrop);
-  BackgroundStyle parsedCustom = BackgroundStyle::None;
+  const QImage framedColor =
+      expectedOutput(CanvasBoundaryMode::Framed, aurora);
+  const QImage overflowColor =
+      expectedOutput(CanvasBoundaryMode::Overflow, aurora);
+  const QImage imageColor = expectedOutput(CanvasBoundaryMode::Image, aurora);
+  QImage picture(20, 20, QImage::Format_ARGB32_Premultiplied);
+  const QColor green(QStringLiteral("#18a558"));
+  picture.fill(green);
+  CaptureLook chosen;
+  chosen.backdrop = BackgroundStyle::Image;
+  const QImage framedPicture =
+      expectedOutput(CanvasBoundaryMode::Framed, chosen, picture);
+  const QImage overflowPicture =
+      expectedOutput(CanvasBoundaryMode::Overflow, chosen, picture);
+  const QImage imagePicture =
+      expectedOutput(CanvasBoundaryMode::Image, chosen, picture);
+  BackgroundStyle parsed = BackgroundStyle::Off;
   if (framedOutput.size() != framedCanvas.size().toSize() ||
       overflowOutput.size() != overflowCanvas.size().toSize() ||
       imageOutput.size() != imageCanvas.size().toSize() ||
       !(framedOutput.width() > overflowOutput.width() &&
         overflowOutput.width() > imageOutput.width()) ||
-      framedOutput.pixelColor(0, 0).alpha() != 255 ||
-      framedOff.size() != framedOutput.size() ||
-      framedOff.pixelColor(0, 0).alpha() != 0 ||
+      // Plain growth is transparent; a backdrop fills it.
+      framedOutput.pixelColor(270, 5).alpha() != 0 ||
+      framedColor.size() != QSize(287, 118) ||
+      framedColor.pixelColor(0, 0).alpha() != 255 ||
       overflowOutput.pixelColor(200, 10).alpha() != 0 ||
       overflowColor.size() != overflowOutput.size() ||
       overflowColor.pixelColor(200, 10).alpha() != 255 ||
       imageColor != imageOutput ||
-      framedCustom.size() != framedOutput.size() ||
-      framedCustom.pixelColor(0, 0) != customGreen ||
-      overflowCustom.size() != overflowOutput.size() ||
-      overflowCustom.pixelColor(200, 10) != customGreen ||
-      imageCustom != imageOutput ||
-      backgroundStyleName(BackgroundStyle::Custom) !=
-          QStringLiteral("custom") ||
-      !backgroundStyleFromName(QStringLiteral("custom"), parsedCustom) ||
-      parsedCustom != BackgroundStyle::Custom) {
+      framedPicture.size() != framedColor.size() ||
+      // Far from the card's shadow and the box.
+      framedPicture.pixelColor(283, 115) != green ||
+      overflowPicture.size() != overflowOutput.size() ||
+      overflowPicture.pixelColor(200, 10) != green ||
+      imagePicture != imageOutput ||
+      backgroundStyleName(BackgroundStyle::Image) != QStringLiteral("image") ||
+      !backgroundStyleFromName(QStringLiteral("image"), parsed) ||
+      parsed != BackgroundStyle::Image) {
     error = QStringLiteral("Canvas boundary exports were not clipped in order");
     return false;
   }
@@ -7161,8 +7201,8 @@ bool runOffCanvasCreationSmoke(QApplication &application, QString &error) {
       annotationTextBounds(editor.currentAnnotationsForTest().constLast())
               .left() >= 0.0 ||
       editor.currentCanvasForTest() !=
-          captureCanvasRect(sourceCanvas.size(),
-                            editor.currentAnnotationsForTest()) ||
+          captureLayout(sourceCanvas.size(),
+                            editor.currentAnnotationsForTest()).canvas ||
       editor.renderCurrentOutput().size() !=
           editor.currentCanvasForTest().size().toSize()) {
     error = QStringLiteral("Off-canvas arrow label did not enter the output");
@@ -7345,6 +7385,16 @@ bool runSelectOutsideCanvasSmoke(QApplication &application, QString &error) {
   capture.source.fill(QColor(QStringLiteral("#182030")));
   capture.previewSize = capture.source.size();
   const QString snapshotPath = temporarySnapshotPath();
+  // Omasnap's window gray, styled with no padding: the canvas is the
+  // screenshot until a layer grows it, and the card keeps its shadow.
+  CaptureLook slate;
+  slate.backdrop = BackgroundStyle::Slate;
+  slate.padding = 0.0;
+  CaptureLook flatSlate = slate;
+  flatSlate.shadow = 0.0;
+  saveLastLook(slate);
+  const auto plainAgain =
+      qScopeGuard([] { saveLastLook(CaptureLook::plain()); });
 
   CaptureEditor editor(capture);
   editor.resize(800, 600);
@@ -7364,21 +7414,21 @@ bool runSelectOutsideCanvasSmoke(QApplication &application, QString &error) {
   const auto currentOutput = [&] {
     return flushedSnapshot(editor, snapshotPath);
   };
-  const auto expectedCurrent = [&](BackgroundStyle background,
-                                   bool imageShadow = true) {
+  const auto expectedCurrent = [&](const CaptureLook &look) {
     return renderCapture(capture, selection,
-                         editor.currentAnnotationsForTest(), background,
-                         imageShadow);
+                         editor.currentAnnotationsForTest(), look);
   };
   const auto canvasIsDerived = [&] {
     return editor.currentCanvasForTest() ==
-           captureCanvasRect(selection.size(),
-                             editor.currentAnnotationsForTest());
+           captureLayout(selection.size(), editor.currentAnnotationsForTest(),
+                         CanvasBoundaryMode::Framed,
+                         editor.currentLookForTest())
+               .canvas;
   };
-  const QColor slate(QStringLiteral("#242424"));
+  const QColor gray(QStringLiteral("#242424"));
   const auto isSlateShadow = [&](const QColor &pixel) {
-    return pixel.alpha() == 255 && pixel.red() < slate.red() &&
-           pixel.green() < slate.green() && pixel.blue() < slate.blue();
+    return pixel.alpha() == 255 && pixel.red() < gray.red() &&
+           pixel.green() < gray.green() && pixel.blue() < gray.blue();
   };
   const auto drag = [&](const QPoint &from, const QPoint &to) {
     QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier, from);
@@ -7399,7 +7449,7 @@ bool runSelectOutsideCanvasSmoke(QApplication &application, QString &error) {
   }
 
   const QImage inside = currentOutput();
-  if (inside != expectedCurrent(BackgroundStyle::None)) {
+  if (inside != expectedCurrent(slate)) {
     error = QStringLiteral("Inside rectangle output did not match its layers");
     return false;
   }
@@ -7423,12 +7473,12 @@ bool runSelectOutsideCanvasSmoke(QApplication &application, QString &error) {
   const QImage shiftedOutput = currentOutput();
   const QPoint shiftedSourceOrigin(qRound(-shiftedCanvas.left()),
                                    qRound(-shiftedCanvas.top()));
-  if (shiftedOutput != expectedCurrent(BackgroundStyle::None) ||
+  if (shiftedOutput != expectedCurrent(slate) ||
       shiftedOutput.size() != shiftedCanvas.size().toSize() ||
       !isSlateShadow(shiftedOutput.pixelColor(shiftedSourceOrigin +
                                               QPoint(610, 350))) ||
       shiftedOutput.pixelColor(shiftedSourceOrigin + QPoint(650, 350)) !=
-          slate ||
+          gray ||
       shiftedOutput.pixelColor(shiftedSourceOrigin + QPoint(599, 350)) !=
           QColor(QStringLiteral("#182030"))) {
     error = QStringLiteral(
@@ -7446,7 +7496,7 @@ bool runSelectOutsideCanvasSmoke(QApplication &application, QString &error) {
   const QImage resizedOutput = currentOutput();
   if (!canvasIsDerived() || resizedCanvas.right() <= shiftedCanvas.right() ||
       resizedCanvas.bottom() <= sourceCanvas.bottom() ||
-      resizedOutput != expectedCurrent(BackgroundStyle::None)) {
+      resizedOutput != expectedCurrent(slate)) {
     error = QStringLiteral(
         "Dragging an exposed handle did not grow the canvas again");
     return false;
@@ -7481,7 +7531,7 @@ bool runSelectOutsideCanvasSmoke(QApplication &application, QString &error) {
   const QImage slateOutput = currentOutput();
   if (!canvasIsDerived() || offsetCanvas.left() >= 0 ||
       offsetCanvas.top() >= 0 ||
-      slateOutput != expectedCurrent(BackgroundStyle::None)) {
+      slateOutput != expectedCurrent(slate)) {
     error = QStringLiteral(
         "Top-left drag did not grow a stable offset canvas");
     return false;
@@ -7492,7 +7542,7 @@ bool runSelectOutsideCanvasSmoke(QApplication &application, QString &error) {
           QColor(QStringLiteral("#182030")) ||
       !isSlateShadow(
           slateOutput.pixelColor(sourceOrigin + QPoint(-5, 300))) ||
-      slateOutput.pixelColor(0, sourceOrigin.y() + 300) != slate ||
+      slateOutput.pixelColor(0, sourceOrigin.y() + 300) != gray ||
       slateOutput.pixelColor(sourceOrigin + QPoint(0, 300)) !=
           QColor(QStringLiteral("#182030")) ||
       slateOutput != currentOutput()) {
@@ -7508,12 +7558,11 @@ bool runSelectOutsideCanvasSmoke(QApplication &application, QString &error) {
   application.processEvents();
   const QImage noShadowOutput = currentOutput();
   if (noShadowOutput == slateOutput ||
-      noShadowOutput != expectedCurrent(BackgroundStyle::None, false) ||
-      noShadowOutput.pixelColor(sourceOrigin + QPoint(-5, 300)) != slate ||
+      noShadowOutput != expectedCurrent(flatSlate) ||
+      noShadowOutput.pixelColor(sourceOrigin + QPoint(-5, 300)) != gray ||
       editor.operationLog().isEmpty() ||
-      editor.operationLog().constLast().type != Operation::Type::Background ||
-      editor.operationLog().constLast().background != BackgroundStyle::None ||
-      editor.operationLog().constLast().imageShadow) {
+      editor.operationLog().constLast().type != Operation::Type::Look ||
+      editor.operationLog().constLast().look != flatSlate) {
     error = QStringLiteral("Shift+B did not disable only the drop shadow");
     return false;
   }
@@ -7556,43 +7605,29 @@ bool runSelectOutsideCanvasSmoke(QApplication &application, QString &error) {
     return false;
   }
 
-  // Automatic growth starts on an implicit shadowed-gray mat but remains in
-  // fullscreen mode: B runs through every shadowed color, then shadowed gray,
-  // flat gray, and explicit Off before wrapping back to blue.
-  struct BackdropStep {
-    BackgroundStyle style;
-    bool shadow;
-  };
-  const std::array<BackdropStep, 7> grownCycle{{
-      {BackgroundStyle::Aurora, true},
-      {BackgroundStyle::Sunset, true},
-      {BackgroundStyle::Lagoon, true},
-      {BackgroundStyle::Violet, true},
-      {BackgroundStyle::Slate, true},
-      {BackgroundStyle::Slate, false},
-      {BackgroundStyle::Off, true},
-  }};
-  for (const BackdropStep step : grownCycle) {
+  // B runs from window gray through the gradients, the chosen colour, Off
+  // and the wallpaper back to gray. Without padding every step keeps the
+  // canvas the layer grew.
+  for (const BackgroundStyle style :
+       {BackgroundStyle::Aurora, BackgroundStyle::Sunset,
+        BackgroundStyle::Lagoon, BackgroundStyle::Violet,
+        BackgroundStyle::Solid, BackgroundStyle::Off,
+        BackgroundStyle::Wallpaper, BackgroundStyle::Slate}) {
     QTest::keyClick(&editor, Qt::Key_B);
     application.processEvents();
+    CaptureLook expected = slate;
+    expected.backdrop = style;
     const Operation &operation = editor.operationLog().constLast();
-    if (operation.type != Operation::Type::Background ||
-        operation.background != step.style ||
-        operation.imageShadow != step.shadow ||
-        currentOutput() != expectedCurrent(step.style, step.shadow) ||
+    if (operation.type != Operation::Type::Look || operation.look != expected ||
+        currentOutput() != expectedCurrent(expected) ||
         editor.currentCanvasForTest() != offsetCanvas) {
-      error = QStringLiteral("Grown backdrop cycle reached the wrong state");
+      error = QStringLiteral("Grown backdrop cycle reached the wrong state at %1")
+                  .arg(backgroundStyleLabel(style));
       return false;
     }
   }
-  // Leave this larger fixture on shadowed gray for the movement, contraction,
-  // and operation-log checks below.
-  QTest::keyClick(&editor, Qt::Key_Z, Qt::ControlModifier);
-  QTest::keyClick(&editor, Qt::Key_Z, Qt::ControlModifier);
-  application.processEvents();
   if (currentOutput() != slateOutput) {
-    error = QStringLiteral(
-        "Undoing the grown backdrop wrap did not restore shadowed Slate");
+    error = QStringLiteral("The backdrop cycle did not return to window gray");
     return false;
   }
 
@@ -7663,10 +7698,10 @@ bool runSelectOutsideCanvasSmoke(QApplication &application, QString &error) {
   const QImage textOutput = currentOutput();
   const QPoint textSourceOrigin(qRound(-textCanvas.left()),
                                 qRound(-textCanvas.top()));
-  if (textOutput != expectedCurrent(BackgroundStyle::None) ||
+  if (textOutput != expectedCurrent(slate) ||
       !isSlateShadow(textOutput.pixelColor(textSourceOrigin +
                                            QPoint(610, 350))) ||
-      textOutput.pixelColor(textSourceOrigin + QPoint(650, 350)) != slate) {
+      textOutput.pixelColor(textSourceOrigin + QPoint(650, 350)) != gray) {
     error = QStringLiteral(
         "Text growth did not keep the source shadow on default Slate");
     return false;
@@ -7772,20 +7807,82 @@ bool runSelectOutsideCanvasSmoke(QApplication &application, QString &error) {
 bool runBackdropPreviewMatchesExport(QApplication &application,
                                       const QString &outputRoot,
                                       QString &error) {
+  // A stored picture, as the wallpaper or a chosen image is.
+  QTemporaryDir pictureDirectory;
+  QImage pictureSource(64, 40, QImage::Format_RGB32);
+  {
+    QPainter painter(&pictureSource);
+    QLinearGradient sweep(0, 0, 64, 40);
+    sweep.setColorAt(0, QColor(QStringLiteral("#d94f30")));
+    sweep.setColorAt(1, QColor(QStringLiteral("#2a6fdb")));
+    painter.fillRect(pictureSource.rect(), sweep);
+  }
+  const QString picturePath =
+      pictureDirectory.filePath(QStringLiteral("picture.png"));
+  QString pictureError;
+  const QString pictureId =
+      pictureDirectory.isValid() && pictureSource.save(picturePath)
+          ? importBackdropAsset(picturePath, pictureError)
+          : QString();
+  if (pictureId.isEmpty()) {
+    error = QStringLiteral("Could not store the picture fixture: %1")
+                .arg(pictureError);
+    return false;
+  }
+  const auto look = [&](BackgroundStyle backdrop,
+                        const std::function<void(CaptureLook &)> &tune = {}) {
+    CaptureLook value;
+    value.backdrop = backdrop;
+    value.image = pictureId;
+    if (tune)
+      tune(value);
+    return value;
+  };
   const struct {
     QSize source;
     qreal nativeScale;
     bool windowed;
-    BackgroundStyle background;
-    bool shadow;
+    CaptureLook look;
     bool grown;
     bool zoom;
-  } cases[] = {{{320, 220}, 1.0, false, BackgroundStyle::Aurora, true, false, false},
-               {{1500, 1000}, 1.5, true, BackgroundStyle::Lagoon, true, false, false},
-               {{1400, 900}, 2.0, false, BackgroundStyle::Sunset, false, false, false},
-               {{320, 220}, 2.0, true, BackgroundStyle::Violet, true, false, true},
-               {{1200, 800}, 1.5, true, BackgroundStyle::Aurora, true, true, false},
-               {{320, 220}, 1.0, false, BackgroundStyle::Slate, true, true, true}};
+  } cases[] = {
+      {{320, 220}, 1.0, false, look(BackgroundStyle::Aurora), false, false},
+      {{1500, 1000}, 1.5, true,
+       look(BackgroundStyle::Lagoon,
+            [](CaptureLook &l) { l.glass = Glass::Light; }),
+       false, false},
+      {{1400, 900}, 2.0, false,
+       look(BackgroundStyle::Sunset,
+            [](CaptureLook &l) {
+              l.shadow = 0.0;
+              l.aspect = CanvasAspect::Square;
+            }),
+       false, false},
+      {{320, 220}, 2.0, true,
+       look(BackgroundStyle::Violet, [](CaptureLook &l) { l.corners = 0.08; }),
+       false, true},
+      {{1200, 800}, 1.5, true,
+       look(BackgroundStyle::Aurora,
+            [](CaptureLook &l) {
+              l.glass = Glass::Custom;
+              l.opacity = 0.5;
+              l.aspect = CanvasAspect::Wide;
+            }),
+       true, false},
+      {{320, 220}, 1.0, false,
+       look(BackgroundStyle::Slate, [](CaptureLook &l) { l.padding = 0.2; }),
+       true, true},
+      {{420, 300}, 1.0, false,
+       look(BackgroundStyle::Image,
+            [](CaptureLook &l) {
+              l.shadow = 1.0;
+              l.aspect = CanvasAspect::Standard;
+            }),
+       false, false},
+      {{420, 300}, 1.5, true,
+       look(BackgroundStyle::Solid,
+            [](CaptureLook &l) { l.color = QColor(QStringLiteral("#e0c060")); }),
+       true, false}};
   int index = 0;
   for (const auto &fixture : cases) {
     CaptureData capture;
@@ -7796,9 +7893,8 @@ bool runBackdropPreviewMatchesExport(QApplication &application,
                             QImage::Format_ARGB32_Premultiplied);
     capture.source.fill(QColor(QStringLiteral("#527196")));
     Operation backdrop;
-    backdrop.type = Operation::Type::Background;
-    backdrop.background = fixture.background;
-    backdrop.imageShadow = fixture.shadow;
+    backdrop.type = Operation::Type::Look;
+    backdrop.look = fixture.look;
     OperationLog log;
     log.ops = {backdrop};
     if (fixture.grown) {
@@ -7822,6 +7918,7 @@ bool runBackdropPreviewMatchesExport(QApplication &application,
     editor.setWindowedPresentation(fixture.windowed);
     editor.resize(1000, 850);
     editor.show();
+    editor.waitForPictures();
     application.processEvents();
     const QString prefix = outputRoot + QStringLiteral("-backdrop-%1").arg(index++);
     const QImage exported = editor.renderCurrentOutput();
@@ -7840,11 +7937,8 @@ bool runBackdropPreviewMatchesExport(QApplication &application,
     const QRectF canvas = editor.currentCanvasForTest();
     const qreal scaleX = source.width() / capture.source.width();
     const qreal scaleY = source.height() / capture.source.height();
-    const QPointF sourceOrigin = fixture.grown
-        ? QPointF(std::ceil(-canvas.left() * fixture.nativeScale),
-                   std::ceil(-canvas.top() * fixture.nativeScale))
-        : QPointF((saved.width() - capture.source.width()) / 2.0,
-                   (saved.height() - capture.source.height()) / 2.0);
+    const QPointF sourceOrigin(std::ceil(-canvas.left() * fixture.nativeScale),
+                               std::ceil(-canvas.top() * fixture.nativeScale));
     const QRectF frame(source.topLeft() -
                            QPointF(sourceOrigin.x() * scaleX, sourceOrigin.y() * scaleY),
                         QSizeF(saved.width() * scaleX, saved.height() * scaleY));
@@ -7873,10 +7967,11 @@ bool runBackdropPreviewMatchesExport(QApplication &application,
     qreal totalError = 0;
     for (int y = samples.top(); y <= samples.bottom(); y += 2) {
       for (int x = samples.left(); x <= samples.right(); x += 2) {
-        // Exclude the source image and its crop controls. Compare the actual
-        // gradient and shadow with the saved PNG at the same presentation size.
+        // Exclude the source image and its crop handles, which reach 13 px
+        // outside it. Compare the actual backdrop and shadow with the saved
+        // PNG at the same presentation size.
         const QPointF point(x, y);
-        if (source.adjusted(-10, -10, 10, 10).contains(point))
+        if (source.adjusted(-14, -14, 14, 14).contains(point))
           continue;
         const QColor a = grabLogicalPixel(actual, editor, point);
         const QColor b = grabLogicalPixel(expected, editor, point);
@@ -7897,9 +7992,9 @@ bool runBackdropPreviewMatchesExport(QApplication &application,
                   .arg(different);
       return false;
     }
-    if (!fixture.grown && source.width() / fixture.source.width() >= 0.9) {
-      // Inside the upper-left corner, away from the external crop handle.
-      // The old 10 px preview radius disagrees with the exported 14 px radius.
+    if (source.width() / fixture.source.width() >= 0.9) {
+      // Inside the upper-left corner, away from the external crop handle:
+      // the preview rounds the card exactly as the export does.
       const QPointF corner = source.topLeft() +
           QPointF(3, 3) * (source.width() / fixture.source.width());
       if (!colorNear(grabLogicalPixel(actual, editor, corner),
@@ -7917,8 +8012,8 @@ bool runBackdropPreviewMatchesExport(QApplication &application,
   return true;
 }
 
-/** Fullscreen B starts with blue, runs through every shadowed color, then
- *  demonstrates shadowed gray, flat gray, Off, and its blue wrap. */
+/** B cycles the backdrop and keeps the rest of the look; Shift+B toggles
+ *  only the card's shadow. */
 bool runFullscreenBackdropCycleSmoke(QApplication &application,
                                      QString &error) {
   CaptureData capture;
@@ -7930,84 +8025,56 @@ bool runFullscreenBackdropCycleSmoke(QApplication &application,
   capture.source.fill(QColor(QStringLiteral("#527196")));
   capture.previewSize = capture.source.size();
 
-  struct BackdropStep {
-    BackgroundStyle style;
-    bool shadow;
-  };
-  const std::array<BackdropStep, 8> fullscreenCycle{{
-      {BackgroundStyle::Aurora, true},
-      {BackgroundStyle::Sunset, true},
-      {BackgroundStyle::Lagoon, true},
-      {BackgroundStyle::Violet, true},
-      {BackgroundStyle::Slate, true},
-      {BackgroundStyle::Slate, false},
-      {BackgroundStyle::Off, true},
-      {BackgroundStyle::Aurora, true},
-  }};
-
   CaptureEditor editor(capture, CaptureEditor::CaptureMode::File);
   editor.resize(640, 480);
   editor.show();
+  editor.waitForPictures();
   application.processEvents();
-  QImage shadowedGray;
-  QImage flatGray;
-  for (const BackdropStep step : fullscreenCycle) {
+  // A file opens plain; no chosen image, so Image is not in the cycle.
+  CaptureLook expected = CaptureLook::plain();
+  for (const BackgroundStyle style :
+       {BackgroundStyle::Wallpaper, BackgroundStyle::Slate,
+        BackgroundStyle::Aurora, BackgroundStyle::Sunset,
+        BackgroundStyle::Lagoon, BackgroundStyle::Violet,
+        BackgroundStyle::Solid, BackgroundStyle::Off,
+        BackgroundStyle::Wallpaper}) {
     QTest::keyClick(&editor, Qt::Key_B);
     application.processEvents();
+    expected.backdrop = style;
     const Operation &operation = editor.operationLog().constLast();
-    const QImage output = editor.renderCurrentOutput();
-    const QImage expected = renderCapture(capture, editor.currentSelection(),
-                                          {}, step.style, step.shadow);
-    if (operation.type != Operation::Type::Background ||
-        operation.background != step.style ||
-        operation.imageShadow != step.shadow || output != expected) {
-      error =
-          QStringLiteral("Fullscreen backdrop cycle reached the wrong state");
+    if (operation.type != Operation::Type::Look || operation.look != expected ||
+        editor.renderCurrentOutput() !=
+            renderCapture(capture, editor.currentSelection(), {}, expected)) {
+      error = QStringLiteral("Backdrop cycle reached the wrong state at %1")
+                  .arg(backgroundStyleLabel(style));
       return false;
     }
-    if (step.style == BackgroundStyle::Slate && step.shadow)
-      shadowedGray = output;
-    else if (step.style == BackgroundStyle::Slate && !step.shadow)
-      flatGray = output;
   }
-  if (shadowedGray.isNull() || flatGray.isNull() || shadowedGray == flatGray) {
-    error = QStringLiteral(
-        "Shadowed and flat fullscreen gray rendered identically");
+  const QImage shadowed = editor.renderCurrentOutput();
+  QTest::keyClick(&editor, Qt::Key_B, Qt::ShiftModifier);
+  QTest::keyClick(&editor, Qt::Key_B);
+  application.processEvents();
+  const Operation &flat = editor.operationLog().constLast();
+  if (flat.look.backdrop != BackgroundStyle::Slate || flat.look.shadow != 0.0) {
+    error = QStringLiteral("B did not keep the shadow Shift+B turned off");
+    return false;
+  }
+  QTest::keyClick(&editor, Qt::Key_B, Qt::ShiftModifier);
+  application.processEvents();
+  const Operation &restored = editor.operationLog().constLast();
+  if (restored.look.backdrop != BackgroundStyle::Slate ||
+      restored.look.shadow != kDefaultLookShadow) {
+    error = QStringLiteral("Shift+B did not restore the default shadow");
+    return false;
+  }
+  QTest::keyClick(&editor, Qt::Key_Z, Qt::ControlModifier);
+  application.processEvents();
+  if (editor.renderCurrentOutput() == shadowed ||
+      editor.currentLookForTest().shadow != 0.0) {
+    error = QStringLiteral("Undo did not step back to the flat card");
     return false;
   }
   editor.close();
-
-  CaptureEditor overrideEditor(capture, CaptureEditor::CaptureMode::File);
-  overrideEditor.resize(640, 480);
-  overrideEditor.show();
-  application.processEvents();
-  QTest::keyClick(&overrideEditor, Qt::Key_B, Qt::ShiftModifier);
-  QTest::keyClick(&overrideEditor, Qt::Key_B);
-  const Operation &firstColor = overrideEditor.operationLog().constLast();
-  if (firstColor.background != BackgroundStyle::Aurora ||
-      !firstColor.imageShadow) {
-    error = QStringLiteral(
-        "Fullscreen B did not restore shadow on its first blue backdrop");
-    return false;
-  }
-  QTest::keyClick(&overrideEditor, Qt::Key_B, Qt::ShiftModifier);
-  application.processEvents();
-  const Operation &manualOff = overrideEditor.operationLog().constLast();
-  if (manualOff.background != BackgroundStyle::Aurora ||
-      manualOff.imageShadow) {
-    error = QStringLiteral("Shift+B did not disable the current color shadow");
-    return false;
-  }
-  QTest::keyClick(&overrideEditor, Qt::Key_B);
-  application.processEvents();
-  const Operation &nextColor = overrideEditor.operationLog().constLast();
-  if (nextColor.background != BackgroundStyle::Sunset ||
-      !nextColor.imageShadow) {
-    error = QStringLiteral(
-        "B did not restore the next color's canonical shadow");
-    return false;
-  }
-  overrideEditor.close();
   return true;
 }
 
@@ -8451,7 +8518,7 @@ bool runEllipseRenderingCheck(QString &error) {
   ellipse.start = {20, 20};
   ellipse.end = {180, 80};
   const QImage rendered = renderCapture(capture, QRectF(0, 0, 200, 100),
-                                        {ellipse}, BackgroundStyle::None);
+                                        {ellipse}, CaptureLook::plain());
   if (rendered.isNull())
     return false;
   // Stroke lands on the ellipse (bounding-box edge midpoints)...
@@ -8503,7 +8570,7 @@ bool runEllipseToolSmoke(QApplication &application, QString &error) {
   const QRectF selection(100, 100, 600, 400);
   const auto expected = [&](const QVector<Annotation> &annotations) {
     return renderCapture(capture, selection, annotations,
-                         BackgroundStyle::None);
+                         CaptureLook::plain());
   };
   const auto snapshotMatches = [&](const QImage &image) {
     return flushedSnapshot(editor, snapshotPath)
@@ -8639,7 +8706,7 @@ bool runShapeFillRenderingCheck(QString &error) {
     shape.start = {20, 20};
     shape.end = {180, 80};
     return renderCapture(capture, QRectF(0, 0, 200, 100), {shape},
-                         BackgroundStyle::None);
+                         CaptureLook::plain());
   };
 
   Annotation filledRectangle;
@@ -8724,7 +8791,7 @@ bool runShapeFillToolSmoke(QApplication &application, QString &error) {
   const QRectF selection(100, 100, 600, 400);
   const auto expected = [&](const QVector<Annotation> &annotations) {
     return renderCapture(capture, selection, annotations,
-                         BackgroundStyle::None);
+                         CaptureLook::plain());
   };
   const auto snapshotMatches = [&](const QImage &image) {
     return flushedSnapshot(editor, snapshotPath)
@@ -8929,7 +8996,7 @@ bool runCenteredCreationSmoke(QApplication &application, QString &error) {
   const QRectF selection(100, 100, 600, 400);
   const auto expected = [&](const QVector<Annotation> &annotations) {
     return renderCapture(capture, selection, annotations,
-                         BackgroundStyle::None);
+                         CaptureLook::plain());
   };
   const auto snapshotMatches = [&](const QImage &image) {
     return flushedSnapshot(editor, snapshotPath)
@@ -9080,7 +9147,7 @@ bool runTextFontSmoke(QApplication &application, QString &error) {
   for (std::size_t index = 0; index < fonts.size(); ++index) {
     rendered.textFont = fonts.at(index).first;
     renderedFonts.at(index) = renderCapture(
-        capture, QRectF(0, 0, 400, 200), {rendered}, BackgroundStyle::None);
+        capture, QRectF(0, 0, 400, 200), {rendered}, CaptureLook::plain());
   }
   if (renderedFonts.at(0) == renderedFonts.at(1) ||
       renderedFonts.at(1) == renderedFonts.at(2) ||
@@ -9323,7 +9390,7 @@ bool runTextWrapRenderingCheck(QString &error) {
     return false;
   }
   const QRectF expanded =
-      captureCanvasRect(QSizeF(200, 100), {text}, CanvasBoundaryMode::Framed);
+      captureLayout(QSizeF(200, 100), {text}, CanvasBoundaryMode::Framed).canvas;
   if (expanded.right() <= 200.0 || annotationTextLines(text).size() != 1) {
     error = QStringLiteral(
         "Committed zero-width text did not expand the canvas unbounded");
@@ -9345,7 +9412,7 @@ bool runTextWrapRenderingCheck(QString &error) {
   painted.textWidth = 120.0;
   painted.textBackground = TextBackground::Plain;
   const QImage out = renderCapture(capture, QRectF(0, 0, 400, 200), {painted},
-                                   BackgroundStyle::None);
+                                   CaptureLook::plain());
   const QFontMetricsF painterMetrics(annotationTextFont(painted.size));
   bool secondLineInk = false;
   const int secondBaseline = qRound(40 + painterMetrics.lineSpacing());
@@ -9381,7 +9448,7 @@ bool runTextPillRenderingCheck(QString &error) {
   text.start = {40, 60};
   const QRectF pill = annotationTextBounds(text);
   const QImage withPill = renderCapture(capture, QRectF(0, 0, 300, 100), {text},
-                                        BackgroundStyle::None);
+                                        CaptureLook::plain());
   // Cream just left of the first glyph and just above the ascent, inside
   // the pill but away from any ink.
   const QPoint beside(qRound(pill.left() + 2), 55);
@@ -9398,7 +9465,7 @@ bool runTextPillRenderingCheck(QString &error) {
   }
   text.textBackground = TextBackground::Plain;
   const QImage plain = renderCapture(capture, QRectF(0, 0, 300, 100), {text},
-                                     BackgroundStyle::None);
+                                     CaptureLook::plain());
   if (plain.pixelColor(beside).alpha() != 0 ||
       plain.pixelColor(above).alpha() != 0) {
     error = QStringLiteral("Plain text still painted a pill");
@@ -9415,13 +9482,13 @@ bool runTextPillRenderingCheck(QString &error) {
     return false;
   }
   const QImage multilineImage = renderCapture(
-      capture, QRectF(0, 0, 300, 100), {multiline}, BackgroundStyle::None);
+      capture, QRectF(0, 0, 300, 100), {multiline}, CaptureLook::plain());
   const QPoint secondLinePill(qRound(multilineBounds.left() + 2),
                               qRound(text.start.y() +
                                      QFontMetricsF(annotationTextFont(text.size))
                                          .lineSpacing()));
   const QRectF multilineCanvas =
-      captureCanvasRect(QSizeF(300, 100), {multiline});
+      captureLayout(QSizeF(300, 100), {multiline}).canvas;
   const QPoint multilineOrigin = (-multilineCanvas.topLeft()).toPoint();
   if (multilineImage.pixelColor(multilineOrigin + secondLinePill) !=
       QColor(248, 245, 235)) {
@@ -9477,7 +9544,7 @@ bool runTextPillSmoke(QApplication &application, QString &error) {
   const QRectF selection(100, 100, 600, 400);
   const auto expected = [&](const QVector<Annotation> &annotations) {
     return renderCapture(capture, selection, annotations,
-                         BackgroundStyle::None);
+                         CaptureLook::plain());
   };
   const auto snapshotMatches = [&](const QImage &image) {
     return flushedSnapshot(editor, snapshotPath)
@@ -9590,7 +9657,7 @@ bool runSelectAllDeleteSmoke(QApplication &application, QString &error) {
   const QRectF selection(100, 100, 600, 400);
   const auto expected = [&](const QVector<Annotation> &annotations) {
     return renderCapture(capture, selection, annotations,
-                         BackgroundStyle::None);
+                         CaptureLook::plain());
   };
   const auto snapshotMatches = [&](const QImage &image) {
     // Snapshots are written off the UI thread, so flush before reading.
@@ -9730,9 +9797,14 @@ bool runGrownCanvasSelectAllChromeSmoke(QApplication &application,
   Operation annotate;
   annotate.type = Operation::Type::Annotate;
   annotate.annotations = {inside, outside};
+  // Window gray without padding: the card is shadowed in a grown mat.
+  Operation slate;
+  slate.type = Operation::Type::Look;
+  slate.look.backdrop = BackgroundStyle::Slate;
+  slate.look.padding = 0.0;
   OperationLog log;
-  log.ops = {annotate};
-  log.index = 1;
+  log.ops = {slate, annotate};
+  log.index = 2;
   log.nextId = 3;
   log.previewSize = capture.previewSize;
 
@@ -9759,13 +9831,12 @@ bool runGrownCanvasSelectAllChromeSmoke(QApplication &application,
     return false;
   }
 
-  // This canvas already shows the shadowed-gray opening state, so B advances
-  // directly to the first shadowed color rather than repeating gray.
+  // B advances from gray to the next backdrop, keeping the shadow.
   QTest::keyClick(&editor, Qt::Key_B);
   application.processEvents();
-  if (editor.operationLog().constLast().background !=
+  if (editor.operationLog().constLast().look.backdrop !=
           BackgroundStyle::Aurora ||
-      !editor.operationLog().constLast().imageShadow) {
+      editor.operationLog().constLast().look.shadow != kDefaultLookShadow) {
     error = QStringLiteral(
         "B did not advance live grown gray to shadowed Aurora");
     return false;
@@ -9984,7 +10055,7 @@ bool runDuplicateLayerSmoke(QApplication &application, QString &error) {
   const QRectF selection(100, 100, 600, 400);
   const auto expected = [&](const QVector<Annotation> &annotations) {
     return renderCapture(capture, selection, annotations,
-                         BackgroundStyle::None);
+                         CaptureLook::plain());
   };
   const auto snapshotMatches = [&](const QImage &image) {
     return flushedSnapshot(editor, snapshotPath)
@@ -10137,7 +10208,7 @@ bool runKeyboardNudgeSmoke(QApplication &application, QString &error) {
   };
   const auto snapshotMatches = [&](const Annotation &expected) {
     const QImage image =
-        renderCapture(capture, selection, {expected}, BackgroundStyle::None);
+        renderCapture(capture, selection, {expected}, CaptureLook::plain());
     return flushedSnapshot(editor, snapshotPath)
                    .convertToFormat(image.format()) == image;
   };
@@ -11452,7 +11523,7 @@ bool runArrowStyleSmoke(QApplication &application, QString &error) {
     edge.arrowStyle = style;
     edge.curveControl = QPointF(100, -180);
     const QRectF visual = arrowVisualBounds(edge);
-    if (!captureCanvasRect(QSizeF(200, 100), {edge}).contains(visual)) {
+    if (!captureLayout(QSizeF(200, 100), {edge}).canvas.contains(visual)) {
       error = QStringLiteral("Canvas clipped styled arrow geometry");
       return false;
     }
@@ -11479,7 +11550,7 @@ bool runArrowStyleSmoke(QApplication &application, QString &error) {
     collapsed.end = {80.5, 50};
     for (const CanvasBoundaryMode boundary :
          {CanvasBoundaryMode::Framed, CanvasBoundaryMode::Overflow}) {
-      if (captureCanvasRect(QSizeF(200, 100), {collapsed}, boundary) !=
+      if (captureLayout(QSizeF(200, 100), {collapsed}, boundary).canvas !=
           QRectF(0, 0, 200, 100)) {
         error = QStringLiteral("An invisible collapsed arrow grew the canvas");
         return false;
@@ -12220,6 +12291,12 @@ int main(int argc, char **argv) {
     qputenv(variable, path.toUtf8());
   }
   qunsetenv("OMACAP_RUNTIME_DIR");
+  // No Omarchy theme: no wallpaper unless a test provides one.
+  qputenv("OMACAP_THEME_ROOT", isolatedHome.filePath(QStringLiteral("theme")).toUtf8());
+  // Fresh captures start plain here, as Omasnap's do, and editors never
+  // remember a look for the next test; look tests set their own.
+  saveLastLook(CaptureLook::plain());
+  setRememberLooks(false);
   // As snapMain does: the session's gtk3 theme would need a display.
   qputenv("QT_QPA_PLATFORMTHEME", "generic");
   QApplication application(argc, argv);
@@ -12902,7 +12979,7 @@ int main(int argc, char **argv) {
       rectangle.color = QColor(QStringLiteral("#ff375f"));
       rectangle.size = 4;
       return renderCapture(capture, QRectF(100, 100, 550, 370), {rectangle},
-                           BackgroundStyle::None);
+                           CaptureLook::plain());
     };
     // Arm once: pressing R again would toggle the fill instead.
     QTest::keyClick(&constraintEditor, Qt::Key_R);
@@ -13450,7 +13527,7 @@ int main(int argc, char **argv) {
   application.processEvents();
   const QImage windowCrop = windowPickEditor.renderCurrentOutput();
   const QImage expectedCrop = renderCapture(
-      capture, QRectF(80, 80, 300, 220), {}, BackgroundStyle::None);
+      capture, QRectF(80, 80, 300, 220), {}, CaptureLook::plain());
   if (windowPickEditor.captureData().source != originalSource ||
       windowPickEditor.currentSelection() != QRectF(80, 80, 300, 220) ||
       windowCrop.convertToFormat(QImage::Format_ARGB32) !=
@@ -13653,9 +13730,12 @@ int main(int argc, char **argv) {
                          4,
                          0,
                          {}});
+  CaptureLook aurora;
+  aurora.backdrop = BackgroundStyle::Aurora;
   const QImage rendered = renderCapture(capture, QRectF(100, 100, 500, 300),
-                                        annotations, BackgroundStyle::Aurora);
-  if (rendered.isNull() || rendered.size() != QSize(628, 428) ||
+                                        annotations, aurora);
+  // 7% of the canvas width on every side: 500 / 0.86 wide.
+  if (rendered.isNull() || rendered.size() != QSize(582, 382) ||
       !rendered.save(outputRoot + QStringLiteral("-render.png"), "PNG"))
     return 3;
 
@@ -13670,11 +13750,21 @@ int main(int argc, char **argv) {
   croppedOut.end = {150, 60};
   croppedOut.color = QColor(QStringLiteral("#ff00ff"));
   croppedOut.size = 4;
+  // Window gray with 20% padding: 33.3 px around a 100 px card.
+  CaptureLook slateLook;
+  slateLook.backdrop = BackgroundStyle::Slate;
+  slateLook.padding = 0.2;
+  CaptureLook flatSlateLook = slateLook;
+  flatSlateLook.shadow = 0.0;
+  CaptureLook auroraLook = slateLook;
+  auroraLook.backdrop = BackgroundStyle::Aurora;
   const QRectF grownCanvas =
-      captureCanvasRect(QSizeF(100, 100), {croppedOut});
+      captureLayout(QSizeF(100, 100), {croppedOut}, CanvasBoundaryMode::Framed,
+                    slateLook)
+          .canvas;
   const QImage grownExport =
       renderCapture(clippingCapture, QRectF(0, 0, 100, 100), {croppedOut},
-                    BackgroundStyle::Aurora);
+                    auroraLook);
   const QPoint grownOrigin(qRound(-grownCanvas.left()),
                            qRound(-grownCanvas.top()));
   bool paintedOutsideSource = false;
@@ -13687,10 +13777,10 @@ int main(int argc, char **argv) {
   }
   const QImage slateExport =
       renderCapture(clippingCapture, QRectF(0, 0, 100, 100), {croppedOut},
-                    BackgroundStyle::None);
+                    slateLook);
   const QImage unshadowedSlateExport =
       renderCapture(clippingCapture, QRectF(0, 0, 100, 100), {croppedOut},
-                    BackgroundStyle::None, false);
+                    flatSlateLook);
   CaptureData highDpiGrowth = clippingCapture;
   highDpiGrowth.monitor.scale = 2.0;
   highDpiGrowth.monitor.pixelSize = {200, 200};
@@ -13698,7 +13788,7 @@ int main(int argc, char **argv) {
       200, 200, Qt::IgnoreAspectRatio, Qt::FastTransformation);
   const QImage highDpiGrowthExport =
       renderCapture(highDpiGrowth, QRectF(0, 0, 100, 100), {croppedOut},
-                    BackgroundStyle::None);
+                    slateLook);
   const QColor slate(QStringLiteral("#242424"));
   const auto isSlateShadow = [&](const QColor &pixel) {
     return pixel.alpha() == 255 && pixel.red() < slate.red() &&
@@ -13709,8 +13799,13 @@ int main(int argc, char **argv) {
   {
     QPainter shadowPainter(&shadowProbe);
     const QRectF sourceCard(60, 50, 100, 100);
-    paintCaptureImageShadow(shadowPainter, sourceCard);
-    shadowPainter.fillRect(sourceCard, Qt::white);
+    CaptureLayout probeLayout;
+    probeLayout.card = sourceCard;
+    probeLayout.styled = true;
+    QImage white(100, 100, QImage::Format_ARGB32_Premultiplied);
+    white.fill(Qt::white);
+    paintCaptureBase(shadowPainter, probeLayout, slateLook, {},
+                     shadowProbe.rect(), sourceCard, white, {1, 1});
   }
   const std::array<int, 6> bottomShadowProfile = {
       shadowProbe.pixelColor(110, 150).red(),
@@ -13760,11 +13855,12 @@ int main(int argc, char **argv) {
       slateShadowProfile.back() == slate.red();
   const bool restrainedShadowStrength =
       bottomShadowProfile.front() >= 20 && slateShadowProfile.front() >= 20;
-  // The box's stroke ends at 153, inside the 64 px frame but closer to its
-  // edge than Framed's 15 px of mat allows, so that side reaches 168.
-  if (grownCanvas != QRectF(-64, -64, 232, 228) ||
-      grownExport.size() != QSize(232, 228) || !paintedOutsideSource ||
-      grownExport.pixelColor(grownOrigin) != QColor(Qt::white) ||
+  // The box's stroke ends at 153, past the 33.3 px frame, and Framed keeps
+  // 15 px of mat beyond it, so that side reaches 168.
+  if (grownCanvas != QRectF(-34, -34, 202, 168) ||
+      grownExport.size() != QSize(202, 168) || !paintedOutsideSource ||
+      // Inside the card, clear of its rounded corner.
+      grownExport.pixelColor(grownOrigin + QPoint(10, 10)) != QColor(Qt::white) ||
       slateExport.size() != grownExport.size() ||
       slateExport.pixelColor(grownOrigin + QPoint(99, 90)) !=
           QColor(Qt::white) ||
@@ -13779,7 +13875,7 @@ int main(int argc, char **argv) {
       !restrainedShadowStrength ||
       !scaleIndependentShadow ||
       slateExport.pixelColor(grownOrigin + QPoint(152, 90)) != slate ||
-      highDpiGrowthExport.size() != QSize(464, 456) ||
+      highDpiGrowthExport.size() != QSize(404, 336) ||
       highDpiGrowthExport.pixelColor(highDpiGrowthOrigin + QPoint(199, 180)) !=
           QColor(Qt::white) ||
       !isSlateShadow(highDpiGrowthExport.pixelColor(highDpiGrowthOrigin +
@@ -13787,7 +13883,7 @@ int main(int argc, char **argv) {
       highDpiGrowthExport.pixelColor(highDpiGrowthOrigin +
                                      QPoint(304, 180)) != slate ||
       slateExport != renderCapture(clippingCapture, QRectF(0, 0, 100, 100),
-                                   {croppedOut}, BackgroundStyle::None))
+                                   {croppedOut}, slateLook))
     return 65;
 
   CaptureData highDpiCapture = capture;
@@ -13796,11 +13892,11 @@ int main(int argc, char **argv) {
   highDpiCapture.source = capture.source.scaled(
       1500, 1125, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
   const QImage highDpiRendered = renderCapture(
-      highDpiCapture, QRectF(100, 100, 500, 300), {}, BackgroundStyle::None);
+      highDpiCapture, QRectF(100, 100, 500, 300), {}, CaptureLook::plain());
   if (highDpiRendered.size() != QSize(1000, 600))
     return 13;
   const QImage fullHighDpi = renderCapture(
-      highDpiCapture, QRectF(0, 0, 800, 600), {}, BackgroundStyle::None);
+      highDpiCapture, QRectF(0, 0, 800, 600), {}, CaptureLook::plain());
   if (fullHighDpi.size() != QSize(1600, 1200) ||
       !fullHighDpi.save(outputRoot + QStringLiteral("-fullscreen-hidpi.png"),
                         "PNG"))
@@ -13945,6 +14041,12 @@ int main(int argc, char **argv) {
   if (!runCutSmoke(cutError)) {
     qWarning().noquote() << "cut smoke failed:" << cutError;
     return EXIT_FAILURE;
+  }
+
+  QString lookError;
+  if (!runLookSmoke(application, lookError)) {
+    qWarning().noquote() << "look smoke failed:" << lookError;
+    return 150;
   }
 
   QString paletteError;

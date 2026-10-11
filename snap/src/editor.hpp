@@ -1,7 +1,6 @@
 #include <functional>
 #pragma once
 
-#include "background-config.hpp"
 #include "capture.hpp"
 #include "cut.hpp"
 #include "overlay-chrome.hpp"
@@ -11,6 +10,8 @@
 
 #include <QElapsedTimer>
 #include <QFutureWatcher>
+#include <QHash>
+#include <QSet>
 #include <QPlainTextEdit>
 #include <QPixmap>
 #include <QPointer>
@@ -110,7 +111,10 @@ public:
   const CaptureData &captureData() const { return capture_; }
   [[nodiscard]] QRectF currentSelection() const { return selection_; }
   /** Annotation-space canvas, including any strips grown past the source. */
-  [[nodiscard]] QRectF currentCanvasForTest() const { return canvasRect_; }
+  [[nodiscard]] QRectF currentCanvasForTest() const { return layout_.canvas; }
+  [[nodiscard]] const CaptureLook &currentLookForTest() const { return look_; }
+  /** Applies a look as one undoable step, as the look popovers do. */
+  void setLookForTest(const CaptureLook &look) { commitLook(look); }
   /** Canvas the edit view shows right now: the settled one, or the preview a
    *  carried layer or a label being typed gives it. */
   [[nodiscard]] QRectF liveCanvasForTest() const {
@@ -250,8 +254,7 @@ private:
 
   struct EditState {
     QVector<Annotation> annotations;
-    BackgroundStyle backgroundStyle = BackgroundStyle::None;
-    bool imageShadow = true;
+    CaptureLook look = CaptureLook::plain();
     CanvasBoundaryMode canvasBoundary = CanvasBoundaryMode::Framed;
     QRectF selection;
     int selectedAnnotation = -1;
@@ -333,11 +336,8 @@ public:
   }
   /// Starts a new selection without invoking live scrolling capture.
   void returnToSelectForTest() { returnToSelect(); }
-  /// Simulates a configured custom backdrop still decoding on a worker.
-  void setBackdropFutureForTest(const QFuture<QImage> &future) {
-    configuredCustomDefaultPending_ = true;
-    backdropWatcher_.setFuture(future);
-  }
+  /// Blocks until the backdrop pictures this document refers to are loaded.
+  void waitForPictures();
   /// Holds output open to verify destruction preserves worker-owned files.
   void setFinishFutureForTest(QFuture<bool> future) {
     finishWatcher_.setFuture(future.then([](bool) { return FinishResult{}; }));
@@ -620,16 +620,25 @@ private:
   void paintRecents(QPainter &painter);
   void reopenRecent(int index);
   void completeReopenRecent(const ReopenResult &result);
-  void completeBackdropLoad();
-  void seedConfiguredBackground(BackgroundStyle style);
+  /// Starts a fresh document with the last-used look, the wallpaper it
+  /// shows being the one resolved when this overlay opened.
+  void seedLook();
+  /// Loads the pictures `ids` name, and with `resolveWallpaper` stores the
+  /// current Omarchy wallpaper first, all on a worker.
+  void requestPictures(QStringList ids, bool resolveWallpaper = false);
+  /// Whatever the current look's backdrop shows is loaded (or known to be
+  /// missing), so an export can render it.
+  [[nodiscard]] bool picturesReady() const;
+  /// The decoded picture `look`'s backdrop shows; null when it shows none or
+  /// it is not loaded.
+  [[nodiscard]] QImage lookPicture(const CaptureLook &look) const;
+  /// Flattens the document as it stands now, on whatever thread calls it.
+  [[nodiscard]] std::function<QImage()> renderer() const;
   void duplicateSelectedAnnotation();
   [[nodiscard]] EditState editState() const;
   void refreshCanvasRect();
-  [[nodiscard]] bool canvasGrown() const;
   /** Whether `canvas` reaches past the source frame on any side. */
   [[nodiscard]] bool exceedsSourceFrame(const QRectF &canvas) const;
-  [[nodiscard]] BackgroundStyle effectiveBackgroundStyle() const;
-  [[nodiscard]] bool hasCaptureBackground() const;
   void enterEdit(QString status);
   /// Routes a confirmed screen selection to quick export or the editor.
   void enterSelectedCapture(QString editStatus);
@@ -651,7 +660,9 @@ private:
   void commitCrop(const QRectF &crop);
   void commitCut(CutOp cut);
   [[nodiscard]] bool cutInsertHint() const;
-  void commitBackground(BackgroundStyle style, bool imageShadow);
+  /// Replaces the look as one undoable step and remembers it for the next
+  /// capture.
+  void commitLook(const CaptureLook &look, const QString &status = {});
   void commitCanvasBoundary(CanvasBoundaryMode mode);
   void cycleCanvasBoundary(bool reverse);
   void cycleBackground();
@@ -693,11 +704,12 @@ private:
   struct LiveCanvas {
     /// The settled canvas, or the bounds a carried layer would settle to.
     QRectF rect;
-    /// `rect` is such a preview: the mat is laid over it, filled with
-    /// `backdrop`, instead of over the settled canvas while the layer is
-    /// carried, whether that makes the mat larger or smaller.
+    /// `rect` is such a preview: the mat is laid over it instead of over the
+    /// settled canvas while the layer is carried, whether that makes the mat
+    /// larger or smaller.
     bool previews = false;
-    BackgroundStyle backdrop = BackgroundStyle::None;
+    /// The look's backdrop paints `rect`.
+    bool backdrop = false;
     /// A spotlight has an opening in `rect`, so all the rest of it is dimmed.
     bool dimmed = false;
     bool operator==(const LiveCanvas &) const = default;
@@ -779,10 +791,10 @@ private:
   QElapsedTimer recentsAnimClock_;
   QTimer recentsAnimTimer_;
   QRectF selection_;
-  // Annotation coordinates stay anchored to the source frame at 0,0. This
-  // derived rect expands around them without translating either the source or
-  // existing layers; replaying the op log reconstructs it exactly.
-  QRectF canvasRect_;
+  // Annotation coordinates stay anchored to the source frame at 0,0. The
+  // derived canvas expands around them without translating either the source
+  // or existing layers; replaying the op log reconstructs it exactly.
+  CaptureLayout layout_;
   QPointF dragStart_;
   QRectF originalSelection_;
   /// Source frame at crop press, anchoring pointer mapping and live painting.
@@ -837,16 +849,22 @@ private:
   bool windowMode_ = false;
   /// Index into the region aspects Tab cycles: free, 1:1, 3:4, 16:9.
   int regionAspect_ = 0;
-  BackgroundStyle backgroundStyle_ = BackgroundStyle::None;
-  bool imageShadow_ = true;
+  CaptureLook look_ = CaptureLook::plain();
   CanvasBoundaryMode canvasBoundaryMode_ = CanvasBoundaryMode::Framed;
-  /** `[background]` config: custom image path and the style a fresh capture
-   *  starts with. Loaded once in the constructor. */
-  BackgroundConfig backgroundConfig_;
-  /** Loaded from `backgroundConfig_.imagePath`; null when unset or the file
-   *  failed to load, in which case `BackgroundStyle::Custom` is unavailable. */
-  QImage customBackdrop_;
-  bool configuredCustomDefaultPending_ = false;
+  /// The look fresh documents start with: the last one used, remembered
+  /// across runs (capture-state.hpp).
+  CaptureLook lastLook_;
+  /// Decoded backdrop pictures by asset id.
+  QHash<QString, QImage> pictures_;
+  /// The Omarchy wallpaper as this overlay found it; empty until resolved,
+  /// or when there is none.
+  QString wallpaperId_;
+  /// Pictures being decoded, and whether the wallpaper is still being
+  /// resolved. Exports wait only for what the look shows (picturesReady()).
+  QSet<QString> pendingPictures_;
+  bool wallpaperPending_ = false;
+  /// The seeded look still waits for wallpaperId_.
+  bool seedAwaitsWallpaper_ = false;
   std::optional<QString> pendingSelectedCapture_;
   bool busy_ = false;
   bool colorPaletteOpen_ = false;
@@ -989,7 +1007,6 @@ private:
   QFuture<QString> saveAsFuture_;
   QFuture<QString> dismissFuture_;
   QFutureWatcher<ReopenResult> reopenWatcher_;
-  QFutureWatcher<QImage> backdropWatcher_;
   bool reopenPending_ = false;
   /// The region being read (annotation coordinates). While tesseract runs a
   /// scan band sweeps it; once done the recognized text sits over it for a

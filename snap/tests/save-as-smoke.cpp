@@ -299,18 +299,28 @@ bool runSaveAsSmoke(QString &error) {
   {
     CaptureEditor editor(capture, CaptureEditor::CaptureMode::File);
     editor.show();
+    editor.waitForPictures();
     // A chooser must not steal the mouse release that commits a live gesture,
-    // or export before the configured backdrop has established the document.
-    for (bool *pending : {&editor.dragging_, &editor.panning_,
-                          &editor.configuredCustomDefaultPending_}) {
-      *pending = true;
+    // or export before the backdrop pictures have loaded.
+    const auto refuses = [&] {
       editor.saveAs();
-      if (editor.busy_ || editor.saveAsActive_) {
+      return !editor.busy_ && !editor.saveAsActive_;
+    };
+    for (bool *pending : {&editor.dragging_, &editor.panning_}) {
+      *pending = true;
+      if (!refuses()) {
         error = QStringLiteral("Save As interrupted an unfinished edit");
         return false;
       }
       *pending = false;
     }
+    editor.look_.backdrop = BackgroundStyle::Wallpaper;
+    editor.wallpaperPending_ = true;
+    if (!refuses()) {
+      error = QStringLiteral("Save As did not wait for the wallpaper");
+      return false;
+    }
+    editor.wallpaperPending_ = false;
     editor.close();
   }
   // A finished worker may still have its GUI completion queued when close

@@ -63,7 +63,7 @@ void CaptureEditor::cancelSaveAs() {
 }
 
 void CaptureEditor::saveAs() {
-  if (busy_ || dragging_ || panning_ || configuredCustomDefaultPending_ ||
+  if (busy_ || dragging_ || panning_ || !picturesReady() ||
       phase_ != Phase::Edit || selection_.isEmpty())
     return;
   busy_ = true;
@@ -167,7 +167,7 @@ void CaptureEditor::showSaveAsDialog(const QString &suggested) {
 }
 
 void CaptureEditor::saveAsToPath(const QString &path) {
-  if (dragging_ || panning_ || configuredCustomDefaultPending_)
+  if (dragging_ || panning_ || !picturesReady())
     return;
   endNudgeRun();
   busy_ = true;
@@ -191,15 +191,12 @@ void CaptureEditor::saveAsToPath(const QString &path) {
   });
   saveAsDirectory_ = QFileInfo(path).absolutePath();
   saveAsFuture_ = QtConcurrent::run(
-      [capture = capture_, selection = selection_, annotations = annotations_,
-       background = backgroundStyle_, shadow = imageShadow_,
-       boundary = canvasBoundaryMode_, backdrop = customBackdrop_,
+      [capture = capture_, render = renderer(),
        source = pristineSource_, log = currentOperationLog(),
        previous = editingRecent_, document = pinDocument_,
        launcher = processLauncher_, path](QPromise<QString> &completion) {
     RecentSnapWriter recent(log.recentId);
-    const QImage image = renderCapture(capture, selection, annotations,
-                                       background, shadow, boundary, backdrop);
+    const QImage image = render();
     QString error;
     if (savePngFile(image, path, error)) {
       const QString preview = launchPinnedCapture(

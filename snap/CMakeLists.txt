@@ -49,8 +49,12 @@ add_library(omasnap-core STATIC
   src/cut.hpp
   src/palette-config.cpp
   src/palette-config.hpp
-  src/background-config.cpp
-  src/background-config.hpp
+  src/backdrop-assets.cpp
+  src/backdrop-assets.hpp
+  src/capture-state.cpp
+  src/capture-state.hpp
+  src/look.cpp
+  src/look.hpp
   src/recent-snaps.cpp
   src/recent-snaps.hpp
   src/output-config.cpp
@@ -198,6 +202,8 @@ qt_add_executable(omasnap-smoke
   tests/scroll-startup-smoke.hpp
   tests/save-as-smoke.cpp
   tests/save-as-smoke.hpp
+  tests/look-smoke.cpp
+  tests/look-smoke.hpp
 )
 target_include_directories(omasnap-smoke PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/tests"
