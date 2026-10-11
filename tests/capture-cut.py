@@ -316,5 +316,13 @@ assert errors == ["The screen stream ended, as it does when the display changes,
                   "stopped recording."], errors
 assert kept < (changed - start) / 1e9 + 0.04, (kept, changed - start)
 
+# A microphone that fails ends the recording and keeps every track up to then.
+start, _, errors, kept, path = watched_recording(
+    "mic-break", "--mic", "test", "--desktop", "--camera", "test", "--break-after", "mic:1.2",
+    change=lambda _: None)
+assert errors == ["The microphone stopped working, so OmaCap stopped recording."], errors
+types = [s["codec_type"] for s in json.loads(subprocess.check_output(
+    ["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(path)]))["streams"]]
+assert types == ["video", "video", "audio", "audio"] and 1.1 < kept < 1.3, (types, kept)
 print(f"PASS: worker cut {duration:.3f}s, track starts {starts}; a late stop "
       f"{late_duration:.3f}s, an orphan {orphan_duration:.3f}s; the display watch")

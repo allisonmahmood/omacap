@@ -24,7 +24,8 @@ The recorded monitor must also keep the shape OmaCap placed its chrome for. A th
 Hyprland about it every POLL seconds (--display is how it was when recording was requested), and
 a screen frame reaches the file only once an answer asked for after the frame was rendered
 still matched. An answer that differs ends the recording before the change. A stop drains what
-is held back only once an answer has caught up with its cut.
+is held back only once an answer has caught up with its cut. A microphone, desktop audio or
+camera that fails ends the recording too, keeping every track up to then.
 """
 
 import argparse, json, os, signal, socket, subprocess, sys, threading, time
@@ -60,7 +61,7 @@ request_path = None
 finished = False
 stopping = False
 drained = False
-broken = set()  # sources that broke off mid-recording; drain() ends their tracks
+broken = set()  # sources that failed mid-recording; drain() ends their tracks
 streaming = False
 started = set()
 count = 0
@@ -80,6 +81,8 @@ HOLD = Gst.SECOND
 POLL, POLL_TIMEOUT = 0.25, 0.3
 # How long a stop waits for an answer newer than its cut before cutting at the last one.
 SETTLE = Gst.SECOND
+# The sources besides the screen, as a failure names them.
+DEVICES = {"mic": "microphone", "desktop": "desktop audio", "camera": "camera"}
 # The video process that started this worker; once it dies, this process is re-parented.
 parent = os.getppid()
 
@@ -466,6 +469,16 @@ def shared(result):
     start(node, props)
 
 
+def source_of(element):
+    """The source whose branch holds `element` ("screen", "mic", …), from the names start()
+    gives; None for what the tracks share, such as the muxer."""
+    while element is not None:
+        if (name := element.get_name().split("_")[0]) in ("screen", *DEVICES):
+            return name
+        element = element.get_parent()
+    return None
+
+
 def message(_, msg):
     if msg.type == Gst.MessageType.EOS:
         finish()
@@ -473,19 +486,24 @@ def message(_, msg):
     if msg.type != Gst.MessageType.ERROR:
         return
     err, _ = msg.parse_error()
-    if msg.src.get_name() != "screen" or cut.epoch is None:
+    source = source_of(msg.src)
+    if source is None or cut.epoch is None:
         finish(str(err))
         return
-    # The screen stream broke off, as XDPH's does when the monitor's mode changes. What was
-    # recorded is kept, as on a stop. The held frames may already show the change: the stop
-    # drains them once the display watch has caught up.
-    broken.add("screen")
+    # A source broke off mid-recording. What was recorded is kept: the recording stops as on a
+    # stop, and the broken track ends where its source did.
+    broken.add(source)
     if drained:
-        end_track("screen")
-    cut.close()
-    interrupt(
-        "The screen stream ended, as it does when the display changes, so OmaCap stopped recording."
-    )
+        end_track(source)
+    if source == "screen":
+        # XDPH's stream breaks off when the monitor's mode changes, and the held frames may
+        # already show the change: the stop drains them once the display watch has caught up.
+        cut.close()
+        interrupt(
+            "The screen stream ended, as it does when the display changes, so OmaCap stopped recording."
+        )
+    else:
+        interrupt(f"The {DEVICES[source]} stopped working, so OmaCap stopped recording.")
 
 
 def opening(epoch):
@@ -610,7 +628,7 @@ def fault(source):
 
 def breaks(source, seconds):
     """--break-after: a probe that fails `source` `seconds` after `start`, as a stream that
-    breaks off does, and passes nothing from it after."""
+    breaks off or an unplugged device does, and passes nothing from it after."""
     failed = False
 
     def probe(pad, info):
@@ -664,7 +682,7 @@ def start(node=None, props=None):
         cam = (
             f"videotestsrc name=camera is-live=true pattern=ball ! video/x-raw,width=640,height=480,framerate=30/1{fault('camera')}"
             if a.synthetic
-            else "v4l2src name=camera do-timestamp=true ! decodebin"
+            else "v4l2src name=camera do-timestamp=true ! decodebin name=camera_decode"
         )
         desc += f"{cam} ! identity name=camera_gate ! queue ! videoconvert ! videoscale ! video/x-raw,format=I420,width=640,height=480 ! vp8enc deadline=1 cpu-used=8 threads=2 ! {hold} name=camera_hold ! mux.video_1 "
     for i, name in enumerate(n for n in ["mic", "desktop"] if getattr(a, n)):
