@@ -1,0 +1,16 @@
+{
+  "$schema": "https://t3.codes/schema/t3.json",
+  "iconPath": "packaging/omacap.svg",
+  "scripts": [
+    {
+      "name": "Build and run",
+      "command": "./scripts/build.sh && ./build/omacap",
+      "icon": "play"
+    },
+    {
+      "name": "Run tests",
+      "command": "./scripts/test.sh",
+      "icon": "test"
+    }
+  ]
+}
