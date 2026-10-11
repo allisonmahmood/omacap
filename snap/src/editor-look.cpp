@@ -192,7 +192,7 @@ QString CaptureEditor::lookStatus(const CaptureLook &look) const {
   const QRectF frame = framedCanvas(selection_.size(), look);
   QString status =
       QStringLiteral("%1 · padding %2% · corners %3 · shadow %4%")
-          .arg(backgroundStyleLabel(look.backdrop).remove(QLatin1Char('…')))
+          .arg(backgroundStyleLabel(look.backdrop))
           .arg(qRound(look.padding * 100))
           .arg(qRound(look.corners * frame.width()))
           .arg(qRound(look.shadow * 100));

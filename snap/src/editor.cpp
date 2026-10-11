@@ -2665,7 +2665,7 @@ CaptureEditor::toolbarButtons(QVector<qreal> *groupDividers,
   // Style: the look (backdrop, frame, glass), then annotation color.
   add(36, QStringLiteral("look-backdrop"), {},
       QStringLiteral("Backdrop · %1 · B cycles")
-          .arg(backgroundStyleLabel(look_.backdrop).remove(QLatin1Char('…'))));
+          .arg(backgroundStyleLabel(look_.backdrop)));
   add(36, QStringLiteral("look-frame"), {},
       QStringLiteral("Padding, corners, shadow, canvas · Shift+B shadow"));
   add(36, QStringLiteral("look-glass"), {},
