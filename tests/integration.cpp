@@ -18,6 +18,7 @@
 #include <QtTest>
 #include <cmath>
 #include <ctime>
+#include <functional>
 #include <signal.h>
 #if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
 #include <QAudioBuffer>
@@ -1554,6 +1555,36 @@ class Integration : public QObject {
         QCOMPARE(b.state.annotations.last().text, QString("Saved"));
         QVERIFY(!b.dirty());
         QFile::remove(b.lastExport());
+
+        // Text is drawn as typed, never as markup.
+        QTest::keyClick(win, Qt::Key_T);
+        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(100, 50));
+        QTRY_VERIFY(!editor->property("typing").isNull());
+        for (char c : QByteArray("<b>x</b>"))
+            QTest::keyClick(win, c);
+        // A screenshot request mid-typing keeps the text, so the discard prompt sees it. No
+        // tools are on PATH for the rest of the test, so a regression can't start the real
+        // picker on the desktop.
+        const auto path = qgetenv("PATH");
+        qputenv("PATH", "/nonexistent");
+        auto restorePath = qScopeGuard([&] { qputenv("PATH", path); });
+        emit b.screenshotRequested();
+        QTRY_VERIFY(win->findChild<QObject *>("discardDialog")->property("opened").toBool());
+        QCOMPARE(b.phase(), QString("editor"));
+        QCOMPARE(b.state.annotations.last().text, QString("<b>x</b>"));
+        QMetaObject::invokeMethod(win->findChild<QObject *>("discardDialog"), "close");
+        // Repeater delegates are visual children, so walk the item tree.
+        std::function<QQuickItem *(QQuickItem *)> find = [&](QQuickItem *item) -> QQuickItem * {
+            if (item->property("text").toString() == "<b>x</b>")
+                return item;
+            for (auto child : item->childItems())
+                if (auto found = find(child))
+                    return found;
+            return nullptr;
+        };
+        auto drawn = find(win->findChild<QQuickItem *>("composition"));
+        QVERIFY(drawn);
+        QCOMPARE(drawn->property("textFormat").toInt(), int(Qt::PlainText));
         b.discard();
     }
     void annotationExport() {

@@ -215,8 +215,10 @@ ApplicationWindow {
     // `omacap --screenshot` while OmaCap is open. An unexported edit asks first.
     Connections {
         function onScreenshotRequested() {
-            // The new shot replaces this session, and its dialogs go with it.
+            // The new shot replaces this session, and its dialogs go with it. Text still
+            // being typed counts as an unexported change.
             if (backend.phase === "editor") {
+                editor.commitText();
                 exportDialog.close();
                 win.cropping = false;
             }

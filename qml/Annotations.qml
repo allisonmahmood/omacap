@@ -122,6 +122,7 @@ Item {
                     x: label.padX
                     y: label.padY
                     text: mark.a.text ?? ""
+                    textFormat: Text.PlainText
                     font.pixelSize: mark.a.size
                     font.bold: true
                     color: !mark.a.pill ? mark.tone : 0.299 * mark.tone.r + 0.587 * mark.tone.g + 0.114 * mark.tone.b > 0.6 ? "#1d1b16" : "#ffffff"
