@@ -1,6 +1,7 @@
 #include <QFutureWatcher>
 #include <QtConcurrent/QtConcurrentRun>
 #include "capture.hpp"
+#include "snap-main.hpp"
 #include "chrome-theme.hpp"
 #include "cli-path.hpp"
 #include "editor.hpp"
@@ -125,7 +126,7 @@ QByteArray hyprctlOutput(const QStringList &arguments) {
 
 } // namespace
 
-int main(int argc, char **argv) {
+int snapMain(int argc, char **argv) {
   startupTimingMark("entered main");
   QCoreApplication::setApplicationName(QStringLiteral("omasnap"));
   QCoreApplication::setApplicationVersion(QString::fromLatin1(OMASNAP_VERSION));

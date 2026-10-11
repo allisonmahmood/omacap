@@ -1,11 +1,5 @@
-cmake_minimum_required(VERSION 3.24)
-project(omasnap VERSION 1.21.0 LANGUAGES C CXX)
-include(GNUInstallDirs)
-include(CTest)
-set(CMAKE_AUTOMOC ON)
-
+# Omasnap-derived core, built as part of OmaCap (see VENDORED.md).
 find_package(PkgConfig REQUIRED)
-find_package(Qt6 6.8 REQUIRED COMPONENTS Concurrent Core Gui Test Widgets)
 find_package(LayerShellQt REQUIRED)
 pkg_check_modules(WaylandClient REQUIRED IMPORTED_TARGET wayland-client)
 pkg_check_modules(Libdeflate REQUIRED IMPORTED_TARGET libdeflate)
@@ -90,6 +84,10 @@ add_library(omasnap-core STATIC
   src/editor.cpp
   src/editor-save-as.cpp
   src/editor.hpp
+  src/main.cpp
+  src/snap-main.hpp
+  src/pin.cpp
+  src/pin.hpp
 )
 qt_add_resources(omasnap-core "capture-fonts"
   PREFIX "/fonts"
@@ -144,11 +142,7 @@ target_link_libraries(omasnap-core PUBLIC
   PkgConfig::Libdeflate
 )
 
-qt_add_executable(omasnap src/main.cpp src/pin.cpp src/pin.hpp)
-target_compile_options(omasnap PRIVATE -Wall -Wextra -Wpedantic)
-target_compile_definitions(omasnap PRIVATE OMASNAP_VERSION="${PROJECT_VERSION}")
-target_link_libraries(omasnap PRIVATE omasnap-core)
-target_precompile_headers(omasnap REUSE_FROM omasnap-core)
+target_compile_definitions(omasnap-core PRIVATE OMASNAP_VERSION="${PROJECT_VERSION}")
 
 if(BUILD_TESTING)
 qt_add_executable(omasnap-smoke
@@ -213,29 +207,3 @@ target_precompile_headers(omasnap-smoke REUSE_FROM omasnap-core)
 add_test(NAME omasnap-smoke COMMAND omasnap-smoke)
 set_tests_properties(omasnap-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
-
-qt_add_executable(stitch-replay
-  src/stitch-replay.cpp
-  src/stitch.cpp
-  src/stitch.hpp
-)
-target_include_directories(stitch-replay PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/src"
-)
-target_compile_features(stitch-replay PRIVATE cxx_std_23)
-target_compile_options(stitch-replay PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(stitch-replay PRIVATE Qt6::Core Qt6::Gui)
-
-install(TARGETS omasnap
-  RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
-)
-install(FILES assets/OFL.txt
-  DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/omasnap"
-  RENAME Neucha-OFL.txt
-)
-install(FILES assets/JetBrainsMono-OFL.txt assets/Inter-OFL.txt assets/Lucide-ISC.txt
-  DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/omasnap"
-)
-install(FILES omasnap.desktop
-  DESTINATION "${CMAKE_INSTALL_DATADIR}/applications"
-)
