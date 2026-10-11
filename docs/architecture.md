@@ -35,3 +35,25 @@ One `omacap` binary runs one of two apps, chosen in `src/main.cpp` before any
 
 `Backend::recordingFinished()` fires when a new recording is loaded, so the UI shows the
 card; opening a file goes straight to the editor.
+
+## Video UI
+
+`VideoStage` (`src/video-stage.*`) presents the video process the way Omasnap presents a
+capture. Each surface is a QML item it hosts in a window it owns:
+
+- **Editor** (`qml/Editor.qml`): a full-screen layer over the dimmed desktop on the focused
+  monitor, with the keyboard, or a floating window. `W` switches between them and is
+  remembered; the editor item moves to the new host, so nothing about the edit is lost.
+  Choosers (background image, colour, export file) are handed off as Omasnap's Save As: the
+  overlay hides and releases the keyboard while the floating dialog is open.
+- **Card** (`qml/Card.qml`): after a recording, the styled first frame in the corner of the
+  focused monitor. It never takes the keyboard when it appears; hovering or clicking it
+  does. Edit opens the editor; Export uses the last export settings and writes to Videos.
+  It fades after 10 seconds without a hover, unless it is kept (pin) or exporting. Closing
+  or fading ends the session; the recording itself stays in Videos. At start-up without a
+  file, the card instead offers an earlier session's unfinished edit for recovery.
+
+Opening a file goes straight to the editor. The process exits once its session has ended
+and no surface is open. The chrome is painted with Omasnap's own theme, fonts and icon code
+(`src/theme.*`, `src/chrome-items.*`, `src/video-icons.*`), so it follows the Omarchy theme
+live and looks like Omasnap.
