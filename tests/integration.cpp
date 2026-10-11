@@ -1500,7 +1500,9 @@ class Integration : public QObject {
         auto &b = s.backend;
         QVERIFY(s.stage.load());
         QSignalSpy exits(&b, &Backend::exitRequested);
-        // Nothing to recover and nothing asked for.
+        // Nothing to recover and nothing asked for. A test that failed may have left a session.
+        QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/scratch")
+            .removeRecursively();
         s.stage.offerRecovery();
         QVERIFY(s.stage.card().isEmpty());
         QTRY_COMPARE(exits.count(), 1);
@@ -1511,14 +1513,19 @@ class Integration : public QObject {
         b.stop();
         QTRY_COMPARE_WITH_TIMEOUT(s.stage.card(), QString("recording"), 20000);
         const QString recording = b.original(), session = b.sessionPath();
-        // Exported from the card, which then fades and ends the session.
+        // Exported from the card, which can't close until that is done. Then it fades,
+        // closing as below, and the session ends.
         auto card = find(s.stage.cardWindow()->contentItem(), "card");
         QVERIFY(QMetaObject::invokeMethod(card, "exportNow"));
         QCOMPARE(b.phase(), QString("exporting"));
+        s.stage.closeCard();
+        QCOMPARE(s.stage.card(), QString("recording"));
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 60000);
         QVERIFY2(QFileInfo(b.lastExport()).size() > 1000, qPrintable(b.message()));
+        QTest::qWait(50);
         QCOMPARE(exits.count(), 1);
-        QTRY_VERIFY_WITH_TIMEOUT(s.stage.card().isEmpty(), 12000);
+        s.stage.closeCard();
+        QVERIFY(s.stage.card().isEmpty());
         QCOMPARE(b.phase(), QString("idle"));
         QTRY_COMPARE(exits.count(), 2);
         QVERIFY(!QDir(session).exists());
