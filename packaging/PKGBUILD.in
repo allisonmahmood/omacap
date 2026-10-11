@@ -1,7 +1,7 @@
 pkgname=omacap
 pkgver=@VERSION@
 pkgrel=1
-pkgdesc='Local screen recorder and quick demo editor for Omarchy'
+pkgdesc='Local screen recorder, screenshot tool and quick demo editor for Omarchy'
 url='https://github.com/allisonmahmood/omacap'
 arch=('x86_64')
 license=('MIT')
