@@ -3472,7 +3472,7 @@ void CaptureEditor::waitForExport() {
 }
 
 void CaptureEditor::handOffEditor(bool toWindow) {
-  if (busy_)
+  if (busy_ || !lookSlider_.isEmpty())
     return;
   if (!picturesReady()) {
     whenPicturesReady([this, toWindow] { handOffEditor(toWindow); });
@@ -3557,7 +3557,9 @@ void CaptureEditor::waitForReopen() {
 }
 
 void CaptureEditor::pinSnapshot() {
-  if (busy_ || pinPending_ || selection_.isEmpty())
+  // A slider drag's look is not in the log yet; the pin would disagree with
+  // its own document.
+  if (busy_ || pinPending_ || !lookSlider_.isEmpty() || selection_.isEmpty())
     return;
 
   if (pinDocument_) {
@@ -3705,6 +3707,12 @@ void CaptureEditor::cancelEditInteraction() {
   if (cutDragActive_) {
     cutDragActive_ = false;
     refreshComposedCapture();
+  }
+  if (!lookSlider_.isEmpty()) {
+    // The drag's live look never entered the log.
+    lookSlider_.clear();
+    look_ = lookBeforeSlider_;
+    refreshCanvasRect();
   }
   if (dragStartStateValid_) {
     replayLog();

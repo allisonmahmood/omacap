@@ -374,6 +374,11 @@ bool checkPopovers(QApplication &application, QString &error) {
   log.previewSize = capture.previewSize;
   CaptureEditor editor(capture, CaptureEditor::CaptureMode::File,
                        QuickOutputMode::None, log);
+  int pins = 0;
+  editor.setProcessLauncherForTest([&pins](const QString &, const QStringList &) {
+    ++pins;
+    return true;
+  });
   editor.resize(800, 600);
   editor.show();
   editor.waitForPictures();
@@ -402,6 +407,13 @@ bool checkPopovers(QApplication &application, QString &error) {
     QTest::mouseMove(&editor, QPoint(qRound(track.left() + track.width() * along),
                                      qRound(track.center().y())));
   const qreal live = editor.currentLookForTest().padding;
+  // Pinning mid-drag would pin the live look with a log that lacks it.
+  QTest::keyClick(&editor, Qt::Key_P, Qt::ControlModifier);
+  QThreadPool::globalInstance()->waitForDone();
+  if (pins != 0) {
+    error = QStringLiteral("Pinning during a slider drag did not wait for it");
+    return false;
+  }
   QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier,
                       QPoint(qRound(track.left() + track.width() * 0.8),
                              qRound(track.center().y())));
@@ -454,6 +466,22 @@ bool checkPopovers(QApplication &application, QString &error) {
   if (editor.lookPopoverForTest() != CaptureEditor::LookPopover::None ||
       editor.annotationCountForTest() != 0) {
     error = QStringLiteral("The look popover stayed open or drew a layer");
+    return false;
+  }
+  // Esc mid-drag drops the drag's look before the editor closes.
+  const CaptureLook settled = editor.currentLookForTest();
+  hover(QStringLiteral("look-frame"));
+  const QRectF shadow = editor.lookControlRectForTest(QStringLiteral("shadow"));
+  QTest::mouseMove(&editor, QPoint(qRound(shadow.center().x()),
+                                   qRound(shadow.top()) - 30));
+  QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier,
+                    QPoint(qRound(shadow.left() + 2), qRound(shadow.center().y())));
+  QTest::mouseMove(&editor, QPoint(qRound(shadow.right() - 2),
+                                   qRound(shadow.center().y())));
+  const bool dragged = editor.currentLookForTest() != settled;
+  QTest::keyClick(&editor, Qt::Key_Escape);
+  if (!dragged || editor.currentLookForTest() != settled) {
+    error = QStringLiteral("Esc during a slider drag kept its look");
     return false;
   }
   editor.close();

@@ -153,8 +153,8 @@ void CaptureEditor::openChooser(QDialog *dialog,
 }
 
 void CaptureEditor::saveAs() {
-  if (busy_ || dragging_ || panning_ || !picturesReady() ||
-      phase_ != Phase::Edit || selection_.isEmpty())
+  if (busy_ || dragging_ || panning_ || !lookSlider_.isEmpty() ||
+      !picturesReady() || phase_ != Phase::Edit || selection_.isEmpty())
     return;
   busy_ = true;
   saveAsActive_ = true;
