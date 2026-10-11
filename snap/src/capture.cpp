@@ -7,6 +7,7 @@
 #include "pin-layout.hpp"
 #include "png.hpp"
 #include "recent-snaps.hpp"
+#include "recording-state.hpp"
 #include "stroke-smoothing.hpp"
 #include "output-config.hpp"
 #include "startup-timing.hpp"
@@ -2380,6 +2381,11 @@ QStringList captureNotificationArguments(const QString &message,
 }
 
 void sendCaptureNotification(const QString &message, const QString &imagePath) {
+  // A notification would show up in OmaCap's own recording.
+  if (recordingInProgress()) {
+    qInfo().noquote() << message;
+    return;
+  }
   QProcess::startDetached(QStringLiteral("omarchy-notification-send"),
                           captureNotificationArguments(message, imagePath));
 }

@@ -38,6 +38,7 @@
 #include "transform-smoke.hpp"
 #include "eyedropper.hpp"
 #include "icons.hpp"
+#include "video-ipc.h"
 
 #include <QApplication>
 #include <QBackingStore>
@@ -49,6 +50,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QEnterEvent>
+#include <QDeadlineTimer>
 #include <QScopeGuard>
 #include <QStandardPaths>
 #include <QThread>
@@ -6334,7 +6336,51 @@ bool runNotificationArgvCheck(QString &error) {
     error = QStringLiteral("--image does not carry the saved path");
     return false;
   }
-  sendCaptureNotification(QStringLiteral("smoke"));
+
+  // Sending runs omarchy-notification-send, here a stand-in that records
+  // what it was asked. While OmaCap records, the notification would be in
+  // the recording: the message goes to the log instead.
+  const QTemporaryDir bin;
+  const QString sent = bin.filePath(QStringLiteral("sent"));
+  QFile sender(bin.filePath(QStringLiteral("omarchy-notification-send")));
+  if (!bin.isValid() || !sender.open(QIODevice::WriteOnly) ||
+      sender.write("#!/bin/sh\necho \"$*\" >> \"$0.log\"\n") < 0 ||
+      !sender.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                             QFileDevice::ExeOwner)) {
+    error = QStringLiteral("Could not prepare the notification stand-in");
+    return false;
+  }
+  sender.close();
+  const QByteArray path = qgetenv("PATH");
+  const auto restorePath = qScopeGuard([&] { qputenv("PATH", path); });
+  qputenv("PATH", bin.path().toUtf8() + ':' + path);
+  const QString log = sender.fileName() + QStringLiteral(".log");
+  const auto sentText = [&] {
+    QFile file(log);
+    return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll())
+                                          : QString();
+  };
+  QFile marker(recordingMarkerPath());
+  if (!marker.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+      marker.write(QByteArray::number(QCoreApplication::applicationPid()) + '\n') < 0) {
+    error = QStringLiteral("Could not write the recording marker");
+    return false;
+  }
+  marker.close();
+  sendCaptureNotification(QStringLiteral("during the recording"));
+  marker.remove();
+  sendCaptureNotification(QStringLiteral("after the recording"));
+  QDeadlineTimer deadline(3000);
+  while (!sentText().contains(QStringLiteral("after the recording")) &&
+         !deadline.hasExpired())
+    QThread::msleep(10);
+  QThread::msleep(100);
+  if (!sentText().contains(QStringLiteral("after the recording")) ||
+      sentText().contains(QStringLiteral("during the recording"))) {
+    error = QStringLiteral("A notification was sent during a recording: %1")
+                .arg(sentText());
+    return false;
+  }
   return true;
 }
 

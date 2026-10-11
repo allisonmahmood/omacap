@@ -69,6 +69,6 @@ exports and spotlight sampling cannot disagree.
   countdown, and other screenshot UI refuses to open. Every other window of an open
   editor or pin process (the editor, its choosers, their message boxes, menus and
   tooltips) goes off screen until it ends, and none shown meanwhile maps
-  (`RecordingConcealment`).
+  (`RecordingConcealment`). Desktop notifications are logged instead.
 
 `README.md` in this directory is upstream's, kept for reference.
