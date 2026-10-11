@@ -80,6 +80,8 @@ Recorder::Recorder(QObject *parent) : QObject(parent) {
 }
 
 Recorder::~Recorder() {
+    // The owner is going away: nobody is left to open the recording, which stays for recovery.
+    worker.disconnect(this);
     if (worker.state() != QProcess::NotRunning) {
         // The worker finalizes the file on SIGINT.
         ::kill(worker.processId(), SIGINT);

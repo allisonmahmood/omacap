@@ -1301,6 +1301,28 @@ class Integration : public QObject {
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
         QFile::remove(first);
     }
+    // Quitting mid-recording finalizes the file, which the next run recovers.
+    void quitWhileRecording() {
+        Theme t;
+        Frames f;
+        QString recording;
+        {
+            Backend b(&t, &f);
+            QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+            QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recording"), 15000);
+            QTest::qWait(1000);
+            recording = b.original();
+        }
+        QVERIFY(!QFile::exists(recordingMarkerPath()));
+        QVERIFY(QFileInfo(recording).size() > 1024);
+        Backend b(&t, &f);
+        QVERIFY(b.recoverable());
+        b.recover();
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QCOMPARE(b.original(), recording);
+        b.discard();
+        QFile::remove(recording);
+    }
     // How the video owner answers `omacap --record`, the capture overlay and opened files.
     void ownerCommands() {
         Theme t;
