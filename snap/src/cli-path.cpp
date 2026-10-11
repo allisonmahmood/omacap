@@ -48,26 +48,40 @@ void configureCaptureCommandLine(QCommandLineParser &parser, bool beforeQt) {
       parser.addOption(option);
     }
   }
+  // `omacap --record` and videos never reach this parser (the top-level
+  // main() sends them to the video process), but the help describes them.
   parser.setApplicationDescription(QStringLiteral(
-      "Native Wayland screenshot and annotation overlay for Hyprland and "
-      "Omarchy.\n"
+      "Screenshots and screen recordings for Omarchy on Hyprland.\n"
       "\n"
-      "With no target, drag for a region, click a window, or click open "
-      "space for\nthe full focused monitor. Captures save, copy to the clipboard, "
-      "and show a\npreview for 10 seconds; use its pin button or Ctrl+P to keep "
-      "it, or Edit to annotate.\n"
-      "Use --editor to edit before output.\n"
+      "  omacap               Pick an area, a window or the monitor to "
+      "screenshot.\n"
+      "  omacap MODE          Start the picker in a mode: smart, region, "
+      "windows,\n"
+      "                       fullscreen or scroll.\n"
+      "  omacap --record      Pick an area to record. Run it again to stop "
+      "the\n"
+      "                       recording.\n"
+      "  omacap IMAGE         Annotate an image in the screenshot editor.\n"
+      "  omacap VIDEO         Edit a video (.mp4, .mkv, .webm, .mov, .m4v, "
+      ".avi, .gif).\n"
       "\n"
-      "Only one capture overlay runs at a time. Starting omacap again while "
-      "an\noverlay is open dismisses it: the running instance is asked to "
-      "quit and the\nnew process exits without capturing, so the same hotkey "
-      "opens and closes the\noverlay. Quick output (--copy, --save) dismisses "
-      "it the same way instead of\nscreenshotting the overlay. With --file (or "
-      "an image path) or --clipboard, the running\ninstance is stopped and "
-      "the editor opens on that image instead.\n"
+      "A screenshot is saved, copied to the clipboard and previewed for 10 "
+      "seconds;\n"
+      "pin the preview (Ctrl+P) to keep it, or Edit it. Press E in the picker, "
+      "or use\n"
+      "--editor, to edit before output. V switches the picker between "
+      "screenshot and\n"
+      "record.\n"
       "\n"
-      "Exit codes: 0 success, including dismissing a running overlay; 1 "
-      "capture,\nimage, or single-instance lock failure; 2 usage error."));
+      "Running omacap while the picker is open closes it, so one key opens "
+      "and closes\n"
+      "it. --copy and --save close it the same way. An image, --file or "
+      "--clipboard\n"
+      "replaces it with the editor on that image.\n"
+      "\n"
+      "Exit codes: 0 success, including closing an open picker; 1 capture, "
+      "image or\n"
+      "lock failure; 2 usage error."));
   parser.addHelpOption();
   parser.addVersionOption();
   const QCommandLineOption fullscreenOption(
@@ -141,8 +155,8 @@ void configureCaptureCommandLine(QCommandLineParser &parser, bool beforeQt) {
   parser.addOption(scrollOption);
   parser.addPositionalArgument(
       QStringLiteral("target"),
-      QStringLiteral("Capture mode (smart, region, windows, fullscreen, scroll) or the "
-                     "path of an image file to edit."),
+      QStringLiteral("Capture mode (smart, region, windows, fullscreen, scroll), an "
+                     "image to annotate, or a video to edit."),
       QStringLiteral("[target]"));
 }
 
