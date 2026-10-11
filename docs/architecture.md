@@ -23,7 +23,9 @@ One `omacap` binary runs one of two apps, chosen in `src/main.cpp` before any
 | `omacap --version` | prints the version |
 
 A video process that loses the race for the video lock forwards its arguments to the one
-that won, so a request or file is acted on once.
+that won, so a request or file is acted on once. A video process exits 1 when the last thing
+it was asked to do failed, such as an invalid `--record-request` or a file that won't open,
+and 0 otherwise.
 
 ## Recording, end to end
 
@@ -111,9 +113,10 @@ Signals and calls between `Backend` and the UI:
   yes discards the session at once. Unsaved edits (`dirty`) are changes since the last
   export; an untouched recording has none, so replacing or closing it never asks.
 - `setUiOpen(bool)` tells the backend whether a card or editor is open, counting one hidden
-  for a recording. The backend alone ends the process: `exitRequested()` follows once that
-  settles with nothing open and the phase `idle`, so it never exits while recording,
+  for a recording. The backend alone ends the process: `exitRequested(code)` follows once
+  that settles with nothing open and the phase `idle`, so it never exits while recording,
   preparing or exporting, or while a session passes through `idle` on its way to another.
+  `code` is 1 when the last session failed (`fail()`), else 0.
 - A failure ends the session. One that never loaded anything, such as a file that won't
   open, is removed; one holding a recording or an edit stays recoverable. Failures with
   nothing open to show them are reported as desktop notifications (`backgroundError()`,

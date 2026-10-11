@@ -152,7 +152,7 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
     exitCheck.setInterval(0);
     connect(&exitCheck, &QTimer::timeout, this, [this] {
         if (!uiOpen && m_phase == "idle")
-            emit exitRequested();
+            emit exitRequested(failed ? 1 : 0);
     });
     seekTimer.setInterval(35);
     seekTimer.setSingleShot(true);
@@ -230,6 +230,8 @@ void Backend::status(QString p, QString m) {
     m_message = m;
     if (p == "idle")
         exitCheck.start();
+    else
+        failed = false;
     emit changed();
 }
 void Backend::fail(const QString &message) {
@@ -237,6 +239,7 @@ void Backend::fail(const QString &message) {
     // recoverable; one that never loaded anything is removed.
     endSession(!QFile::exists(session + "/capture.json") &&
                !QFile::exists(session + "/recovery.json"));
+    failed = true;
     status("idle", message);
     if (!uiOpen)
         emit backgroundError(message);

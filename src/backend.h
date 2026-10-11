@@ -130,9 +130,10 @@ class Backend : public QObject {
     void recordingFinished();
     // A new recording or file would replace unsaved edits. Ask, then call answerReplace().
     void replaceRequested();
-    // The phase is idle and no card or editor is open: the process may exit. Checked once the
-    // current call has returned, so a session on its way to another is not mistaken for none.
-    void exitRequested();
+    // The phase is idle and no card or editor is open: the process may exit, with `code` 1
+    // when the last session failed (fail()), else 0. Checked once the current call has
+    // returned, so a session on its way to another is not mistaken for none.
+    void exitRequested(int code);
     // Something failed while no card or editor is open to say so.
     void backgroundError(const QString &message);
 
@@ -151,7 +152,8 @@ class Backend : public QObject {
     double m_position = 0, m_aspect = 16. / 9, m_progress = 0;
     int sourceWidth = 1920, sourceHeight = 1080, screenRevision = 0, cameraRevision = 0;
     bool m_dirty = false, exportCancelled = false, hasMic = false, hasDesktop = false,
-         hasCamera = false, uiOpen = false, announceRecording = false, recoveredEdits = false;
+         hasCamera = false, uiOpen = false, announceRecording = false, recoveredEdits = false,
+         failed = false;
     std::function<void(bool)> pendingReplace;
     QString captureError;
     QByteArray workerBuffer;

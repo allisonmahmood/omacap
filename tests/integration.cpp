@@ -1390,11 +1390,12 @@ class Integration : public QObject {
         b.discard();
         QFile::remove(recording);
     }
-    // A file that can't be opened leaves no session behind.
+    // A file that can't be opened leaves no session behind, and the process exits 1.
     void failedOpen() {
         Theme t;
         Frames f;
         Backend b(&t, &f);
+        QSignalSpy exits(&b, &Backend::exitRequested);
         QSignalSpy errors(&b, &Backend::backgroundError);
         const QDir scratch(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) +
                            "/scratch");
@@ -1410,6 +1411,14 @@ class Integration : public QObject {
         QCOMPARE(errors.count(), 1);
         QVERIFY(b.sessionPath().isEmpty());
         QCOMPARE(scratch.entryList(QDir::Dirs | QDir::NoDotAndDotDot), sessions);
+        QTRY_COMPARE(exits.count(), 1);
+        QCOMPARE(exits[0][0].toInt(), 1);
+        // A session that ends as asked exits 0.
+        b.loadFile(QDir::current().absoluteFilePath("tests/out/delayed.mkv"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        b.discard();
+        QTRY_COMPARE(exits.count(), 2);
+        QCOMPARE(exits[1][0].toInt(), 0);
     }
     // How the video owner answers `omacap --record`, the capture overlay and opened files.
     void ownerCommands() {
