@@ -19,6 +19,7 @@ class QLocalServer;
 //   {"cmd":"open","path":"/abs/video.mp4"}         Replies {"ok":true} or {"ok":false,"error":…}.
 
 // Per-session runtime directory for OmaCap's sockets, locks and markers (0700).
+// $OMACAP_RUNTIME_DIR overrides it, so tests never meet a running OmaCap.
 QString omacapRuntimeDir();
 QString videoOwnerSocketPath();
 // Exists exactly while a countdown or recording is running. Previews and pins hide while it

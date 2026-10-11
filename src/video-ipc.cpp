@@ -7,8 +7,12 @@
 #include <QStandardPaths>
 
 QString omacapRuntimeDir() {
-    const QString dir =
-        QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation) + "/omacap";
+    // OMACAP_RUNTIME_DIR isolates test runs from a running OmaCap.
+    const QString override = qEnvironmentVariable("OMACAP_RUNTIME_DIR");
+    const QString dir = !override.isEmpty()
+                            ? override
+                            : QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation) +
+                                  "/omacap";
     QDir().mkpath(dir);
     QFile::setPermissions(dir, QFileDevice::ReadOwner | QFileDevice::WriteOwner |
                                    QFileDevice::ExeOwner);
