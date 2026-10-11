@@ -615,7 +615,9 @@ public:
       close();
     });
     // Out of sight, and out of reach, while OmaCap records: the card paints
-    // nothing and takes no input, and a preview's countdown waits.
+    // nothing and takes no input, and a preview's countdown waits. The window
+    // stays mapped where it is; its rule draws no border, shadow, blur or
+    // dim, so a transparent card shows nothing.
     connect(&recording_, &RecordingWatcher::recordingChanged, this, [this] {
       updateCardMask();
       updateExpiryPause();
@@ -1844,7 +1846,7 @@ int runPinnedCapture(const QString &path, PinLifetime lifetime) {
                         "match = { class = \"^omacap$\", title = \"^omacap-pin [0-9]+$\" }, "
                         "float = true, pin = true, no_initial_focus = true, "
                         "no_follow_mouse = false, border_size = 0, rounding = 0, "
-                        "no_shadow = true, no_blur = true })")}, &ok);
+                        "no_shadow = true, no_blur = true, no_dim = true })")}, &ok);
     return ok && !output.contains(QStringLiteral("error"), Qt::CaseInsensitive);
   };
   auto *rules = new QFutureWatcher<bool>(&window);
