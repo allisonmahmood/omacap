@@ -1,4 +1,5 @@
 #pragma once
+#include <QDateTime>
 #include <QJsonObject>
 #include <QList>
 #include <QObject>
@@ -43,6 +44,24 @@ QString recordingMarkerPath();
 QList<qint64> recordingMarkerPids();
 // Whether `pid` is running. One that has exited but not been reaped is not.
 bool processRunning(qint64 pid);
+
+// One decimal id per line: the desktop notifications OmaCap processes have shown, each sent with
+// `omarchy-notification-send -p`, which prints its id. A recording closes all of them when it
+// starts and empties the file, and its countdown lasts until a toast the daemon keeps up anyway
+// has expired, so none is on screen once it records. Senders check the marker and append their
+// id under an exclusive flock(2) on the file, as sendNotification() does; the recorder takes the
+// ids under the same lock, after writing the marker.
+QString notificationIdsPath();
+// Shows `omarchy-notification-send args` and lists its id, unless a recording runs (it would be
+// recorded). Waits for the notification daemon, up to a few seconds. False when nothing was shown.
+bool sendNotification(const QStringList &args);
+// What notificationIdsPath() lists, emptying it: the ids, and when the newest was listed
+// (invalid when none was).
+struct ShownNotifications {
+    QList<quint32> ids;
+    QDateTime newest;
+};
+ShownNotifications takeShownNotifications();
 
 // Sends one command to the running video process. Returns its reply, or nothing when no
 // video process is running or it did not answer in time.

@@ -19,9 +19,16 @@ more is kept, even before the main loop runs. The screen must keep the size the 
 for: a stream that changes size ends the recording before any frame of the new size is kept,
 and one that breaks off (XDPH's does when the monitor's mode changes) ends it too; either way
 the file keeps what was recorded before.
+
+The recorded monitor must also keep the shape OmaCap placed its chrome for. A thread asks
+Hyprland about it every POLL seconds (--display is how it was when recording was requested), and
+a screen frame reaches the file only once an answer asked for after the frame was rendered
+still matched. An answer that differs ends the recording before the change. A stop drains what
+is held back only once an answer has caught up with its cut. A microphone, desktop audio or
+camera that fails ends the recording too, keeping every track up to then.
 """
 
-import argparse, json, os, signal, subprocess, sys, threading, time
+import argparse, json, os, signal, socket, subprocess, sys, threading, time
 from pathlib import Path
 import dbus, dbus.mainloop.glib
 import gi
@@ -34,12 +41,14 @@ p.add_argument("--output", required=True)
 p.add_argument("--monitor", default="", help="Hyprland name of the monitor to record")
 p.add_argument("--size", default="", help="the monitor's native WxH, to validate the stream")
 p.add_argument("--crop", default="", help="x,y,w,h in the monitor's native pixels")
+p.add_argument("--display", default="", help="the monitor's Display.FIELDS as JSON, to watch")
 p.add_argument("--token", default="", help="restore token from an earlier recording")
 p.add_argument("--mic", default="")
 p.add_argument("--desktop", action="store_true")
 p.add_argument("--camera", default="")
 p.add_argument("--synthetic", action="store_true", help="test sources instead of devices")
 p.add_argument("--seconds", type=int, default=0, help="start at once, stop after this long")
+p.add_argument("--break-after", default="", help="synthetic: SOURCE:SECONDS into the recording, it fails")
 Gst.init(None)
 dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
 loop = GLib.MainLoop()
@@ -51,6 +60,8 @@ fd = None
 request_path = None
 finished = False
 stopping = False
+drained = False
+broken = set()  # sources that failed mid-recording; drain() ends their tracks
 streaming = False
 started = set()
 count = 0
@@ -64,6 +75,14 @@ OFFSET_NONE = Gst.BUFFER_OFFSET_NONE
 MAX_WIDTH, MAX_HEIGHT = 3840, 2160
 # How long encoded buffers wait before the file. A stop's `at` may lie this far in the past.
 HOLD = Gst.SECOND
+# How often Hyprland is asked about the recorded monitor, and how long an answer may take, in
+# seconds. A screen frame needs an answer asked for after it before it leaves the hold, so HOLD
+# is comfortably longer than both together.
+POLL, POLL_TIMEOUT = 0.25, 0.3
+# How long a stop waits for an answer newer than its cut before cutting at the last one.
+SETTLE = Gst.SECOND
+# The sources besides the screen, as a failure names them.
+DEVICES = {"mic": "microphone", "desktop": "desktop audio", "camera": "camera"}
 # The video process that started this worker; once it dies, this process is re-parented.
 parent = os.getppid()
 
@@ -135,6 +154,70 @@ class Cut:
 cut = Cut()
 
 
+class Display:
+    """The recorded monitor as Hyprland describes it, watched from a thread of its own.
+
+    `verified` is when the newest answer that still matched the baseline was asked for, so the
+    monitor was unchanged until then; frame timestamps are on the same clock. An answer that
+    differs, or a monitor Hyprland no longer lists, ends the recording at `verified`. One that
+    fails or comes late leaves `verified` where it was, so frames since wait for a newer one.
+    Hyprland sends no event when a monitor's scale, transform or mode changes, hence the polling."""
+
+    FIELDS = ("width", "height", "scale", "transform", "x", "y", "mirrorOf", "disabled")
+
+    def __init__(self, name="", baseline=None):
+        self.name = name
+        # None: nothing to watch (synthetic sources)
+        self.baseline = None if baseline is None else {k: baseline.get(k) for k in self.FIELDS}
+        self.verified = None
+        self.changed = False
+        self.wake = threading.Event()  # asks again at once
+
+    def covers(self, pts):
+        """Whether the monitor was seen unchanged after `pts`."""
+        verified = self.verified
+        return self.baseline is None or (verified is not None and pts <= verified)
+
+    def cut_back(self):
+        """Keeps nothing the watch hasn't covered."""
+        verified = self.verified
+        cut.end(-1 if verified is None else verified)
+
+    def state(self):
+        """The monitor's FIELDS, {} when Hyprland doesn't list it, None when it didn't answer."""
+        path = os.path.join(os.environ.get("XDG_RUNTIME_DIR", ""), "hypr",
+                            os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""), ".socket.sock")
+        try:
+            with socket.socket(socket.AF_UNIX) as hyprland:
+                hyprland.settimeout(POLL_TIMEOUT)
+                hyprland.connect(path)
+                hyprland.sendall(b"j/monitors")  # what `hyprctl -j monitors` asks
+                monitors = json.loads(b"".join(iter(lambda: hyprland.recv(1 << 16), b"")))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(monitors, list):
+            return None
+        monitor = next((m for m in monitors if isinstance(m, dict) and m.get("name") == self.name), None)
+        return {} if monitor is None else {k: monitor.get(k) for k in self.FIELDS}
+
+    def watch(self):
+        while not finished:
+            asked = now()
+            state = self.state()
+            if state == self.baseline:
+                self.verified = asked
+            elif state is not None:
+                self.changed = True
+                self.cut_back()
+                GLib.idle_add(interrupt, "The display changed, so OmaCap stopped recording.")
+                return
+            self.wake.wait(POLL)
+            self.wake.clear()
+
+
+display = Display()
+
+
 def finish(error=""):
     global finished, exitcode
     if finished:
@@ -188,16 +271,47 @@ def stop(at=None):
     stopping = True
     emit("stopping")
     if pipeline:
-        pipeline.send_event(Gst.Event.new_eos())
-        GLib.timeout_add_seconds(
-            6,
-            lambda: finish(
-                "Recording finalization timed out; recoverable media was retained."
-            ),
-        )
+        settle(drain)
     else:
         finish()
     return False
+
+
+def settle(then):
+    """Runs `then` once the display watch has caught up with the cut's end, or the cut has gone
+    back to where the watch got: what is held back is never written unwatched."""
+    display.wake.set()
+    deadline = now() + SETTLE
+
+    def check():
+        if not display.covers(cut.until) and not display.changed:
+            if now() < deadline:
+                return True
+            display.cut_back()
+        then()
+        return False
+
+    if check():
+        GLib.timeout_add(10, check)
+
+
+def drain():
+    """Ends every track, so what is held back reaches the file and the file is finished."""
+    global drained
+    drained = True
+    for source in broken:
+        end_track(source)
+    pipeline.send_event(Gst.Event.new_eos())
+    GLib.timeout_add_seconds(
+        6,
+        lambda: finish("Recording finalization timed out; recoverable media was retained."),
+    )
+
+
+def end_track(source):
+    """Ends a track whose source broke off and so can't end it."""
+    gate = pipeline.get_by_name(f"{source}_gate").get_static_pad("sink")
+    gate.send_event(Gst.Event.new_eos())
 
 
 def begin(after):
@@ -356,22 +470,41 @@ def shared(result):
     start(node, props)
 
 
+def source_of(element):
+    """The source whose branch holds `element` ("screen", "mic", …), from the names start()
+    gives; None for what the tracks share, such as the muxer."""
+    while element is not None:
+        if (name := element.get_name().split("_")[0]) in ("screen", *DEVICES):
+            return name
+        element = element.get_parent()
+    return None
+
+
 def message(_, msg):
-    if msg.type == Gst.MessageType.ERROR:
-        err, _ = msg.parse_error()
-        if msg.src.get_name() != "screen" or cut.epoch is None:
-            finish(str(err))
-            return
-        # The screen stream broke off, as XDPH's does when the monitor's mode changes. What was
-        # recorded is kept: the screen track ends here, and the file is finished as on a stop.
+    if msg.type == Gst.MessageType.EOS:
+        finish()
+        return
+    if msg.type != Gst.MessageType.ERROR:
+        return
+    err, _ = msg.parse_error()
+    source = source_of(msg.src)
+    if source is None or cut.epoch is None:
+        finish(str(err))
+        return
+    # A source broke off mid-recording. What was recorded is kept: the recording stops as on a
+    # stop, and the broken track ends where its source did.
+    broken.add(source)
+    if drained:
+        end_track(source)
+    if source == "screen":
+        # XDPH's stream breaks off when the monitor's mode changes, and the held frames may
+        # already show the change: the stop drains them once the display watch has caught up.
         cut.close()
-        gate = pipeline.get_by_name("screen_gate").get_static_pad("sink")
-        gate.send_event(Gst.Event.new_eos())
         interrupt(
             "The screen stream ended, as it does when the display changes, so OmaCap stopped recording."
         )
-    elif msg.type == Gst.MessageType.EOS:
-        finish()
+    else:
+        interrupt(f"The {DEVICES[source]} stopped working, so OmaCap stopped recording.")
 
 
 def opening(epoch):
@@ -419,11 +552,17 @@ def screen_events(pad, info, size):
 
 
 def written(pad, info, name):
-    """After the hold: drops what a later cut excludes, and counts the screen frames saved."""
+    """After the hold: drops what a later cut excludes, and counts the screen frames saved. A
+    screen frame the display watch hasn't caught up with ends the recording before it: the
+    watch has stalled, and the frame might show the chrome moved into the area."""
     global count
     buf = info.get_buffer()
-    if buf.pts != Gst.CLOCK_TIME_NONE and not cut.keeps(buf.pts):
-        return Gst.PadProbeReturn.DROP
+    if buf.pts != Gst.CLOCK_TIME_NONE:
+        if name == "screen" and cut.keeps(buf.pts) and not display.covers(buf.pts):
+            display.cut_back()
+            GLib.idle_add(interrupt, "OmaCap couldn't check the display, so it stopped recording.")
+        if not cut.keeps(buf.pts):
+            return Gst.PadProbeReturn.DROP
     if name == "screen":
         count += 1
     return Gst.PadProbeReturn.OK
@@ -483,6 +622,30 @@ def desktop_monitor():
     return result.stdout.strip() + ".monitor"
 
 
+def fault(source):
+    """With --break-after naming `source`, where it will fail (see breaks)."""
+    return f" ! identity name={source}_fault" if a.break_after.startswith(source + ":") else ""
+
+
+def breaks(source, seconds):
+    """--break-after: a probe that fails `source` `seconds` after `start`, as a stream that
+    breaks off or an unplugged device does, and passes nothing from it after."""
+    failed = False
+
+    def probe(pad, info):
+        nonlocal failed
+        after = cut.after
+        if not failed and after is not None and info.get_buffer().pts > after + seconds * Gst.SECOND:
+            failed = True
+            element = pipeline.get_by_name(source)
+            problem = GLib.Error.new_literal(
+                Gst.ResourceError.quark(), "Broken off", int(Gst.ResourceError.READ))
+            element.post_message(Gst.Message.new_error(element, problem, "--break-after"))
+        return Gst.PadProbeReturn.DROP if failed else Gst.PadProbeReturn.OK
+
+    return probe
+
+
 gates = []
 
 
@@ -490,7 +653,7 @@ def start(node=None, props=None):
     global pipeline
     if a.synthetic:
         width, height = 1280, 720
-        source = f"videotestsrc name=screen is-live=true pattern=smpte ! video/x-raw,width={width},height={height},framerate=30/1"
+        source = f"videotestsrc name=screen is-live=true pattern=smpte ! video/x-raw,width={width},height={height},framerate=30/1{fault('screen')}"
     else:
         width, height = (int(v) for v in props.get("size", (1920, 1080)))
         target = (
@@ -518,14 +681,14 @@ def start(node=None, props=None):
     )
     if a.camera:
         cam = (
-            "videotestsrc name=camera is-live=true pattern=ball ! video/x-raw,width=640,height=480,framerate=30/1"
+            f"videotestsrc name=camera is-live=true pattern=ball ! video/x-raw,width=640,height=480,framerate=30/1{fault('camera')}"
             if a.synthetic
-            else "v4l2src name=camera do-timestamp=true ! decodebin"
+            else "v4l2src name=camera do-timestamp=true ! decodebin name=camera_decode"
         )
         desc += f"{cam} ! identity name=camera_gate ! queue ! videoconvert ! videoscale ! video/x-raw,format=I420,width=640,height=480 ! vp8enc deadline=1 cpu-used=8 threads=2 ! {hold} name=camera_hold ! mux.video_1 "
     for i, name in enumerate(n for n in ["mic", "desktop"] if getattr(a, n)):
         source = (
-            f"audiotestsrc name={name} is-live=true freq={440 + i * 440}"
+            f"audiotestsrc name={name} is-live=true freq={440 + i * 440}{fault(name)}"
             if a.synthetic
             else f"pulsesrc name={name} do-timestamp=true"
         )
@@ -562,6 +725,10 @@ def start(node=None, props=None):
             screen_events,
             (width, height),
         )
+        if a.break_after:
+            source, _, seconds = a.break_after.partition(":")
+            pipeline.get_by_name(f"{source}_fault").get_static_pad("src").add_probe(
+                Gst.PadProbeType.BUFFER, breaks(source, float(seconds)))
         for name, title in TRACK_TITLES.items():
             element = pipeline.get_by_name(f"{name}_title")
             if element:
@@ -576,10 +743,13 @@ def start(node=None, props=None):
 
 
 def main():
-    global a, output, bus, portal
+    global a, output, bus, portal, display
     a = p.parse_args()
     output = Path(a.output)
     output.parent.mkdir(parents=True, exist_ok=True)
+    if a.display:
+        display = Display(a.monitor, json.loads(a.display))
+        threading.Thread(target=display.watch, daemon=True).start()
     GLib.io_add_watch(sys.stdin, GLib.IO_IN | GLib.IO_HUP, read_commands)
     try:
         if a.synthetic:

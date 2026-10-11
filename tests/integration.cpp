@@ -1393,6 +1393,41 @@ class Integration : public QObject {
                                                    {"description", "Screenrecording"}}})),
                  QString());
     }
+    // A request is recorded only on the monitor as it was picked on.
+    void requestedDisplay() {
+        RecordRequest request;
+        request.monitor = "DP-1";
+        request.monitorLogical = QRect(1920, 0, 1280, 800);
+        request.scale = 2;
+        request.area = QRect(0, 0, 100, 100);
+        QJsonObject monitor{{"name", "DP-1"},   {"width", 2560},       {"height", 1600},
+                            {"scale", 2},       {"transform", 0},      {"x", 1920},
+                            {"y", 0},           {"mirrorOf", "none"},  {"disabled", false},
+                            {"focused", true}};
+        const auto answer = [](const QJsonObject &monitor) {
+            return QJsonDocument(QJsonArray{QJsonObject{{"name", "HDMI-A-1"}}, monitor}).toJson();
+        };
+        const auto state = ::requestedDisplay(request, answer(monitor));
+        QVERIFY(state);
+        QCOMPARE(state->keys(), (QStringList{"disabled", "height", "mirrorOf", "scale",
+                                             "transform", "width", "x", "y"}));
+        QCOMPARE((*state)["width"].toInt(), 2560);
+        // A new scale, a flip, a new mode or a move since the area was picked.
+        for (const auto &[field, value] : {std::pair<QString, QJsonValue>{"scale", 1.6},
+                                           {"transform", 4},
+                                           {"width", 1920},
+                                           {"x", 0}}) {
+            QJsonObject changed = monitor;
+            changed[field] = value;
+            QVERIFY2(!::requestedDisplay(request, answer(changed)), qPrintable(field));
+        }
+        QVERIFY(!::requestedDisplay(request, "[]"));
+        // A rotated monitor's logical sides are swapped.
+        request.transform = 1;
+        request.monitorLogical = QRect(1920, 0, 800, 1280);
+        monitor["transform"] = 1;
+        QVERIFY(::requestedDisplay(request, answer(monitor)));
+    }
     // The marker lists this process and the worker from the request until the worker has
     // exited; a cancelled countdown leaves no recording behind.
     void recordingLifecycle() {
@@ -1402,8 +1437,14 @@ class Integration : public QObject {
         QSignalSpy finished(&b, &Backend::recordingFinished);
         QSignalSpy exits(&b, &Backend::exitRequested);
         const QString marker = recordingMarkerPath();
+        // Notifications shown before go as the recording starts.
+        QFile shown(notificationIdsPath());
+        QVERIFY(shown.open(QIODevice::WriteOnly));
+        shown.write("41\n42\n");
+        shown.close();
         QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
         QCOMPARE(b.phase(), QString("countdown"));
+        QCOMPARE(QFileInfo(notificationIdsPath()).size(), 0);
         const QList<qint64> pids = recordingMarkerPids();
         QCOMPARE(pids.size(), 2);
         QCOMPARE(pids[0], QCoreApplication::applicationPid());
@@ -1544,7 +1585,8 @@ class Integration : public QObject {
         QTemporaryDir bin;
         QFile notifier(bin.filePath("omarchy-notification-send"));
         QVERIFY(notifier.open(QIODevice::WriteOnly));
-        notifier.write("#!/bin/sh\nfor last; do :; done\nprintf '%s\\n' \"$last\" >>\"$0.log\"\n");
+        notifier.write("#!/bin/sh\nfor last; do :; done\nprintf '%s\\n' \"$last\" >>\"$0.log\"\n"
+                       "echo 7\n");
         notifier.close();
         notifier.setPermissions(QFileDevice::ReadOwner | QFileDevice::ExeOwner);
         const QByteArray path = qgetenv("PATH");
@@ -1585,6 +1627,7 @@ class Integration : public QObject {
         auto forwarded = QtConcurrent::run([open] { return forwardToVideoOwner(open); });
         QTRY_VERIFY(forwarded.isFinished());
         QCOMPARE(forwarded.result(), std::optional(1));
+        QVERIFY(!sendNotification({"OmaCap", "Recorded if it were shown."}));
         QTest::qWait(300);
         QVERIFY(notified().isEmpty());
         QCOMPARE(ask(recordKey)["action"].toString(), QString("stopped"));
@@ -1593,6 +1636,11 @@ class Integration : public QObject {
         QTRY_COMPARE(notified(),
                      (QStringList{didntOpen, didntOpen,
                                   "OmaCap was recording, so it didn't start another recording."}));
+        // Each is listed, for the next recording to close.
+        QFile shown(notificationIdsPath());
+        QVERIFY(shown.open(QIODevice::ReadOnly));
+        QCOMPARE(shown.readAll(), QByteArray("7\n7\n7\n"));
+        QVERIFY(shown.remove()); // they would lengthen later tests' countdowns
         qputenv("PATH", path);
 
         QCOMPARE(ask(open)["ok"].toBool(), true);

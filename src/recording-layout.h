@@ -1,6 +1,7 @@
 #pragma once
 #include "record-request.h"
 #include <QByteArray>
+#include <QJsonObject>
 #include <QList>
 #include <QRect>
 #include <QSize>
@@ -32,6 +33,13 @@ QRect encodedArea(const RecordRequest &request);
 // Places the chrome for `request`. `monitors` lists every monitor, including the recorded one.
 RecordingLayout layoutRecording(const RecordRequest &request, const QList<Monitor> &monitors,
                                 QSize hudSize, QSize countdownSize);
+
+// The recorded monitor in `hyprctl -j monitors` output, as the capture worker watches it
+// (--display): its mode, scale, transform, position and mirroring. Nothing when it is gone or no
+// longer as `request` describes it, i.e. the display changed after the area was picked, and the
+// chrome and crop would be placed wrongly.
+std::optional<QJsonObject> requestedDisplay(const RecordRequest &request,
+                                            const QByteArray &monitorsJson);
 
 // The key that runs `omacap --record`, from `hyprctl binds -j`, e.g. "Super + Alt + R".
 // Binds made in Lua configs only expose their description, so one naming OmaCap and

@@ -3,6 +3,9 @@
 #include "recording-layout.h"
 #include "video-ipc.h"
 #include <QCoreApplication>
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDBusPendingCall>
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
@@ -13,14 +16,52 @@
 #include <QWindow>
 #include <signal.h>
 #include <sys/prctl.h>
+#include <algorithm>
 #include <unistd.h>
 
 namespace {
 QString tokenKey(const QString &monitor) { return "restoreTokens/" + monitor; }
 
-// How late Qt may tell us that a monitor changed. A stop after a change cuts this far back;
-// the worker holds encoded frames back for longer (HOLD), so none rendered since is saved.
+// A stop after Qt tells of a display change cuts this far back; the worker holds encoded frames
+// back for longer (HOLD). The worker's own watch of the recorded monitor is what bounds the cut;
+// Qt's notice hides the chrome at once, and also covers the HUD's monitor.
 constexpr qint64 changeNoticeNs = 500'000'000;
+
+// `hyprctl args`'s output, or nothing when Hyprland didn't answer in time.
+std::optional<QByteArray> hyprctl(const QStringList &args) {
+    QProcess process;
+    process.start("hyprctl", args);
+    if (!process.waitForFinished(2000) || process.exitStatus() != QProcess::NormalExit ||
+        process.exitCode() != 0)
+        return std::nullopt;
+    return process.readAllStandardOutput();
+}
+
+// How long Omarchy's shell may keep a toast up: five seconds, for the low urgency OmaCap
+// sends, plus its fade. It keeps a toast a sender has closed until then.
+constexpr qint64 toastLifetimeMs = 6000;
+
+// Closes every notification an OmaCap process has shown (notificationIdsPath()): one sent just
+// before the request may still be on screen, and must be gone before the first kept frame.
+// Returns once every close is answered, within a second, with when the last may still show
+// all the same: a notification daemon need not take a toast down when its sender closes it.
+QDeadlineTimer closeNotifications() {
+    const ShownNotifications shown = takeShownNotifications();
+    QList<QDBusPendingCall> closing;
+    for (const quint32 id : shown.ids) {
+        QDBusMessage close = QDBusMessage::createMethodCall(
+            "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications", "CloseNotification");
+        close << id;
+        closing << QDBusConnection::sessionBus().asyncCall(close, 1000);
+    }
+    for (QDBusPendingCall &call : closing)
+        call.waitForFinished();
+    if (!shown.newest.isValid())
+        return QDeadlineTimer(0);
+    return QDeadlineTimer(std::max<qint64>(
+        0, QDateTime::currentDateTime().msecsTo(shown.newest.addMSecs(toastLifetimeMs))));
+}
 
 // Nothing but the recording chrome may be on screen once a recording starts. The editor and
 // card hide on the countdown phase; this makes sure.
@@ -108,10 +149,24 @@ Recorder::~Recorder() {
 QString Recorder::start(const RecordRequest &next, const QString &path, bool synthetic) {
     if (m_state != State::Idle)
         return "OmaCap is already recording.";
+    // The chrome and the crop are placed for the monitor as the area was picked on it. The
+    // worker records only while it stays that way, so one that changed since gets neither.
+    QJsonObject display;
+    if (!synthetic) {
+        const auto monitors = hyprctl({"-j", "monitors"});
+        if (!monitors)
+            return "OmaCap couldn't ask Hyprland about the displays.";
+        const auto current = requestedDisplay(next, *monitors);
+        if (!current)
+            return "The display changed; pick the area again.";
+        display = *current;
+    }
     // First of all: while the marker lists this process, no other OmaCap surface shows.
     if (const QString problem = publishMarker({QCoreApplication::applicationPid()});
         !problem.isEmpty())
         return "OmaCap can't record: " + problem;
+    // Then none is shown any more, and those still on screen go before the countdown ends.
+    toastsGone = closeNotifications();
     request = next;
     output = path;
     error.clear();
@@ -145,6 +200,8 @@ QString Recorder::start(const RecordRequest &next, const QString &path, bool syn
                          .arg(crop.y())
                          .arg(crop.width())
                          .arg(crop.height())};
+    if (!display.isEmpty())
+        args << "--display" << QJsonDocument(display).toJson(QJsonDocument::Compact);
     if (const QString token = settings.value(tokenKey(request.monitor)).toString();
         !token.isEmpty())
         args << "--token" << token;
@@ -229,6 +286,8 @@ void Recorder::parseWorker() {
         } else if (event == "streaming" && m_state == State::Countdown) {
             if (hideWindows)
                 hideOtherWindows(*chrome);
+            // The countdown outlasts any OmaCap notification still on screen.
+            m_countdown = std::max<int>(m_countdown, (toastsGone.remainingTime() + 999) / 1000);
             chrome->showCountdown(m_countdown);
             countdownTimer.start();
         } else if (event == "recording") {
@@ -238,7 +297,11 @@ void Recorder::parseWorker() {
                 setState(State::Recording);
         } else if (event == "stopping") {
             // Nothing captured from now on is kept, so the chrome may go and this process's
-            // windows may show again. The marker stays until the worker has exited.
+            // windows may show again. The marker stays until the worker has exited. The worker
+            // also stops by itself, e.g. when the display changed, perhaps mid-countdown.
+            countdownTimer.stop();
+            if (m_state == State::Countdown || m_state == State::Recording)
+                setState(State::Stopping);
             guard.reset();
             if (chrome)
                 chrome->hide();

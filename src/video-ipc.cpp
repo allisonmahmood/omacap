@@ -1,16 +1,38 @@
 #include "video-ipc.h"
+#include <QDeadlineTimer>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QPointer>
+#include <QProcess>
 #include <QStandardPaths>
+#include <QThread>
+#include <algorithm>
 #include <cerrno>
 #include <poll.h>
 #include <signal.h>
+#include <sys/file.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+
+namespace {
+// Opens notificationIdsPath() and locks it, waiting up to `timeoutMs`. Closing it unlocks.
+// False when it can't be opened or stays locked; it may be open then all the same.
+bool lockNotificationIds(QFile &file, int timeoutMs) {
+    if (!file.open(QIODevice::ReadWrite))
+        return false;
+    const QDeadlineTimer deadline(timeoutMs);
+    while (::flock(file.handle(), LOCK_EX | LOCK_NB) != 0) {
+        if ((errno != EWOULDBLOCK && errno != EINTR) || deadline.hasExpired())
+            return false;
+        QThread::msleep(5);
+    }
+    return true;
+}
+} // namespace
 
 QString omacapRuntimeDir() {
     // OMACAP_RUNTIME_DIR isolates test runs from a running OmaCap.
@@ -40,6 +62,43 @@ QList<qint64> recordingMarkerPids() {
             pids << pid;
     }
     return pids;
+}
+
+QString notificationIdsPath() { return omacapRuntimeDir() + "/notifications"; }
+
+bool sendNotification(const QStringList &args) {
+    // Under the lock, a recording that starts now either has its marker seen here, or finds
+    // this notification's id once it takes them.
+    QFile ids(notificationIdsPath());
+    if (!lockNotificationIds(ids, 3000) ||
+        std::ranges::any_of(recordingMarkerPids(), processRunning))
+        return false;
+    QProcess send;
+    send.start("omarchy-notification-send", QStringList{"-p"} + args);
+    if (!send.waitForFinished(2000))
+        return false;
+    bool ok = false;
+    if (const quint32 id = send.readAllStandardOutput().trimmed().toUInt(&ok); ok && id) {
+        ids.seek(ids.size());
+        ids.write(QByteArray::number(id) + '\n');
+    }
+    return send.exitStatus() == QProcess::NormalExit && send.exitCode() == 0;
+}
+
+ShownNotifications takeShownNotifications() {
+    // A sender holds the lock for two seconds at most, so its id is in by then.
+    QFile file(notificationIdsPath());
+    lockNotificationIds(file, 2500);
+    ShownNotifications shown;
+    for (const QByteArray &line : file.readAll().split('\n')) {
+        bool ok = false;
+        if (const quint32 id = line.trimmed().toUInt(&ok); ok && id)
+            shown.ids << id;
+    }
+    if (!shown.ids.isEmpty())
+        shown.newest = QFileInfo(file).lastModified();
+    file.resize(0);
+    return shown;
 }
 
 bool processRunning(qint64 pid) {

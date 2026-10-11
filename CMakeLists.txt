@@ -7,7 +7,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 6.8 REQUIRED COMPONENTS
-  Concurrent Core Gui Widgets Qml Quick QuickControls2 Multimedia OpenGL Network Test)
+  Concurrent Core DBus Gui Widgets Qml Quick QuickControls2 Multimedia OpenGL Network Test)
 # The capture overlay and the recording chrome are layer-shell surfaces.
 find_package(LayerShellQt REQUIRED)
 
@@ -44,7 +44,7 @@ target_compile_features(omacap-video PUBLIC cxx_std_23)
 target_compile_options(omacap-video PRIVATE -Wall -Wextra)
 # omasnap-core supplies the recording chrome's theme and fonts.
 target_link_libraries(omacap-video PUBLIC omacap-ipc omasnap-core
-  Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickControls2
+  Qt6::Core Qt6::DBus Qt6::Gui Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickControls2
   Qt6::Multimedia Qt6::OpenGL Qt6::Network)
 
 qt_add_executable(omacap

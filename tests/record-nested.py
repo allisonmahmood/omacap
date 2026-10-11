@@ -3,7 +3,8 @@
 
     scripts/nested-hyprland.sh start STATE && scripts/nested-portal.sh start STATE
     tests/record-nested.py STATE [--area X,Y,W,H] [--monitor NAME] [--omacap PATH]
-                                 [--interrupt scale|mode|kill-owner]
+                                 [--interrupt scale|mode|transform|kill-owner] [--stall-owner]
+                                 [--notify closes|keeps] [--stale]
 
 Runs `omacap --record-request`, stops with `omacap --record`, and decodes every frame of
 the saved recording. A magenta theme paints the countdown, HUD and OmaCap's windows; the
@@ -13,10 +14,19 @@ harness's. Needs a client drawing in the area (e.g. a terminal) so frames keep a
 
 --interrupt ends the recording another way, and the file must still be clean and end before
 it: `scale` doubles the nested monitor's scale (which moves the chrome into the area), `mode`
-changes its resolution, `kill-owner` SIGKILLs the video process, whose worker must stop.
+changes its resolution, `transform` flips it (Qt doesn't report flips), `kill-owner` SIGKILLs
+the video process, whose worker must stop. --stall-owner stops the video process for two
+seconds around the change, so only the worker can react to it.
+
+--notify shows an OmaCap notification just before the request: a magenta toast over the area,
+from tests/notification-daemon.qml on the harness's bus. With `closes` it would stay up for a
+minute, so only OmaCap closing it takes it down; with `keeps` a close does nothing and it
+expires after five seconds, as Omarchy's shell keeps toasts.
+
+--stale changes the monitor's scale after the request was made, and OmaCap must refuse it.
 """
 
-import argparse, json, os, subprocess, sys, tempfile, time
+import argparse, atexit, json, os, signal, subprocess, sys, tempfile, time
 from pathlib import Path
 import numpy as np
 
@@ -27,7 +37,10 @@ p.add_argument("--area", default="300,200,800,500", help="logical x,y,w,h on the
 p.add_argument("--monitor", default="")
 p.add_argument("--omacap", default=str(repo / "build/omacap"))
 p.add_argument("--seconds", type=float, default=3)
-p.add_argument("--interrupt", choices=["scale", "mode", "kill-owner"])
+p.add_argument("--interrupt", choices=["scale", "mode", "transform", "kill-owner"])
+p.add_argument("--stall-owner", action="store_true")
+p.add_argument("--notify", choices=["closes", "keeps"])
+p.add_argument("--stale", action="store_true")
 a = p.parse_args()
 state = Path(a.state).resolve()
 
@@ -59,22 +72,72 @@ request = {"monitor": monitor["name"], "monitorX": monitor["x"], "monitorY": mon
            "areaHeight": h, "mic": "", "camera": "", "desktopAudio": False}
 picks = state / "portal/picker.log"
 picked = len(picks.read_text().splitlines()) if picks.exists() else 0
+marker = run / "runtime/recording"
+mode = f'{monitor["width"]}x{monitor["height"]}@{monitor["refreshRate"]:.2f}'
+rule = f'{monitor["name"]},{{}},{monitor["x"]}x{monitor["y"]},{{}}'
+restore = rule.format(mode, scale)
+
+
+def set_monitor(value):
+    subprocess.run(["hyprctl", "keyword", "monitor", value], env=env, check=True,
+                   stdout=subprocess.DEVNULL)
+
+
+def layers():
+    found = json.loads(subprocess.check_output(["hyprctl", "layers", "-j"], env=env))
+    return [layer["namespace"] for output in found.values()
+            for level in output["levels"].values() for layer in level]
+
+
+if a.stale:
+    # The area was picked before the monitor changed: placing the chrome for the old one could
+    # put it in the area, so OmaCap refuses before showing anything.
+    try:
+        set_monitor(rule.format(mode, scale * 2))
+        refused = subprocess.run([a.omacap, "--record-request", json.dumps(request)], env=env,
+                                 capture_output=True, text=True, timeout=30)
+    finally:
+        set_monitor(restore)
+    assert refused.returncode == 1, refused
+    assert "The display changed; pick the area again." in refused.stderr, refused.stderr
+    assert not marker.exists() and not list((run / "videos").glob("*")), refused
+    print("PASS: a request for a changed display is refused")
+    sys.exit(0)
+
+daemon = None
+if a.notify:
+    daemon = subprocess.Popen(
+        ["quickshell", "-p", str(repo / "tests/notification-daemon.qml")],
+        env=env | ({"OMACAP_TEST_KEEP_CLOSED": "1"} if a.notify == "keeps"
+                   else {"OMACAP_TEST_TOAST_MS": "60000"}),
+        stdout=open(run / "notifications.log", "w"), stderr=subprocess.STDOUT)
+    atexit.register(daemon.terminate)
+    deadline = time.monotonic() + 15
+    while b"org.freedesktop.Notifications" not in subprocess.run(
+            ["busctl", "--user", "list", "--no-legend"], env=env, capture_output=True).stdout:
+        assert daemon.poll() is None and time.monotonic() < deadline, "no notification daemon"
+        time.sleep(0.1)
+    # A notification of OmaCap's own, just before the request: a refused request's.
+    failed = subprocess.run([a.omacap, "--record-request", "{}"], env=env, timeout=30,
+                            capture_output=True)
+    assert failed.returncode == 1, failed
+    assert (run / "runtime/notifications").read_text().strip(), "its id wasn't listed"
+    assert "omacap-test-notification" in layers(), "no toast shown"
 
 owner = subprocess.Popen([a.omacap, "--record-request", json.dumps(request)], env=env,
                          stdout=open(run / "owner.log", "w"), stderr=subprocess.STDOUT)
-marker = run / "runtime/recording"
 deadline = time.monotonic() + 30
 while not marker.exists():
     assert owner.poll() is None and time.monotonic() < deadline, (run / "owner.log").read_text()
     time.sleep(0.05)
 requested = time.monotonic()
 assert marker.read_text().split()[0] == str(owner.pid), marker.read_text()
-time.sleep(4 + a.seconds)  # the countdown, then the recording
+# The countdown, then the recording. After a notification the countdown also waits out the
+# toast, as OmaCap can't tell whether the daemon took it down.
+time.sleep(4 + a.seconds + (3 if a.notify else 0))
 # The video process, then its worker: OmaCap stays hidden while either runs.
 pids = [int(pid) for pid in marker.read_text().split()]
 assert len(pids) == 2 and pids[0] == owner.pid, pids
-mode = f'{monitor["width"]}x{monitor["height"]}@{monitor["refreshRate"]:.2f}'
-rule = f'{monitor["name"]},{{}},{monitor["x"]}x{monitor["y"]},{{}}'
 interrupted = time.monotonic()
 if a.interrupt == "kill-owner":
     owner.kill()
@@ -84,19 +147,25 @@ if a.interrupt == "kill-owner":
         time.sleep(0.05)
     assert not os.path.exists(f"/proc/{pids[1]}"), "the worker outlived its owner"
 elif a.interrupt:
-    # Both end the recording by themselves; the monitor is put back afterwards.
-    changed = rule.format(mode, scale * 2) if a.interrupt == "scale" else rule.format(
-        f'{monitor["width"] * 4 // 5}x{monitor["height"] * 4 // 5}', scale)
+    # Each ends the recording by itself; the monitor is put back afterwards.
+    changed = {"scale": rule.format(mode, scale * 2),
+               "mode": rule.format(f'{monitor["width"] * 4 // 5}x{monitor["height"] * 4 // 5}',
+                                   scale),
+               "transform": rule.format(mode, scale) + ",transform,4"}[a.interrupt]
     try:
-        subprocess.run(["hyprctl", "keyword", "monitor", changed], env=env, check=True,
-                       stdout=subprocess.DEVNULL)
+        if a.stall_owner:
+            owner.send_signal(signal.SIGSTOP)
+        set_monitor(changed)
+        if a.stall_owner:
+            time.sleep(2)
+            owner.send_signal(signal.SIGCONT)
         deadline = time.monotonic() + 15
         while marker.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         assert not marker.exists(), "the recording went on after the display changed"
     finally:
-        subprocess.run(["hyprctl", "keyword", "monitor", rule.format(mode, scale)], env=env,
-                       stdout=subprocess.DEVNULL)
+        owner.send_signal(signal.SIGCONT)
+        set_monitor(restore)
 else:
     stop = subprocess.run([a.omacap, "--record"], env=env, timeout=10)
     assert stop.returncode == 0

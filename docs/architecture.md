@@ -38,11 +38,11 @@ and 0 otherwise.
    card instead; pressing the record key again picks as usual.
 2. The picker hands a `RecordRequest` (`src/record-request.h`: monitor, area, devices) to
    the video process with `record`, starting one if none runs.
-3. The video process records the monitor through the portal, cropped to the area before
-   encoding, so nothing outside the area is ever saved. Its recording chrome stays
-   outside the area, or on another monitor, or is not shown. From the request until the
-   capture worker has exited, `recordingMarkerPath()` lists both processes and no other
-   OmaCap surface shows.
+3. The video process refuses a request whose monitor has changed since the area was picked,
+   then records the monitor through the portal, cropped to the area before encoding, so
+   nothing outside the area is ever saved. Its recording chrome stays outside the area, or on
+   another monitor, or is not shown. From the request until the capture worker has exited,
+   `recordingMarkerPath()` lists both processes and no other OmaCap surface shows.
 4. After stopping, the video process shows its card, then the editor on request.
 
 ## Keeping OmaCap out of its own recordings
@@ -60,12 +60,17 @@ make that hold:
   pixels, else on another monitor, else are not shown (`src/recording-layout.*`). A HUD
   whose monitor disappears is hidden, never moved. Stopping uses the record hotkey, which
   the countdown names (from `hyprctl binds -j`).
-- **Display changes.** The chrome keeps its place in logical pixels, so a new scale, size or
-  rotation of the recorded monitor (or the HUD's) can move it into the area. The chrome is
-  then made transparent and hidden at once, and the recording ends half a second before Qt
-  told of the change. The worker holds encoded frames back for a second before writing
-  them, so a cut in the past still drops what was rendered since. A notification says why
-  once the capture has ended.
+- **Display changes.** The chrome keeps its place in logical pixels, so a new scale, size,
+  rotation or flip of the recorded monitor (or the HUD's) can move it into the area. A
+  request is checked against `hyprctl -j monitors` first: one whose monitor changed since the
+  area was picked is refused ("The display changed; pick the area again."), and the state it
+  matched is what the worker watches. Hyprland sends no event for these changes, so the
+  worker asks its socket about the monitor every 250 ms. It holds encoded frames back for a
+  second, and a screen frame leaves that hold only once an answer asked for after the frame
+  was rendered still matched: an answer that differs ends the recording at the last one that
+  didn't, and answers that stop coming end it there too. Qt's notice of a change, when it
+  comes, makes the chrome transparent and hides it at once. A notification says why the
+  recording ended once the capture has ended.
 - **A clean first frame.** The countdown is drawn over the area. When it ends, it is
   repainted fully transparent (an unmapped surface would fade out on screen), and once the
   compositor has applied that, its monotonic time is the cut. XDPH stamps every frame with
@@ -73,13 +78,22 @@ make that hold:
   the cut; every track starts there. Earlier frames, including the countdown and the
   capture overlay's fade, are never written.
 - **A clean last frame.** Stopping cuts at the moment of the request; the chrome hides
-  only after the worker confirms it will keep nothing later.
+  only after the worker confirms it will keep nothing later. The worker writes out what it
+  holds only once the display watch has caught up with the cut, also when the screen stream
+  breaks off (XDPH's does when the mode changes). A microphone, desktop audio or camera that
+  fails ends the recording as a stop does, keeping every track up to then.
 - **A dying video process.** Its worker gets SIGTERM (`PR_SET_PDEATHSIG`) and finishes the
   file, but stops keeping frames as soon as a pad probe sees it was re-parented, whatever its
   main loop is doing. The marker lists the worker, so other surfaces stay hidden until it
   has exited.
 - **Notifications.** None is sent while the marker lists a running process. A `record` or
-  `open` refused during a capture is shown by the video process once it has ended.
+  `open` refused during a capture is shown by the video process once it has ended. One shown
+  just before a capture could still be up, so every OmaCap process sends them with
+  `omarchy-notification-send -p` and lists the id it prints in `notificationIdsPath()`, under
+  a lock on that file (`sendNotification()`). A recording takes the ids as soon as its marker
+  is written and closes each over D-Bus before showing anything. Omarchy's shell keeps a closed
+  toast up until it expires, five seconds after it appeared, so the countdown also lasts until
+  six seconds after the newest.
 - **Other windows.** Starting a recording ends the session, which closes the editor and
   card, and ends an offer to recover an earlier edit. `VideoStage` hides anything still
   open when the phase becomes `countdown`, at least three seconds before the first kept
