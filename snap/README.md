@@ -1,5 +1,8 @@
 # Omasnap
 
+> Upstream's README, kept as the reference for Omasnap's behaviour. OmaCap's
+> changes (its identity, look, record mode) are listed in [VENDORED.md](VENDORED.md).
+
 See the [changelog](CHANGELOG.md) for release highlights and unreleased changes.
 
 A native Wayland screenshot and annotation overlay designed for Omarchy and Hyprland.

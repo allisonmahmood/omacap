@@ -1,5 +1,8 @@
 # Omasnap — Agent Guide
 
+> In OmaCap this directory is vendored and changed: read [VENDORED.md](VENDORED.md)
+> for what differs (identity, the look, record mode) before relying on this guide.
+
 Omasnap is a super fast, native Wayland screenshot and annotation overlay,
 built for [Omarchy](https://omarchy.org) on Hyprland. It captures region,
 window, or full monitor (plus a scrolling-region mode that stitches a taller
