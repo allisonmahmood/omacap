@@ -813,6 +813,7 @@ void Backend::endEdit() {
     if (groupBefore != state.json()) {
         past.append(Edit::fromJson(groupBefore));
         future.clear();
+        emit changed(); // dirty
     }
     checkpoint();
 }

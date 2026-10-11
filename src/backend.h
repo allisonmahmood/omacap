@@ -84,7 +84,7 @@ class Backend : public QObject {
     // A failure that leaves nothing loaded: back to idle, with backgroundError() when no card
     // or editor is open to show it.
     void fail(const QString &message);
-    Q_INVOKABLE void loadFile(QString path);
+    void loadFile(QString path);
     Q_INVOKABLE void seek(double seconds);
     Q_INVOKABLE double toSourceTime(double t) const { return state.sourceTime(t); }
     Q_INVOKABLE double toEditedTime(double t) const { return state.editedTime(t); }
