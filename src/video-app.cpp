@@ -40,8 +40,9 @@ int runVideoApp(int argc, char **argv) {
     VideoOwner owner;
     if (!owner.acquire()) {
         // Another video process started first: it records the request or opens the file.
-        if (const auto forwarded = forwardToVideoOwner(app.arguments().mid(1)))
-            return *forwarded;
+        if (const auto command = videoCommand(app.arguments().mid(1)))
+            if (const auto forwarded = forwardToVideoOwner(*command))
+                return *forwarded;
         qWarning("OmaCap is already running.");
         return 1;
     }

@@ -23,7 +23,9 @@ class QLocalServer;
 //                         `record`.
 //
 // A command that would replace unsaved edits asks the user first, so its reply can wait for
-// them (answerTimeoutMs).
+// them (answerTimeoutMs). A refusal while a capture runs also carries "deferred":true: the
+// video process tells the user itself once the capture has ended, and the caller must not
+// show it (a notification now would be recorded).
 
 // Per-session runtime directory for OmaCap's sockets, locks and markers (0700).
 // $OMACAP_RUNTIME_DIR overrides it, so tests never meet a running OmaCap.
