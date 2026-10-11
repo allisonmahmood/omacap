@@ -194,7 +194,9 @@ class Backend : public QObject {
     void ready();
     void openPlayers();
     qint64 screenSeekEnd = 0;
-    void snapshotWallpaper();
+    // Copies the Omarchy wallpaper into the session and calls `done` with the copy, so the
+    // edit keeps its background when the wallpaper changes. At once for formats Qt reads.
+    void snapshotWallpaper(const std::function<void(const QString &)> &done);
     void syncPlayers(bool force = false);
     void parseWorker();
 

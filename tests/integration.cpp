@@ -1668,7 +1668,13 @@ class Integration : public QObject {
         QSignalSpy waveformChanges(&b, &Backend::waveformsChanged);
         QString frozen = b.edit()["background"].toString();
         QVERIFY(!frozen.isEmpty());
-        QVERIFY(QFile::exists(frozen));
+        // The session's own copy of the wallpaper, byte for byte: nothing re-encodes it.
+        const auto bytes = [](const QString &path) {
+            QFile file(path);
+            return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+        };
+        QCOMPARE(QFileInfo(frozen).absolutePath(), b.sessionPath());
+        QCOMPARE(bytes(frozen), bytes(themeRoot.path() + "/background"));
         b.setValue("crop", QVariantList{.1, .05, .8, .9});
         b.setValue("padding", .08);
         int z = b.addZoom(.2);

@@ -299,32 +299,44 @@ void Backend::newSession() {
     recoveredEdits = false;
     m_lastExport.clear();
     m_original.clear();
-    snapshotWallpaper();
+    snapshotWallpaper([this](const QString &wallpaper) {
+        state.background = wallpaper;
+        emit editChanged();
+        if (m_phase == "editor")
+            checkpoint();
+    });
 }
-void Backend::snapshotWallpaper() {
-    QString path = theme->wallpaper();
+void Backend::snapshotWallpaper(const std::function<void(const QString &)> &done) {
+    const QString path = theme->wallpaper();
     if (path.isEmpty())
         return;
-    QImageReader reader(path);
-    auto size = reader.size();
-    if (size.width() > 3840)
-        reader.setScaledSize(size.scaled(3840, 2160, Qt::KeepAspectRatio));
-    QImage image = reader.read();
-    QString dest =
-        session + "/wallpaper-" + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".png";
-    if (image.isNull()) {
-        QProcess p;
-        p.start("ffmpeg",
-                {"-v", "error", "-i", path, "-frames:v", "1", "-vf", "scale=1920:-2", dest});
-        if (!p.waitForFinished(10000)) {
-            p.kill();
-            p.waitForFinished();
-        }
-        if (p.exitCode() != 0)
-            return;
-    } else if (!image.save(dest))
+    const QString stem =
+        session + "/wallpaper-" + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".";
+    // The file as it is, at once: re-encoding a 4K wallpaper held up the countdown for over a
+    // second. Composition decodes no more of it than a 4K export needs.
+    if (QImageReader reader(path); reader.canRead()) {
+        const QString copy = stem + QString::fromLatin1(reader.format());
+        if (QFile::copy(path, copy))
+            done(copy);
         return;
-    state.background = dest;
+    }
+    // A format only FFmpeg reads is converted in the background, and used once it has been.
+    const QString converted = stem + "png", converting = session;
+    auto ffmpeg = new QProcess(this);
+    ffmpeg->setChildProcessModifier([] { prctl(PR_SET_PDEATHSIG, SIGKILL); });
+    connect(ffmpeg, &QProcess::errorOccurred, ffmpeg, [ffmpeg](QProcess::ProcessError e) {
+        if (e == QProcess::FailedToStart)
+            ffmpeg->deleteLater();
+    });
+    QTimer::singleShot(10000, ffmpeg, &QProcess::kill);
+    connect(ffmpeg, &QProcess::finished, this,
+            [this, ffmpeg, converted, converting, done](int code, QProcess::ExitStatus exit) {
+                ffmpeg->deleteLater();
+                if (code == 0 && exit == QProcess::NormalExit && session == converting)
+                    done(converted);
+            });
+    ffmpeg->start("ffmpeg",
+                  {"-v", "error", "-i", path, "-frames:v", "1", "-vf", "scale=1920:-2", converted});
 }
 void Backend::checkpoint() {
     if (session.isEmpty())
@@ -1037,9 +1049,13 @@ void Backend::chooseBackground() {
 void Backend::useWallpaper() {
     if (m_phase != "editor")
         return;
-    push();
-    snapshotWallpaper();
-    edited();
+    snapshotWallpaper([this](const QString &wallpaper) {
+        if (m_phase != "editor")
+            return;
+        push();
+        state.background = wallpaper;
+        edited();
+    });
 }
 void Backend::exportVideo(bool gif, int w, int fps, int q) {
     if (m_phase != "editor")
