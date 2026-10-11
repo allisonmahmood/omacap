@@ -230,19 +230,29 @@ bool RecentSnapWriter::record(const QImage &source, const OperationLog &log,
   const QStringList names = thumbNamesNewestFirst(dir);
   for (qsizetype index = kRecentSnapLimit; index < names.size(); ++index)
     removeRecentSnap(snapForStem(dir, stemOf(names.at(index))));
-  // Backdrop pictures live as long as a kept capture or the remembered look
-  // shows them.
+  // Backdrop pictures live as long as the remembered look or a retained
+  // document shows them: a kept capture, or a pin, an editor's working
+  // document or a handoff in the runtime directory.
   QSet<QString> pictures{loadLastLook().image};
-  for (const QString &name : names.mid(0, kRecentSnapLimit)) {
-    const RecentSnap kept = snapForStem(dir, stemOf(name));
+  const auto keepPicturesOf = [&pictures](const QString &logPath) {
     OperationLog keptLog;
     QString ignored;
-    if (kept.logPath.isEmpty() ||
-        !loadOperationLog(kept.logPath, keptLog, ignored))
-      continue;
+    if (!loadOperationLog(logPath, keptLog, ignored))
+      return;
     for (const Operation &op : keptLog.ops)
       if (op.type == Operation::Type::Look)
         pictures << op.look.wallpaper << op.look.image;
+  };
+  for (const QString &name : names.mid(0, kRecentSnapLimit)) {
+    const RecentSnap kept = snapForStem(dir, stemOf(name));
+    if (!kept.logPath.isEmpty())
+      keepPicturesOf(kept.logPath);
+  }
+  if (const QString runtime = secureRuntimeDirectory(); !runtime.isEmpty()) {
+    const QDir live(runtime);
+    for (const QString &name :
+         live.entryList({QStringLiteral("*.json")}, QDir::Files))
+      keepPicturesOf(live.filePath(name));
   }
   pruneBackdropAssets(pictures);
   return true;

@@ -1,5 +1,6 @@
 #include "recent-persistence-smoke.hpp"
 
+#include "backdrop-assets.hpp"
 #include "capture.hpp"
 #include "capture-state.hpp"
 #include "cli-path.hpp"
@@ -10,6 +11,7 @@
 #include <QByteArray>
 #include <QCommandLineParser>
 #include <QChar>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QIODevice>
@@ -18,6 +20,7 @@
 #include <QPromise>
 #include <QScopeGuard>
 #include <QSemaphore>
+#include <QStandardPaths>
 #include <QString>
 #include <QStringList>
 #include <QTemporaryDir>
@@ -80,6 +83,56 @@ bool checkReplacement(const QImage &image, const QDir &, QString &error) {
   }
   for (const auto &snap : listRecentSnaps())
     removeRecentSnap(snap);
+  return true;
+}
+
+/// Recording a capture prunes stored pictures a day old that nothing shows
+/// any more, never one a pin or an open editor's document still shows.
+bool checkBackdropPruning(const QImage &image, QString &error) {
+  const QTemporaryDir pictures;
+  // Its own shelf, so the other checks see theirs unchanged.
+  const QByteArray shelf = qgetenv("OMACAP_RECENT_DIR");
+  const auto restoreShelf = qScopeGuard([&] { qputenv("OMACAP_RECENT_DIR", shelf); });
+  qputenv("OMACAP_RECENT_DIR", pictures.filePath(QStringLiteral("recent")).toUtf8());
+  const auto storeAged = [&](const QColor &color) {
+    QImage picture(8, 8, QImage::Format_RGB32);
+    picture.fill(color);
+    const QString path = pictures.filePath(color.name().mid(1) + QStringLiteral(".png"));
+    QString ignored;
+    const QString id = picture.save(path) ? importBackdropAsset(path, ignored) : QString();
+    QFile stored(QDir(QStandardPaths::writableLocation(
+                          QStandardPaths::GenericStateLocation))
+                     .filePath(QStringLiteral("omacap/backdrops/") + id));
+    const bool aged = !id.isEmpty() && stored.open(QIODevice::ReadWrite) &&
+                      stored.setFileTime(QDateTime::currentDateTime().addDays(-2),
+                                         QFileDevice::FileModificationTime);
+    return std::pair{aged ? id : QString(), stored.fileName()};
+  };
+  const auto [pinned, pinnedFile] = storeAged(Qt::red);
+  const auto [unused, unusedFile] = storeAged(Qt::blue);
+  Operation look;
+  look.type = Operation::Type::Look;
+  look.look.backdrop = BackgroundStyle::Image;
+  look.look.image = pinned;
+  OperationLog pinLog;
+  pinLog.ops = {look};
+  pinLog.index = 1;
+  const QString pinLogPath = QDir(secureRuntimeDirectory())
+                                 .filePath(QStringLiteral("pin-1-1-0123456789abcdef.json"));
+  const auto removePin = qScopeGuard([&] { QFile::remove(pinLogPath); });
+  if (pinned.isEmpty() || unused.isEmpty() ||
+      !saveOperationLog(pinLogPath, pinLog, error)) {
+    if (error.isEmpty())
+      error = QStringLiteral("Could not prepare the pruning fixture");
+    return false;
+  }
+  if (!recordRecentSnap(image, {}, image, error))
+    return false;
+  if (!QFile::exists(pinnedFile) || QFile::exists(unusedFile)) {
+    error = QStringLiteral("Pruning removed a pinned document's backdrop, or "
+                           "kept an unused one");
+    return false;
+  }
   return true;
 }
 
@@ -341,6 +394,7 @@ bool runRecentPersistenceSmoke(QApplication &application, QString &error) {
   capture.previewSize = capture.source.size();
   if (!checkPublication(capture.source, root, error) ||
       !checkReplacement(capture.source, root, error) ||
+      !checkBackdropPruning(capture.source, error) ||
       !checkDestruction(capture, error) ||
       !checkWallpaperBackdrop(capture, error))
     return false;
