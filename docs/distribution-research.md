@@ -1,6 +1,6 @@
 # Publishing OmaCap for Omarchy
 
-Investigated 2026-09-25. The decision is to release on GitHub first and defer AUR. See [the release guide](releasing.md) for the implementation. The original proposal below is retained as research.
+Investigated 2026-09-25. The decision is to release on GitHub first and defer AUR. See [the release guide](releasing.md) for the implementation. The original proposal below is retained as research; it describes the repository as it was then. The build has since moved to CMake, and the Omasnap-derived capture side added `layer-shell-qt`, `libdeflate`, `wayland` and Tesseract to the dependencies. [The package recipe](../packaging/PKGBUILD.in) has the current list.
 
 AUR package pushes reopened in August, but new account registration remains closed according to [the latest maintainer response found](https://lists.archlinux.org/archives/list/aur-general%40lists.archlinux.org/thread/62O5WXJRV6VZESY7WBAFL7SZKJVTF6DW/). The maintainer does not currently have a confirmed AUR account, so AUR is not a first-release dependency.
 
@@ -8,7 +8,7 @@ AUR package pushes reopened in August, but new account registration remains clos
 
 Publish a versioned GitHub release and an AUR `omacap-bin` package. The intended install command is `yay -S omacap-bin`, with no local compilation. Omarchy users can also find it under **Install > AUR** once the package exists. Normal **Update > Omarchy** includes installed AUR packages. There is no need for an OmaCap updater or a separately maintained pacman repository. The install and update behavior is documented in Omarchy's [package manual](https://github.com/omacom/omarchy/blob/93e8cd56b19df756a6435b0c0e8ed5073d192c36/manual/29-other-packages.md) and [update manual](https://github.com/omacom/omarchy/blob/93e8cd56b19df756a6435b0c0e8ed5073d192c36/manual/30-updates.md).
 
-Build and test the binary against the supported Omarchy stable package set. The current manual says its stable Arch mirror runs one month behind latest Arch. A binary built against newer Qt, FFmpeg or system libraries might therefore fail on stable Omarchy. This compatibility risk is an inference from the mirror policy and OmaCap's shared-library dependencies. Keep latest-Arch CI as an additional check, but it does not establish stable-Omarchy compatibility. If stable binary builds need more work, publish a source-building `omacap` AUR package first. [Omarchy update policy](https://github.com/omacom/omarchy/blob/93e8cd56b19df756a6435b0c0e8ed5073d192c36/manual/30-updates.md)
+Build and test the binary against the supported Omarchy stable package set. The current manual says its stable Arch mirror runs one month behind latest Arch. A binary built against newer Qt, FFmpeg, layer-shell-qt, Tesseract or other system libraries might therefore fail on stable Omarchy. This compatibility risk is an inference from the mirror policy and OmaCap's shared-library dependencies. Keep latest-Arch CI as an additional check, but it does not establish stable-Omarchy compatibility. If stable binary builds need more work, publish a source-building `omacap` AUR package first. [Omarchy update policy](https://github.com/omacom/omarchy/blob/93e8cd56b19df756a6435b0c0e8ed5073d192c36/manual/30-updates.md)
 
 ## Current state
 
