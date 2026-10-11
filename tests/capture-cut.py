@@ -3,7 +3,10 @@
 
 import importlib.util
 import json
+import os
+import socket
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -193,5 +196,125 @@ expect("finished")
 assert exits(worker, 10), "the orphaned worker kept running"
 orphan_duration = duration_of(orphan)
 assert abs(orphan_duration - (killed - start) / 1e9) < 0.1, (orphan_duration, killed - start)
+
+
+class Hyprland:
+    """A stand-in for Hyprland's socket that answers `j/monitors` with `monitors`, after
+    `delay` seconds; `hang` holds every request without an answer."""
+
+    def __init__(self):
+        self.runtime = tempfile.mkdtemp(prefix="hypr-")
+        self.env = os.environ | {"XDG_RUNTIME_DIR": self.runtime, "HYPRLAND_INSTANCE_SIGNATURE": "test"}
+        os.makedirs(f"{self.runtime}/hypr/test")
+        self.monitor = {"name": "TEST-1", "width": 1280, "height": 720, "scale": 1, "transform": 0,
+                        "x": 0, "y": 0, "mirrorOf": "none", "disabled": False, "focused": True}
+        self.monitors, self.delay, self.hang = [self.monitor], 0, False
+        self.server = socket.socket(socket.AF_UNIX)
+        self.server.bind(f"{self.runtime}/hypr/test/.socket.sock")
+        self.server.listen(16)
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        while True:
+            client, _ = self.server.accept()
+            threading.Thread(target=self.answer, args=(client, self.monitors, self.delay,
+                                                       self.hang), daemon=True).start()
+
+    def answer(self, client, monitors, delay, hang):
+        with client:
+            if client.recv(64) != b"j/monitors" or hang:
+                time.sleep(2)
+                return
+            time.sleep(delay)
+            try:
+                client.sendall(json.dumps(monitors).encode())
+            except OSError:
+                pass  # the worker gave up waiting
+
+    def baseline(self):
+        return json.dumps({k: self.monitor[k] for k in capture.Display.FIELDS})
+
+
+# The watch reads the recorded monitor from Hyprland's socket.
+hyprland = Hyprland()
+os.environ |= hyprland.env
+watched = capture.Display("TEST-1", json.loads(hyprland.baseline()))
+assert watched.state() == watched.baseline
+assert capture.Display("DP-9", None).state() == {}  # not listed: gone
+hyprland.hang = True
+assert watched.state() is None  # no answer in time
+hyprland.hang = False
+os.environ["HYPRLAND_INSTANCE_SIGNATURE"] = "none"
+assert watched.state() is None
+os.environ |= hyprland.env
+
+
+def watched_recording(name, *args, change=None, at=1.5):
+    """Records against `hyprland` from 0.3 s after streaming. `at` seconds after streaming,
+    `change(hyprland)` runs, or else the recording is stopped. Returns the start, that time,
+    the errors, the duration and the file."""
+    global worker
+    path = out / f"{name}.mkv"
+    path.unlink(missing_ok=True)
+    hyprland.monitors, hyprland.delay, hyprland.hang = [hyprland.monitor], 0, False
+    worker = subprocess.Popen(
+        ["/usr/bin/python", str(repo / "scripts/capture.py"), "--synthetic", "--output", str(path),
+         "--monitor", "TEST-1", "--display", hyprland.baseline(), *args],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=hyprland.env,
+    )
+    expect("streaming")
+    streaming = now()
+    start = streaming + 300_000_000
+    send(cmd="start", after=start)
+    expect("recording")
+    changed = streaming + int(at * 1e9)
+    sleep_until(changed)
+    if change:
+        change(hyprland)
+    else:
+        send(cmd="stop")
+    events = [json.loads(line) for line in worker.stdout]
+    assert worker.wait(timeout=10) == 0, events
+    assert events[-1]["event"] == "finished" and events[-1]["frames"] > 0, events
+    errors = [e["message"] for e in events if e["event"] == "error"]
+    return start, changed, errors, duration_of(path), path
+
+
+def rescale(hyprland):
+    hyprland.monitors = [hyprland.monitor | {"scale": 2}]
+
+
+# A stop waits for the watch to catch up, then keeps everything up to it.
+start, _, errors, kept, _ = watched_recording("watched-stop", at=1.3)
+assert not errors and 0.9 < kept < 1.1, (errors, kept)
+# A display change ends the recording before it, though frames since have been encoded.
+start, changed, errors, kept, _ = watched_recording("display-change", change=rescale)
+assert errors == ["The display changed, so OmaCap stopped recording."], errors
+assert (changed - start) / 1e9 - 0.5 < kept < (changed - start) / 1e9 + 0.04, (kept, changed - start)
+
+
+def stall(hyprland):
+    hyprland.hang = True
+
+
+# A watch that gets no answers keeps nothing it hasn't seen.
+start, changed, errors, kept, _ = watched_recording("stalled-watch", change=stall)
+assert errors == ["OmaCap couldn't check the display, so it stopped recording."], errors
+assert kept < (changed - start) / 1e9 + 0.04, (kept, changed - start)
+
+
+def unseen_change(hyprland):
+    rescale(hyprland)
+    hyprland.delay = 0.29  # answers just in time, after the screen breaks
+
+
+# The screen breaks off (as XDPH's does on a mode change) 0.15 s after a change the watch
+# hasn't reported yet: what is held back waits for it, so nothing since the change is kept.
+start, changed, errors, kept, _ = watched_recording(
+    "screen-break", "--break-after", "screen:1.15", change=unseen_change, at=1.3)
+assert errors == ["The screen stream ended, as it does when the display changes, so OmaCap "
+                  "stopped recording."], errors
+assert kept < (changed - start) / 1e9 + 0.04, (kept, changed - start)
+
 print(f"PASS: worker cut {duration:.3f}s, track starts {starts}; a late stop "
-      f"{late_duration:.3f}s, an orphan {orphan_duration:.3f}s")
+      f"{late_duration:.3f}s, an orphan {orphan_duration:.3f}s; the display watch")
