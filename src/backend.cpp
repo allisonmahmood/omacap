@@ -7,9 +7,12 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QImageReader>
+#include <QJSValue>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QLocale>
 #include <QMediaDevices>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QUrl>
@@ -19,6 +22,8 @@
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#include <utility>
 namespace {
 QJsonObject readJson(const QString &path) {
     QFile f(path);
@@ -33,6 +38,28 @@ void writeJson(const QString &path, const QJsonObject &o) {
         f.commit();
     }
 }
+// Where a session's capture was written. Older sessions kept it inside the session.
+QString capturedRecording(const QString &session) {
+    return readJson(session + "/capture.json")["recording"].toString(session + "/recording.mkv");
+}
+// The status shown after an export: its size, plus a warning when a GIF is too big to
+// attach on GitHub or Discord.
+QString exportedMessage(const QString &path) {
+    const qint64 bytes = QFileInfo(path).size();
+    QString message = "Export complete. " +
+                      QLocale().formattedDataSize(bytes, 1, QLocale::DataSizeSIFormat) + ".";
+    if (path.endsWith(".gif", Qt::CaseInsensitive) && bytes > 10'000'000)
+        message += " GitHub and Discord reject GIFs over 10 MB. A smaller width or frame rate "
+                   "makes a smaller file.";
+    return message;
+}
+// Saved screenshots go where Omarchy's do.
+QString screenshotDirectory() {
+    const QString configured = qEnvironmentVariable("OMARCHY_SCREENSHOT_DIR");
+    return configured.isEmpty()
+               ? QStandardPaths::writableLocation(QStandardPaths::PicturesLocation) + "/Screenshots"
+               : configured;
+}
 } // namespace
 Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames(f) {
     recoveryRoot =
@@ -43,6 +70,13 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
     camera.setVideoSink(&cameraSink);
     mic.setAudioOutput(&micOutput);
     desktop.setAudioOutput(&desktopOutput);
+    // An output keeps the device that was the default when it was created. Follow the
+    // system default so playback continues after headphones disconnect.
+    connect(&devices, &QMediaDevices::audioOutputsChanged, this, [this] {
+        const auto output = QMediaDevices::defaultAudioOutput();
+        micOutput.setDevice(output);
+        desktopOutput.setDevice(output);
+    });
     connect(&peaks, &Waveforms::changed, this, &Backend::waveformsChanged);
     connect(&screenSink, &QVideoSink::videoFrameChanged, this, &Backend::presentScreen);
     connect(&screen, &QMediaPlayer::seekableChanged, this, [this](bool seekable) {
@@ -104,8 +138,8 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
             applySeek();
             return;
         }
-        seeking = false;
         pause();
+        seeking = false;
         m_message = "Playback could not reach this frame. Try seeking again.";
         emit changed();
     });
@@ -131,6 +165,10 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
             [this](int code, QProcess::ExitStatus) {
                 parseWorker();
                 countdownTimer.stop();
+                if (m_phase == "exporting" && m_kind == "image") {
+                    finishStill(code);
+                    return;
+                }
                 if (m_phase == "exporting") {
                     if (exportCancelled) {
                         QFile::remove(partialExport);
@@ -143,7 +181,7 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
                             m_lastExport = pendingExport;
                             m_dirty = state.json() != exportedEdit;
                             checkpoint();
-                            status("editor", "Export complete.");
+                            status("editor", exportedMessage(pendingExport));
                         } else
                             status("editor", "Export finished but could not move into place. "
                                              "The temporary output is retained at " +
@@ -161,12 +199,16 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
                 }
                 if (m_phase == "selecting" || m_phase == "countdown" || m_phase == "recording" ||
                     m_phase == "stopping") {
-                    if (QFileInfo(session + "/recording.mkv").size() > 1024) {
-                        prepare(session + "/recording.mkv", true);
-                    } else
+                    if (QFileInfo(m_original).size() > 1024) {
+                        prepare(m_original, true);
+                    } else {
+                        // Only a container header was written; don't leave it in Videos.
+                        QFile::remove(m_original);
+                        m_original.clear();
                         status("recorder", captureError.isEmpty()
                                                ? "Recording stopped before video was received."
                                                : captureError);
+                    }
                 }
             });
     connect(&worker, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) {
@@ -176,6 +218,7 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
     });
 }
 Backend::~Backend() {
+    endFreeze();
     if (worker.state() != QProcess::NotRunning) {
         if (m_phase == "exporting")
             worker.terminate();
@@ -222,7 +265,9 @@ void Backend::newSession() {
     screenRevision = cameraRevision = 0;
     m_position = 0;
     m_dirty = true;
+    m_kind = "video";
     m_lastExport.clear();
+    m_original.clear();
     snapshotWallpaper();
 }
 void Backend::snapshotWallpaper() {
@@ -258,8 +303,11 @@ void Backend::checkpoint() {
                                            {"screenStart", screenStart},
                                            {"cameraStart", cameraStart},
                                            {"sourceWidth", sourceWidth},
+                                           {"sourceHeight", sourceHeight},
+                                           {"kind", m_kind},
                                            {"dirty", m_dirty},
-                                           {"lastExport", m_lastExport}});
+                                           {"lastExport", m_lastExport},
+                                           {"original", m_original}});
 }
 void Backend::record(QString microphone, QString cam, bool desk, bool synthetic) {
     if (m_phase != "recorder")
@@ -271,9 +319,17 @@ void Backend::record(QString microphone, QString cam, bool desk, bool synthetic)
     lead = 0;
     captureError.clear();
     workerBuffer.clear();
+    // Captures are saved beside the user's other videos, outside the disposable session.
+    const QString videos = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+    QDir().mkpath(videos);
+    const QString name =
+        videos + "/omacap-" + QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss");
+    m_original = name + ".mkv";
+    for (int i = 2; QFile::exists(m_original); ++i)
+        m_original = name + QString("-%1.mkv").arg(i);
     QString script = session + "/capture.py";
     QFile::copy(":/scripts/capture.py", script);
-    QStringList args{script, "--output", session + "/recording.mkv"};
+    QStringList args{script, "--output", m_original};
     if (hasMic)
         args << "--mic" << microphone;
     if (hasCamera)
@@ -295,9 +351,11 @@ void Backend::record(QString microphone, QString cam, bool desk, bool synthetic)
         args << "--synthetic";
     status("selecting", "Choose a window or display in the system picker.");
     worker.setProcessEnvironment(QProcessEnvironment::systemEnvironment());
-    writeJson(
-        session + "/capture.json",
-        {{"mic", hasMic}, {"desktop", hasDesktop}, {"camera", hasCamera}, {"edit", state.json()}});
+    writeJson(session + "/capture.json", {{"mic", hasMic},
+                                          {"desktop", hasDesktop},
+                                          {"camera", hasCamera},
+                                          {"edit", state.json()},
+                                          {"recording", m_original}});
     ++workerRun;
     worker.start("/usr/bin/python", args);
 }
@@ -341,9 +399,10 @@ void Backend::stop() {
 }
 void Backend::importVideo() {
     QString path = QFileDialog::getOpenFileName(
-        nullptr, "Open a recording",
+        nullptr, "Open an image or recording",
         QStandardPaths::writableLocation(QStandardPaths::MoviesLocation),
-        "Videos (*.mp4 *.mkv *.mov *.webm *.avi);;All files (*)");
+        "Images and videos (*.png *.jpg *.jpeg *.webp *.bmp *.mp4 *.mkv *.mov *.webm *.avi);;All "
+        "files (*)");
     if (!path.isEmpty())
         loadFile(path);
 }
@@ -353,7 +412,41 @@ void Backend::loadFile(QString path) {
     newSession();
     captureError.clear();
     lead = 0;
-    prepare(path, false);
+    m_original = path;
+    // Animations Qt counts frames in, like OmaCap's own GIF exports, open on the timeline.
+    // Qt reads an APNG as one frame, so it opens as a still; the video path can't open it.
+    QImageReader probe(path);
+    if (probe.canRead() && probe.imageCount() <= 1)
+        openImage(path);
+    else
+        prepare(path, false);
+}
+// Screenshots are edited from a copy in the session, so recovery never depends on the
+// original staying where it was.
+void Backend::openImage(const QString &path) {
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    const QImage image = reader.read();
+    if (image.isNull() || !image.save(session + "/source.png")) {
+        QDir(session).removeRecursively();
+        session.clear();
+        m_original.clear();
+        status("recorder", "The image could not be opened.");
+        return;
+    }
+    m_kind = "image";
+    showImage(image);
+}
+void Backend::showImage(const QImage &image) {
+    sourceWidth = image.width();
+    sourceHeight = image.height();
+    m_aspect = double(sourceWidth) / sourceHeight;
+    frames->put(false, image);
+    ++screenRevision;
+    status("editor");
+    emit frameChanged();
+    emit editChanged();
+    checkpoint();
 }
 void Backend::testLoad(QString path) {
     loadFile(path);
@@ -378,7 +471,8 @@ void Backend::prepare(QString path, bool captured) {
             double dur = o["format"].toObject()["duration"].toString().toDouble();
             QJsonArray streams = o["streams"].toArray();
             QJsonObject video;
-            int audioCount = 0, videoCount = 0;
+            int videoCount = 0;
+            QStringList audioTitles;
             for (auto v : streams) {
                 auto s = v.toObject();
                 if (s["codec_type"] == "video") {
@@ -386,8 +480,39 @@ void Backend::prepare(QString path, bool captured) {
                         video = s;
                     videoCount++;
                 }
-                if (s["codec_type"] == "audio")
-                    audioCount++;
+                if (s["codec_type"] == "audio") {
+                    // FFmpeg reports Matroska track names as "title", tags as "TITLE".
+                    const auto tags = s["tags"].toObject();
+                    audioTitles << tags["title"].toString(tags["TITLE"].toString());
+                }
+            }
+            const QString repaired = session + "/recovered.mkv";
+            if (code == 0 && !video.isEmpty() && dur <= .1 && path != repaired) {
+                // An interrupted Matroska file can contain valid packets but no
+                // duration or seek index. Rebuild those in a separate file.
+                auto remux = new QProcess(this);
+                remux->setChildProcessModifier([] { prctl(PR_SET_PDEATHSIG, SIGKILL); });
+                connect(remux, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) {
+                    if (e == QProcess::FailedToStart)
+                        status("recorder", "Could not start FFmpeg to recover the recording.");
+                });
+                QTimer::singleShot(120000, remux, [remux] {
+                    if (remux->state() != QProcess::NotRunning)
+                        remux->kill();
+                });
+                connect(
+                    remux, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+                    [this, remux, repaired, captured](int result, QProcess::ExitStatus) {
+                        remux->deleteLater();
+                        if (result == 0 && QFileInfo(repaired).size() > 1024)
+                            prepare(repaired, captured);
+                        else
+                            status("recorder",
+                                   "Could not recover the recording. Original media was retained.");
+                    });
+                remux->start("ffmpeg", {"-v", "error", "-y", "-i", path, "-map", "0", "-c", "copy",
+                                        repaired});
+                return;
             }
             if (code != 0 || video.isEmpty() || dur <= .1) {
                 status("recorder", "The recording could not be opened. Original "
@@ -395,8 +520,10 @@ void Backend::prepare(QString path, bool captured) {
                 return;
             }
             sourceWidth = video["width"].toInt();
-            m_aspect = double(sourceWidth) / std::max(1, video["height"].toInt());
+            sourceHeight = std::max(1, video["height"].toInt());
+            m_aspect = double(sourceWidth) / sourceHeight;
             double origin = o["format"].toObject()["start_time"].toString().toDouble();
+            const double recordingEnd = dur;
             screenStart = std::max(0., video["start_time"].toString().toDouble() - origin);
             const double streamDuration = video["duration"].toString().toDouble();
             const auto endTag = video["tags"].toObject()["DURATION"].toString().split(':');
@@ -407,12 +534,18 @@ void Backend::prepare(QString path, bool captured) {
                       endTag[2].toDouble() - origin;
             else
                 dur = std::max(.1, dur - origin);
+            const bool recoverTail =
+                captured && path == repaired && video["has_b_frames"].toInt() == 0;
+            if (recoverTail)
+                dur = std::max(dur, recordingEnd - origin);
             cameraStart = 0;
+            bool cameraReordersFrames = false;
             bool seenVideo = false;
             for (auto v : streams) {
                 auto stream = v.toObject();
                 if (stream["codec_type"] == "video") {
                     if (seenVideo) {
+                        cameraReordersFrames = stream["has_b_frames"].toInt() > 0;
                         cameraStart =
                             std::max(0., stream["start_time"].toString().toDouble() - origin);
                         break;
@@ -422,16 +555,33 @@ void Backend::prepare(QString path, bool captured) {
             }
             state.duration = dur;
             state.spans = {{std::min(lead, std::max(0., dur - .2)), dur}};
+            // OmaCap titles its capture tracks (see capture.py). In other files a second
+            // track may be another language or commentary, so only the first is used.
             if (!captured) {
                 hasCamera = false;
-                hasMic = audioCount > 0;
-                hasDesktop = false;
+                hasDesktop = audioTitles.contains("Desktop");
+                hasMic = hasDesktop ? audioTitles.contains("Microphone") : !audioTitles.isEmpty();
             }
             hasCamera = hasCamera && videoCount > 1;
-            QStringList args{"-v",   "error", "-y",  "-copyts", "-i",   path,
-                             "-map", "0:v:0", "-an", "-c:v",    "copy", session + "/screen.mkv"};
-            if (hasCamera)
-                args << "-map" << "0:v:1" << "-an" << "-c:v" << "copy" << session + "/camera.mkv";
+            // A still frame lasts until the next update, not the nominal frame
+            // interval. Preserve that duration so Qt can seek within the hold.
+            // Packet order only matches presentation order without B-frames.
+            const QString lastDuration =
+                recoverTail ? QString("max(DURATION,%1/TB-PTS)").arg(recordingEnd, 0, 'f', 9)
+                            : QString("DURATION");
+            const QString frameDurations =
+                "setts=duration='if(gt(NEXT_PTS,PTS),NEXT_PTS-PTS," + lastDuration + ")'";
+            QStringList args{"-v",   "error", "-y",  "-copyts", "-i",  path,
+                             "-map", "0:v:0", "-an", "-c:v",    "copy"};
+            if (video["has_b_frames"].toInt() == 0)
+                args << "-bsf:v" << frameDurations;
+            args << session + "/screen.mkv";
+            if (hasCamera) {
+                args << "-map" << "0:v:1" << "-an" << "-c:v" << "copy";
+                if (!cameraReordersFrames)
+                    args << "-bsf:v" << frameDurations;
+                args << session + "/camera.mkv";
+            }
             int ai = 0;
             for (auto name : QStringList{"mic", "desktop"})
                 if (name == "mic" ? hasMic : hasDesktop)
@@ -531,13 +681,16 @@ void Backend::openPlayers() {
     });
 }
 void Backend::syncPlayers(bool force) {
-    qint64 commonTime = screen.position() + qRound64(screenStart * 1000);
+    const qint64 commonTime = qRound64(state.sourceTime(m_position) * 1000);
     for (auto p : {&camera, &mic, &desktop}) {
         if (p->source().isEmpty())
             continue;
         qint64 t =
             std::max(qint64(0), commonTime - (p == &camera ? qRound64(cameraStart * 1000) : 0));
-        if (force || std::abs(p->position() - t) > 60)
+        // Position notifications are sampled independently by each decoder.
+        // Treating their jitter as drift repeatedly seeks and repeats audio.
+        // Align tracks on transport changes; let their clocks run between them.
+        if (force)
             p->setPosition(t);
         if (playing() && p->playbackState() != QMediaPlayer::PlayingState)
             p->play();
@@ -606,7 +759,11 @@ void Backend::presentCamera() {
         return;
     const auto stamp = latestCameraFrame.startTime();
     const double source = (stamp >= 0 ? stamp / 1000000. : camera.position() / 1000.) + cameraStart;
-    if (std::abs(source - std::max(cameraStart, state.sourceTime(m_position))) > .12)
+    const double end = latestCameraFrame.endTime() > stamp
+                           ? latestCameraFrame.endTime() / 1000000. + cameraStart
+                           : source;
+    const double target = std::max(cameraStart, state.sourceTime(m_position));
+    if (source > target + .12 || end < target - .12)
         return;
     shownCameraSerial = latestCameraSerial;
     frames->put(true, latestCameraFrame.toImage());
@@ -665,7 +822,12 @@ void Backend::seek(double t) {
     emit positionChanged();
 }
 void Backend::pause() {
+    const bool wasPlaying = playing();
     screen.pause();
+    // A sparse video can hold a frame while its position notification stands
+    // still. Resume at the displayed time rather than replaying that interval.
+    if (wasPlaying && !seeking)
+        seek(m_position);
     syncPlayers(true);
 }
 void Backend::togglePlay() {
@@ -678,8 +840,8 @@ void Backend::togglePlay() {
             seek(0);
         if (seekTimer.isActive())
             applySeek();
-        screen.play();
         syncPlayers(true);
+        screen.play();
     }
     emit positionChanged();
 }
@@ -733,7 +895,7 @@ void Backend::edited() {
     QVariantMap look;
     auto current = state.json().toVariantMap();
     for (auto key : QStringList{"padding", "corners", "shadow", "cameraSize", "cameraX", "cameraY",
-                                "cameraShape", "cameraCorners", "cameraShadow"})
+                                "cameraShape", "cameraCorners", "cameraShadow", "canvas"})
         look[key] = current[key];
     settings.setValue("appearance", look);
     m_dirty = true;
@@ -746,13 +908,16 @@ void Backend::edited() {
     syncPlayers();
 }
 void Backend::setValue(QString k, QVariant v) {
+    // QML arrays reach QVariant as QJSValue; unwrap them before JSON conversion.
+    if (v.metaType() == QMetaType::fromType<QJSValue>())
+        v = v.value<QJSValue>().toVariant();
     if (m_phase != "editor")
         return;
     static const QStringList allowed{
-        "padding",      "corners",     "shadow",        "cameraSize",   "cameraX",
-        "cameraY",      "camera",      "mic",           "desktop",      "crop",
-        "color",        "cameraShape", "cameraCorners", "cameraShadow", "windowTransparency",
-        "windowOpacity"};
+        "padding",       "corners",     "shadow",        "cameraSize",   "cameraX",
+        "cameraY",       "camera",      "mic",           "desktop",      "crop",
+        "color",         "cameraShape", "cameraCorners", "cameraShadow", "windowTransparency",
+        "windowOpacity", "canvas"};
     if (!allowed.contains(k))
         return;
     auto o = state.json();
@@ -885,6 +1050,46 @@ void Backend::deleteZoom(int i) {
         edited();
     }
 }
+QString Backend::addAnnotation(const QVariantMap &v) {
+    if (m_phase != "editor" || m_kind != "image")
+        return {};
+    auto a = Annotation::fromJson(QJsonObject::fromVariantMap(v));
+    if (a.kind.isEmpty())
+        return {};
+    a.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    push();
+    state.annotations.append(a);
+    edited();
+    return a.id;
+}
+void Backend::updateAnnotation(const QString &id, const QVariantMap &v) {
+    if (m_phase != "editor")
+        return;
+    const auto i = std::find_if(state.annotations.cbegin(), state.annotations.cend(),
+                                [&](const Annotation &a) { return a.id == id; }) -
+                   state.annotations.cbegin();
+    if (i == state.annotations.size())
+        return;
+    auto next = Annotation::fromJson(QJsonObject::fromVariantMap(v));
+    next.id = id;
+    if (next.kind.isEmpty() || next.json() == state.annotations[i].json())
+        return;
+    // push() shares the vector with the undo history; indexing afterwards detaches it.
+    push();
+    state.annotations[i] = next;
+    edited();
+}
+void Backend::deleteAnnotation(const QString &id) {
+    if (m_phase != "editor")
+        return;
+    auto next = state.annotations;
+    next.removeIf([&](const Annotation &a) { return a.id == id; });
+    if (next.size() == state.annotations.size())
+        return;
+    push();
+    state.annotations = next;
+    edited();
+}
 void Backend::chooseColor() {
     if (m_phase != "editor")
         return;
@@ -930,7 +1135,7 @@ void Backend::useWallpaper() {
     snapshotWallpaper();
     edited();
 }
-void Backend::exportVideo(bool gif, int w, int fps, int q, double seconds) {
+void Backend::exportVideo(bool gif, int w, int fps, int q) {
     if (m_phase != "editor")
         return;
     if (playing())
@@ -945,9 +1150,9 @@ void Backend::exportVideo(bool gif, int w, int fps, int q, double seconds) {
     if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty())
         return;
     QString path = dialog.selectedFiles().first();
-    startExport(path, gif, w, fps, q, seconds);
+    startExport(path, gif, w, fps, q);
 }
-void Backend::startExport(QString path, bool gif, int w, int fps, int q, double seconds) {
+void Backend::startExport(QString path, bool gif, int w, int fps, int q) {
     if (m_phase != "editor" || state.spans.isEmpty() || worker.state() != QProcess::NotRunning)
         return;
     if (playing())
@@ -957,19 +1162,131 @@ void Backend::startExport(QString path, bool gif, int w, int fps, int q, double 
     pendingExport = path;
     partialExport = QFileInfo(path).absolutePath() + "/.omacap-" +
                     QUuid::createUuid().toString(QUuid::WithoutBraces) + (gif ? ".gif" : ".mp4");
-    QString job = session + "/export.json";
-    writeJson(job, {{"session", session},
-                    {"edit", state.json()},
-                    {"aspect", m_aspect},
-                    {"screenStart", screenStart},
-                    {"cameraStart", cameraStart},
-                    {"sourceWidth", sourceWidth},
-                    {"output", partialExport},
-                    {"width", w},
-                    {"fps", fps},
-                    {"crf", q},
-                    {"gif", gif},
-                    {"seconds", seconds}});
+    runExporter({{"edit", state.json()},
+                 {"screenStart", screenStart},
+                 {"cameraStart", cameraStart},
+                 {"width", w},
+                 {"fps", fps},
+                 {"crf", q},
+                 {"gif", gif}});
+}
+void Backend::outputImage(bool copy, bool save) {
+    if (m_phase != "editor" || m_kind != "image" || !(copy || save) ||
+        worker.state() != QProcess::NotRunning)
+        return;
+    ++workerRun;
+    exportedEdit = state.json();
+    copyStill = copy;
+    saveStill = save;
+    partialExport = session + "/styled.png";
+    QFile::remove(partialExport);
+    runExporter({{"edit", state.json()}, {"still", true}, {"sourceHeight", sourceHeight}});
+}
+void Backend::takeScreenshot() {
+    if (m_phase != "recorder")
+        return;
+    // The window hides in this phase. Hyprland's close animation takes about 150 ms;
+    // wait it out so OmaCap never appears in its own shot.
+    status("capturing");
+    QTimer::singleShot(300, this, &Backend::pickRegion);
+}
+void Backend::screenshotAtLaunch() {
+    quitOnCancel = true;
+    status("capturing");
+    pickRegion();
+}
+// Omarchy's picker freezes the screen, then prints the selection last, as "X,Y WxH":
+// grim's geometry format. It exits 1 when the pick is cancelled. --keep-freeze leaves the
+// freeze running so grim captures the frame the selection was made on.
+void Backend::pickRegion() {
+    auto picker = new QProcess(this);
+    // Its own process group holds the freeze and slurp, so ending the group ends exactly
+    // what this pick started, without trusting a PID it prints.
+    picker->setChildProcessModifier([] { ::setpgid(0, 0); });
+    connect(picker, &QProcess::errorOccurred, this, [this, picker](QProcess::ProcessError e) {
+        if (e != QProcess::FailedToStart)
+            return;
+        picker->deleteLater();
+        endCapture("Screenshots need Omarchy's region picker, omarchy-capture-region.");
+    });
+    connect(
+        picker, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+        [this, picker](int code, QProcess::ExitStatus exit) {
+            static const QRegularExpression region("^-?\\d+,-?\\d+ \\d+x\\d+$");
+            const auto lines =
+                QString::fromUtf8(picker->readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
+            const QString error = QString::fromUtf8(picker->readAllStandardError()).trimmed();
+            picker->deleteLater();
+            const QString geometry = lines.isEmpty() ? QString() : lines.last().trimmed();
+            if (exit == QProcess::NormalExit && code == 0 && region.match(geometry).hasMatch()) {
+                grabRegion(geometry);
+                return;
+            }
+            endFreeze();
+            const bool cancelled = exit == QProcess::NormalExit && code == 1;
+            endCapture(cancelled ? QString()
+                                 : ("The region picker failed. " + error.right(500)).trimmed());
+        });
+    picker->start("omarchy-capture-region", {"smart", "--keep-freeze"});
+    // Known as soon as start() returns, so quitting right away still ends the group. The
+    // parent sets the group too, in case it runs before the child does.
+    captureGroup = pid_t(picker->processId());
+    if (captureGroup > 0)
+        ::setpgid(captureGroup, captureGroup);
+}
+void Backend::endFreeze() {
+    if (captureGroup > 0)
+        ::killpg(captureGroup, SIGTERM);
+    captureGroup = 0;
+}
+// grim captures the frozen frame the selection was made on, at native scale.
+void Backend::grabRegion(const QString &geometry) {
+    newSession();
+    auto grim = new QProcess(this);
+    const auto done = [this, grim](bool ok, const QString &error) {
+        grim->deleteLater();
+        endFreeze();
+        const QImage image = ok ? QImage(session + "/source.png") : QImage();
+        if (image.isNull()) {
+            QDir(session).removeRecursively();
+            session.clear();
+            endCapture(error);
+            return;
+        }
+        quitOnCancel = false;
+        m_kind = "image";
+        showImage(image);
+    };
+    connect(grim, &QProcess::errorOccurred, this, [done](QProcess::ProcessError e) {
+        if (e == QProcess::FailedToStart)
+            done(false, "Screenshots need grim.");
+    });
+    connect(grim, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+            [grim, done](int code, QProcess::ExitStatus exit) {
+                done(code == 0 && exit == QProcess::NormalExit,
+                     ("Could not capture the screen. " +
+                      QString::fromUtf8(grim->readAllStandardError()).trimmed().right(500))
+                         .trimmed());
+            });
+    grim->start("grim", {"-g", geometry, session + "/source.png"});
+}
+// Returns to the start window. A cancelled pick from `omacap --screenshot` has no window
+// to return to, so it quits; errors stay on screen.
+void Backend::endCapture(const QString &message) {
+    const bool quit = std::exchange(quitOnCancel, false) && message.isEmpty();
+    status("recorder", message);
+    if (quit)
+        QCoreApplication::quit();
+}
+// Starts the offscreen export worker on a job. Every job renders this session's edit.
+void Backend::runExporter(const QJsonObject &job) {
+    auto complete = job;
+    complete["session"] = session;
+    complete["aspect"] = m_aspect;
+    complete["sourceWidth"] = sourceWidth;
+    complete["output"] = partialExport;
+    const QString path = session + "/export.json";
+    writeJson(path, complete);
     captureError.clear();
     workerBuffer.clear();
     exportCancelled = false;
@@ -980,7 +1297,74 @@ void Backend::startExport(QString path, bool gif, int w, int fps, int q, double 
     env.insert("QSG_RHI_BACKEND", "opengl");
     env.insert("QT_QUICK_BACKEND", "rhi");
     worker.setProcessEnvironment(env);
-    worker.start(QCoreApplication::applicationFilePath(), {"--export", job});
+    worker.start(QCoreApplication::applicationFilePath(), {"--export", path});
+}
+void Backend::finishStill(int code) {
+    if (code != 0 || QFileInfo(partialExport).size() == 0) {
+        status("editor", captureError.isEmpty()
+                             ? "Rendering failed. " +
+                                   QString::fromUtf8(worker.readAllStandardError()).right(1500)
+                             : captureError);
+        return;
+    }
+    // Save and Copy are independent: either can fail without stopping the other.
+    QString saved, saveError;
+    if (saveStill) {
+        const QString dir = screenshotDirectory();
+        QDir().mkpath(dir);
+        const QString name =
+            dir + "/omacap-" + QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss");
+        saved = name + ".png";
+        for (int i = 2; QFile::exists(saved); ++i)
+            saved = name + QString("-%1.png").arg(i);
+        if (QFile::copy(partialExport, saved))
+            m_lastExport = saved;
+        else {
+            saved.clear();
+            saveError = "Could not save the screenshot in " + dir + ".";
+        }
+    }
+    const auto report = [this, saved, saveError](bool copied) {
+        const QString file = QFileInfo(saved).fileName();
+        QStringList parts;
+        if (copied && !saved.isEmpty())
+            parts << "Copied and saved " + file + ".";
+        else if (copied)
+            parts << "Copied to the clipboard.";
+        else if (!saved.isEmpty())
+            parts << "Saved " + file + ".";
+        if (!saveError.isEmpty())
+            parts << saveError;
+        if (copyStill && !copied)
+            parts << "Could not copy to the clipboard.";
+        if (copied || !saved.isEmpty())
+            m_dirty = state.json() != exportedEdit;
+        checkpoint();
+        status("editor", parts.join(' '));
+    };
+    if (!copyStill) {
+        report(false);
+        return;
+    }
+    // wl-copy serves the clipboard from its own background process, so the image stays
+    // available after OmaCap closes. A stalled one is killed rather than holding the editor.
+    auto copy = new QProcess(this);
+    copy->setStandardInputFile(partialExport);
+    copy->setStandardOutputFile(QProcess::nullDevice());
+    copy->setStandardErrorFile(QProcess::nullDevice());
+    connect(copy, &QProcess::errorOccurred, this, [copy, report](QProcess::ProcessError e) {
+        if (e != QProcess::FailedToStart)
+            return;
+        copy->deleteLater();
+        report(false);
+    });
+    connect(copy, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+            [copy, report](int code, QProcess::ExitStatus exit) {
+                copy->deleteLater();
+                report(exit == QProcess::NormalExit && code == 0);
+            });
+    QTimer::singleShot(5000, copy, [copy] { copy->kill(); });
+    copy->start("wl-copy", {"--type", "image/png"});
 }
 void Backend::cancelExport() {
     if (m_phase == "exporting") {
@@ -1021,8 +1405,10 @@ void Backend::discard() {
     if (!session.isEmpty() && QFileInfo(session).absolutePath() == recoveryRoot)
         QDir(session).removeRecursively();
     session.clear();
+    m_original.clear();
     state = Edit();
     m_dirty = false;
+    m_kind = "video";
     screenRevision = cameraRevision = 0;
     status("recorder");
     emit editChanged();
@@ -1032,7 +1418,7 @@ void Backend::discard() {
 bool Backend::recoverable() const {
     for (auto d : QDir(recoveryRoot).entryList(QDir::Dirs | QDir::NoDotAndDotDot))
         if (QFile::exists(recoveryRoot + "/" + d + "/recovery.json") ||
-            QFileInfo(recoveryRoot + "/" + d + "/recording.mkv").size() > 1024)
+            QFileInfo(capturedRecording(recoveryRoot + "/" + d)).size() > 1024)
             return true;
     return false;
 }
@@ -1042,27 +1428,41 @@ void Backend::recover() {
         auto o = readJson(d.filePath() + "/recovery.json");
         if (o.isEmpty()) {
             auto capture = readJson(d.filePath() + "/capture.json");
-            if (capture.isEmpty() || QFileInfo(d.filePath() + "/recording.mkv").size() <= 1024)
+            const QString recording = capturedRecording(d.filePath());
+            if (capture.isEmpty() || QFileInfo(recording).size() <= 1024)
                 continue;
             session = d.filePath();
+            // Older versions kept the capture inside the session, which discard removes.
+            if (!recording.startsWith(session + "/"))
+                m_original = recording;
             state = Edit::fromJson(capture["edit"].toObject());
             hasMic = capture["mic"].toBool();
             hasDesktop = capture["desktop"].toBool();
             hasCamera = capture["camera"].toBool();
             lead = capture["lead"].toDouble();
             m_dirty = true;
-            prepare(session + "/recording.mkv", true);
+            prepare(recording, true);
             return;
         }
+        const bool image = o["kind"] == "image";
+        const QImage source = image ? QImage(d.filePath() + "/source.png") : QImage();
+        if (image && source.isNull())
+            continue;
         session = d.filePath();
         state = Edit::fromJson(o["edit"].toObject());
         m_aspect = o["aspect"].toDouble(16. / 9);
         screenStart = o["screenStart"].toDouble();
         cameraStart = o["cameraStart"].toDouble();
         sourceWidth = o["sourceWidth"].toInt(1920);
+        sourceHeight = o["sourceHeight"].toInt(1080);
         m_dirty = o["dirty"].toBool(true);
         m_lastExport = o["lastExport"].toString();
-        ready();
+        m_original = o["original"].toString();
+        m_kind = image ? "image" : "video";
+        if (image)
+            showImage(source);
+        else
+            ready();
         return;
     }
 }

@@ -11,7 +11,60 @@ ApplicationWindow {
     property bool cropping: false
     property bool allowClose: false
     property bool closeAfterDiscard: false
+    property bool captureAfterDiscard: false
     property bool editing: backend.phase === "editor" || backend.phase === "exporting"
+    // A screenshot session: no timeline, camera or audio, and Copy/Save instead of Export.
+    property bool still: backend.kind === "image"
+    property bool outputReady: still && backend.phase === "editor" && !cropping && !discardDialog.opened && !editor.typing
+    // Single-key annotation shortcuts, off while typing.
+    property bool markKeys: outputReady
+    // The screenshot tool row, as in Omasnap: name, key, and the editor tool it selects.
+    readonly property var tools: [{
+        "id": "select",
+        "label": "Select",
+        "key": "V"
+    }, {
+        "id": "crop",
+        "label": "Crop",
+        "key": "K"
+    }, {
+        "id": "box",
+        "label": "Box",
+        "key": "R"
+    }, {
+        "id": "ellipse",
+        "label": "Ellipse",
+        "key": "E"
+    }, {
+        "id": "arrow",
+        "label": "Arrow",
+        "key": "A"
+    }, {
+        "id": "line",
+        "label": "Line",
+        "key": "L"
+    }, {
+        "id": "text",
+        "label": "Text",
+        "key": "T"
+    }, {
+        "id": "step",
+        "label": "Step",
+        "key": "C"
+    }, {
+        "id": "pen",
+        "label": "Pen",
+        "key": "F"
+    }, {
+        "id": "marker",
+        "label": "Marker",
+        "key": "H"
+    }, {
+        "id": "redact",
+        "label": "Redact",
+        "key": "D"
+    }]
+    readonly property var markColors: ["#ff375f", "#ff9f0a", "#ffd60a", "#30d158", "#0a84ff", "#bf5af2", "#000000", "#ffffff"]
 
     function time(t) {
         return Math.floor(t / 60).toString().padStart(2, "0") + ":" + (t % 60).toFixed(1).padStart(4, "0");
@@ -33,15 +86,57 @@ ApplicationWindow {
         backend.updateZoom(selectedZoom, a, b, x, y, amount);
     }
 
-    visible: true
+    // The buttons can be clicked mid-typing; the shortcuts are off then.
+    function output(copy, save) {
+        editor.commitText();
+        backend.outputImage(copy, save);
+    }
+
+    function startCrop() {
+        backend.pause();
+        timeline.selection = "";
+        win.cropping = true;
+        cropView.begin(backend.edit.crop);
+    }
+
+    function useTool(id) {
+        if (id === "crop") {
+            editor.cancel();
+            startCrop();
+            return ;
+        }
+        editor.commitText();
+        editor.tool = id;
+        if (id !== "select")
+            editor.selectedId = "";
+    }
+
+    // Colour and size apply to the selection, and to whatever is drawn next.
+    function useColor(color) {
+        editor.color = color;
+        editor.restyle({
+            "color": color
+        });
+    }
+
+    function useSize(index) {
+        editor.size = index;
+        if (editor.selected && editor.selected.kind !== "redact")
+            editor.restyle({
+                "size": editor.sizeFor(editor.selected.kind, index)
+            });
+    }
+
+    // Hidden while the region picker runs, so OmaCap stays out of its own screenshot.
+    visible: backend.phase !== "capturing"
     title: "OmaCap"
     flags: recorderMode ? Qt.Dialog : Qt.Window
     width: recorderMode ? 520 : 1280
-    height: recorderMode ? 540 : 850
+    height: recorderMode ? 640 : 850
     minimumWidth: recorderMode ? 520 : 1000
-    minimumHeight: recorderMode ? 540 : 680
+    minimumHeight: recorderMode ? 640 : 680
     maximumWidth: recorderMode ? 520 : 1.67772e+07
-    maximumHeight: recorderMode ? 540 : 1.67772e+07
+    maximumHeight: recorderMode ? 640 : 1.67772e+07
     color: theme.colors.background
     font.family: "monospace"
     font.pixelSize: 12
@@ -66,6 +161,9 @@ ApplicationWindow {
         if (allowClose)
             return ;
 
+        // Text still being typed counts as an unexported change.
+        editor.commitText();
+
         if (backend.phase === "exporting") {
             event.accepted = false;
             return ;
@@ -86,32 +184,77 @@ ApplicationWindow {
 
     Shortcut {
         sequence: "Space"
-        enabled: backend.phase === "editor" && !exportDialog.opened && !discardDialog.opened && !focusPicker.pressed
+        enabled: !win.still && backend.phase === "editor" && !win.cropping && !exportDialog.opened && !discardDialog.opened && !focusPicker.pressed
         onActivated: backend.togglePlay()
     }
 
     Shortcut {
         sequences: [StandardKey.Undo]
-        enabled: backend.phase === "editor" && !focusPicker.pressed
+        enabled: backend.phase === "editor" && !win.cropping && !focusPicker.pressed && !editor.typing
         onActivated: backend.undo()
     }
 
     Shortcut {
         sequences: [StandardKey.Redo]
-        enabled: backend.phase === "editor" && !focusPicker.pressed
+        enabled: backend.phase === "editor" && !win.cropping && !focusPicker.pressed && !editor.typing
         onActivated: backend.redo()
     }
 
     Shortcut {
         sequence: "Left"
-        enabled: backend.phase === "editor" && !focusPicker.pressed && !exportDialog.opened && !discardDialog.opened
+        enabled: !win.still && backend.phase === "editor" && !win.cropping && !focusPicker.pressed && !exportDialog.opened && !discardDialog.opened
         onActivated: backend.seek(backend.position - 1 / 30)
     }
 
     Shortcut {
         sequence: "Right"
-        enabled: backend.phase === "editor" && !focusPicker.pressed && !exportDialog.opened && !discardDialog.opened
+        enabled: !win.still && backend.phase === "editor" && !win.cropping && !focusPicker.pressed && !exportDialog.opened && !discardDialog.opened
         onActivated: backend.seek(backend.position + 1 / 30)
+    }
+
+    // `omacap --screenshot` while OmaCap is open. An unexported edit asks first.
+    Connections {
+        function onScreenshotRequested() {
+            // The new shot replaces this session, and its dialogs go with it. Text still
+            // being typed counts as an unexported change.
+            if (backend.phase === "editor") {
+                editor.commitText();
+                exportDialog.close();
+                win.cropping = false;
+            }
+            if (backend.phase === "recorder") {
+                backend.takeScreenshot();
+            } else if (backend.phase === "editor" && !backend.dirty) {
+                backend.discard();
+                backend.takeScreenshot();
+            } else if (backend.phase === "editor") {
+                win.closeAfterDiscard = false;
+                win.captureAfterDiscard = true;
+                discardDialog.open();
+                win.raise();
+                win.requestActivate();
+            }
+        }
+
+        target: backend
+    }
+
+    Shortcut {
+        sequences: [StandardKey.Copy]
+        enabled: win.outputReady
+        onActivated: backend.outputImage(true, false)
+    }
+
+    Shortcut {
+        sequences: [StandardKey.Save]
+        enabled: win.outputReady
+        onActivated: backend.outputImage(false, true)
+    }
+
+    Shortcut {
+        sequences: ["Return", "Enter"]
+        enabled: win.outputReady
+        onActivated: backend.outputImage(true, true)
     }
 
     Shortcut {
@@ -121,10 +264,74 @@ ApplicationWindow {
             backend.endEdit();
             timeline.selection = "";
             timeline.cutting = false;
+            editor.cancel();
         }
     }
 
+    Instantiator {
+        model: win.tools
+
+        delegate: Shortcut {
+            required property var modelData
+
+            sequence: modelData.key
+            enabled: win.markKeys
+            onActivated: win.useTool(modelData.id)
+        }
+
+    }
+
+    Instantiator {
+        model: win.markColors
+
+        delegate: Shortcut {
+            required property int index
+            required property string modelData
+
+            sequence: String(index + 1)
+            enabled: win.markKeys
+            onActivated: win.useColor(modelData)
+        }
+
+    }
+
+    Shortcut {
+        sequences: [StandardKey.Delete, "Backspace"]
+        enabled: win.markKeys && editor.selected !== null
+        onActivated: editor.remove()
+    }
+
+    // Arrow keys nudge the selected annotation 1 px, or 10 px with Shift.
+    Instantiator {
+        model: [["Left", -1, 0], ["Right", 1, 0], ["Up", 0, -1], ["Down", 0, 1], ["Shift+Left", -10, 0], ["Shift+Right", 10, 0], ["Shift+Up", 0, -10], ["Shift+Down", 0, 10]]
+
+        delegate: Shortcut {
+            required property var modelData
+
+            sequence: modelData[0]
+            enabled: win.markKeys && editor.selected !== null
+            onActivated: editor.nudge(modelData[1], modelData[2])
+        }
+
+    }
+
+    CropView {
+        id: cropView
+        objectName: "cropView"
+        anchors.fill: parent
+        anchors.margins: 16
+        visible: win.cropping && backend.phase === "editor"
+        source: backend.screenSource
+        sourceAspect: backend.aspect
+        onAccepted: (crop) => {
+            backend.setValue("crop", crop);
+            win.cropping = false;
+        }
+        onCanceled: win.cropping = false
+    }
+
     ColumnLayout {
+        visible: !win.cropping
         anchors.fill: parent
         anchors.margins: 16
         spacing: 12
@@ -141,23 +348,32 @@ ApplicationWindow {
 
             FlatButton {
                 visible: win.editing
+                objectName: "undo"
                 text: "Undo"
-                onClicked: backend.undo()
+                // Text being typed is committed first, so Undo acts on it rather than under it.
+                onClicked: {
+                    editor.commitText();
+                    backend.undo();
+                }
                 enabled: backend.phase === "editor"
             }
 
             FlatButton {
                 visible: win.editing
                 text: "Redo"
-                onClicked: backend.redo()
+                onClicked: {
+                    editor.commitText();
+                    backend.redo();
+                }
                 enabled: backend.phase === "editor"
             }
 
             FlatButton {
                 visible: win.editing
-                text: "New recording"
+                text: win.still ? "New capture" : "New recording"
                 enabled: backend.phase === "editor"
                 onClicked: {
+                    editor.commitText();
                     if (backend.dirty) {
                         win.closeAfterDiscard = false;
                         discardDialog.open();
@@ -168,7 +384,24 @@ ApplicationWindow {
             }
 
             FlatButton {
-                visible: win.editing
+                visible: win.editing && win.still
+                objectName: "copyImage"
+                text: "Copy"
+                enabled: backend.phase === "editor"
+                onClicked: win.output(true, false)
+            }
+
+            FlatButton {
+                visible: win.editing && win.still
+                objectName: "saveImage"
+                text: "Save"
+                primary: true
+                enabled: backend.phase === "editor"
+                onClicked: win.output(false, true)
+            }
+
+            FlatButton {
+                visible: win.editing && !win.still
                 text: "Export"
                 primary: true
                 enabled: backend.phase === "editor" && backend.duration > 0 && !focusPicker.pressed
@@ -183,11 +416,114 @@ ApplicationWindow {
             color: theme.colors.muted
         }
 
+        RowLayout {
+            objectName: "toolRow"
+            visible: win.still && win.editing
+            enabled: backend.phase === "editor"
+            Layout.fillWidth: true
+            spacing: 4
+
+            Repeater {
+                model: win.tools
+
+                FlatButton {
+                    required property var modelData
+                    required property int index
+
+                    objectName: "tool-" + modelData.id
+                    // Shortcut hints when the window has room for them.
+                    text: modelData.label + (win.width >= 1260 ? " <font color='" + theme.colors.muted + "'>" + modelData.key + "</font>" : "")
+                    padding: 8
+                    primary: editor.tool === modelData.id
+                    Layout.leftMargin: index === 2 ? 10 : 0
+                    onClicked: win.useTool(modelData.id)
+                }
+
+            }
+
+            Item {
+                Layout.fillWidth: true
+            }
+
+            Repeater {
+                model: win.markColors
+
+                Rectangle {
+                    required property string modelData
+
+                    implicitWidth: 18
+                    implicitHeight: 18
+                    color: modelData
+                    border.width: Qt.colorEqual(editor.color, modelData) ? 2 : 1
+                    border.color: Qt.colorEqual(editor.color, modelData) ? theme.colors.foreground : theme.colors.muted
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: win.useColor(parent.modelData)
+                    }
+
+                }
+
+            }
+
+            Repeater {
+                model: ["S", "M", "L"]
+
+                FlatButton {
+                    required property int index
+                    required property string modelData
+
+                    text: modelData
+                    padding: 8
+                    primary: editor.size === index
+                    Layout.leftMargin: index === 0 ? 10 : 0
+                    onClicked: win.useSize(index)
+                }
+
+            }
+
+        }
+
+
         ColumnLayout {
             visible: !win.editing
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 14
+
+            ColumnLayout {
+                visible: backend.phase === "recorder"
+                Layout.fillWidth: true
+                spacing: 12
+
+                Label {
+                    text: "Take a screenshot"
+                    font.pixelSize: 20
+                }
+
+                Label {
+                    text: "Drag a region, click a window, or click empty space for the whole screen."
+                    color: theme.colors.dark_foreground
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+
+                FlatButton {
+                    objectName: "takeScreenshot"
+                    text: "Take screenshot"
+                    primary: true
+                    Layout.fillWidth: true
+                    onClicked: backend.takeScreenshot()
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.topMargin: 2
+                    height: 1
+                    color: theme.colors.lighter_background
+                }
+
+            }
 
             Label {
                 text: backend.phase === "recorder" ? "Record a demo" : backend.phase === "selecting" ? "Select a window or display" : backend.phase === "countdown" ? "Starting in " + backend.countdown : backend.phase === "recording" ? "Recording" : backend.phase === "stopping" ? "Finishing recording" : "Preparing video"
@@ -261,7 +597,7 @@ ApplicationWindow {
 
                 RowLayout {
                     FlatButton {
-                        text: "Open existing video"
+                        text: "Open image or video"
                         onClicked: backend.importVideo()
                     }
 
@@ -324,12 +660,12 @@ ApplicationWindow {
                 spacing: 8
 
                 RowLayout {
+                    visible: !win.still
+
                     FlatButton {
-                        text: win.cropping ? "Cancel crop" : "Crop"
-                        onClicked: {
-                            win.cropping = !win.cropping;
-                            timeline.selection = "";
-                        }
+                        text: "Crop"
+                        enabled: backend.duration > 0
+                        onClicked: win.startCrop()
                     }
 
                     FlatButton {
@@ -338,7 +674,7 @@ ApplicationWindow {
                     }
 
                     Label {
-                        text: win.cropping ? "Drag over the picture to crop" : "16:9 · styled preview"
+                        text: (win.still ? (backend.edit.canvas === "auto" ? "Auto" : backend.edit.canvas) : "16:9") + " · styled preview"
                         color: theme.colors.dark_foreground
                         Layout.fillWidth: true
                         horizontalAlignment: Text.AlignRight
@@ -355,8 +691,10 @@ ApplicationWindow {
                     Item {
                         id: fit
 
-                        width: Math.min(parent.width, parent.height * 16 / 9)
-                        height: width * 9 / 16
+                        property real aspect: win.still ? backend.canvasAspect : 16 / 9
+
+                        width: Math.min(parent.width, parent.height * aspect)
+                        height: width / aspect
                         anchors.centerIn: parent
 
                         MouseArea {
@@ -370,22 +708,25 @@ ApplicationWindow {
                             id: composition
 
                             objectName: "composition"
-                            width: 1920
-                            height: 1080
-                            scale: fit.width / 1920
+                            // At most 1920 px on its longer side, however tall the shot.
+                            width: fit.aspect >= 1 ? 1920 : 1920 * fit.aspect
+                            height: width / fit.aspect
+                            scale: fit.width / width
                             transformOrigin: Item.TopLeft
                             edit: backend.edit
-                            screenSource: backend.duration > 0 ? backend.screenSource : ""
+                            sourcePixels: backend.sourceSize
+                            hiddenAnnotation: editor.hiddenId
+                            screenSource: win.still || backend.duration > 0 ? backend.screenSource : ""
                             cameraSource: backend.duration > 0 ? backend.cameraSource : ""
                             sourceAspect: backend.aspect
-                            zoom: win.cropping ? 1 : backend.zoom
+                            zoom: backend.zoom
                             focusX: backend.focusX
                             focusY: backend.focusY
                         }
 
                         Label {
                             anchors.centerIn: parent
-                            visible: backend.duration === 0
+                            visible: !win.still && backend.duration === 0
                             text: "No clips left. Undo to restore them."
                             padding: 16
 
@@ -395,56 +736,20 @@ ApplicationWindow {
 
                         }
 
-                        MouseArea {
-                            id: picture
+                        AnnotationEditor {
+                            id: editor
 
-                            property real sx: 0
-                            property real sy: 0
-                            property real ex: 0
-                            property real ey: 0
-
-                            x: composition.frameX * fit.width / 1920
-                            y: composition.frameY * fit.width / 1920
-                            width: composition.frameW * fit.width / 1920
-                            height: composition.frameH * fit.width / 1920
-                            enabled: win.cropping
-                            cursorShape: Qt.CrossCursor
-                            onPressed: (mouse) => {
-                                sx = ex = mouse.x;
-                                sy = ey = mouse.y;
-                            }
-                            onPositionChanged: (mouse) => {
-                                if (pressed) {
-                                    ex = Math.max(0, Math.min(width, mouse.x));
-                                    ey = Math.max(0, Math.min(height, mouse.y));
-                                }
-                            }
-                            onReleased: (mouse) => {
-                                let c = backend.edit.crop;
-                                if (win.cropping && Math.abs(ex - sx) > 8 && Math.abs(ey - sy) > 8) {
-                                    backend.setValue("crop", [c[0] + Math.min(sx, ex) / width * c[2], c[1] + Math.min(sy, ey) / height * c[3], Math.abs(ex - sx) / width * c[2], Math.abs(ey - sy) / height * c[3]]);
-                                    win.cropping = false;
-                                }
-                            }
-
-                            Rectangle {
-                                visible: picture.pressed && win.cropping
-                                x: Math.min(picture.sx, picture.ex)
-                                y: Math.min(picture.sy, picture.ey)
-                                width: Math.abs(picture.ex - picture.sx)
-                                height: Math.abs(picture.ey - picture.sy)
-                                color: "#304694e4"
-                                border.width: 1
-                                border.color: "white"
-                            }
-
+                            objectName: "annotationEditor"
+                            anchors.fill: parent
+                            visible: win.still
+                            composition: composition
                         }
 
                         MouseArea {
                             property real px
                             property real py
 
-                            visible: backend.edit.camera && backend.cameraSource !== "" && !focusPicker.pressed && !win.cropping
+                            visible: backend.edit.camera && backend.cameraSource !== "" && !focusPicker.pressed
                             x: composition.cameraX * fit.width / 1920
                             y: composition.cameraY * fit.width / 1920
                             width: composition.cameraW * fit.width / 1920
@@ -614,6 +919,82 @@ ApplicationWindow {
 
                     }
 
+                    // The selected annotation's own options; colour and size are in the tool row.
+                    ColumnLayout {
+                        objectName: "annotationControls"
+                        visible: win.still && editor.selected !== null
+                        Layout.fillWidth: true
+                        spacing: 10
+
+                        Label {
+                            text: (win.tools.find((t) => t.id === editor.selected?.kind)?.label ?? "").toUpperCase()
+                            font.bold: true
+                        }
+
+                        RowLayout {
+                            visible: ["box", "ellipse"].includes(editor.selected?.kind)
+                            spacing: 0
+
+                            Repeater {
+                                model: ["Outline", "Solid", "Tint"]
+
+                                FlatButton {
+                                    required property string modelData
+
+                                    text: modelData
+                                    primary: editor.selected?.fill === modelData.toLowerCase()
+                                    onClicked: editor.restyle({
+                                        "fill": modelData.toLowerCase()
+                                    })
+                                }
+
+                            }
+
+                        }
+
+                        RowLayout {
+                            visible: editor.selected?.kind === "text"
+                            spacing: 0
+
+                            Repeater {
+                                model: ["Pill", "Plain"]
+
+                                FlatButton {
+                                    required property string modelData
+
+                                    text: modelData
+                                    primary: (editor.selected?.pill ?? true) === (modelData === "Pill")
+                                    onClicked: {
+                                        editor.textPill = modelData === "Pill";
+                                        editor.restyle({
+                                            "pill": editor.textPill
+                                        });
+                                    }
+                                }
+
+                            }
+
+                        }
+
+                        Label {
+                            visible: editor.selected?.kind === "text"
+                            text: "Double-click the text to edit it."
+                            color: theme.colors.dark_foreground
+                        }
+
+                        FlatButton {
+                            text: "Delete"
+                            onClicked: editor.remove()
+                        }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 1
+                            color: theme.colors.lighter_background
+                        }
+
+                    }
+
                     ColumnLayout {
                         objectName: "appearanceControls"
                         visible: win.selectedZoom < 0
@@ -701,108 +1082,145 @@ ApplicationWindow {
                         }
 
                         Label {
+                            visible: !win.still
                             text: "Recorded window only"
                             color: theme.colors.dark_foreground
                         }
 
                         Label {
-                            text: "CAMERA"
-                            font.bold: true
-                        }
-
-                        CheckBox {
-                            text: "Show camera"
-                            checked: backend.edit.camera ?? true
-                            enabled: backend.cameraSource !== ""
-                            onToggled: backend.setValue("camera", checked)
-                        }
-
-                        Setting {
-                            Layout.fillWidth: true
-                            label: "Size"
-                            fieldName: "cameraSize"
-                            from: 0.08
-                            to: 0.4
-                            current: backend.edit.cameraSize || 0.18
-                            suffix: "%"
+                            visible: win.still
+                            text: "Canvas"
                         }
 
                         RowLayout {
-                            FlatButton {
-                                text: "Rectangle"
-                                primary: backend.edit.cameraShape === "rectangle"
-                                onClicked: backend.setValue("cameraShape", "rectangle")
+                            visible: win.still
+                            spacing: 0
+
+                            Repeater {
+                                model: ["Auto", "16:9", "4:3", "1:1"]
+
+                                FlatButton {
+                                    required property string modelData
+                                    objectName: "canvas" + modelData
+                                    text: modelData
+                                    primary: (backend.edit.canvas ?? "auto") === modelData.toLowerCase()
+                                    onClicked: backend.setValue("canvas", modelData.toLowerCase())
+                                }
                             }
-
-                            FlatButton {
-                                text: "Circle"
-                                primary: backend.edit.cameraShape === "circle"
-                                onClicked: backend.setValue("cameraShape", "circle")
-                            }
-
-                        }
-
-                        Setting {
-                            Layout.fillWidth: true
-                            label: "Camera corners"
-                            fieldName: "cameraCorners"
-                            to: 0.5
-                            current: backend.edit.cameraCorners ?? 0.12
-                            suffix: "%"
-                            enabled: backend.edit.cameraShape !== "circle"
-                        }
-
-                        Setting {
-                            Layout.fillWidth: true
-                            label: "Camera shadow"
-                            fieldName: "cameraShadow"
-                            current: backend.edit.cameraShadow ?? 0.45
-                            suffix: "%"
                         }
 
                         Label {
-                            text: "Drag the camera in the preview."
+                            visible: win.still
+                            text: "Auto fits the shot plus padding."
                             wrapMode: Text.Wrap
                             Layout.fillWidth: true
                             color: theme.colors.dark_foreground
                         }
 
-                        RowLayout {
-                            Repeater {
-                                model: ["↖", "↗", "↙", "↘"]
+                        ColumnLayout {
+                            visible: !win.still
+                            Layout.fillWidth: true
+                            spacing: 10
+
+                            Label {
+                                text: "CAMERA"
+                                font.bold: true
+                            }
+
+                            CheckBox {
+                                text: "Show camera"
+                                checked: backend.edit.camera ?? true
+                                enabled: backend.cameraSource !== ""
+                                onToggled: backend.setValue("camera", checked)
+                            }
+
+                            Setting {
+                                Layout.fillWidth: true
+                                label: "Size"
+                                fieldName: "cameraSize"
+                                from: 0.08
+                                to: 0.4
+                                current: backend.edit.cameraSize || 0.18
+                                suffix: "%"
+                            }
+
+                            RowLayout {
+                                FlatButton {
+                                    text: "Rectangle"
+                                    primary: backend.edit.cameraShape === "rectangle"
+                                    onClicked: backend.setValue("cameraShape", "rectangle")
+                                }
 
                                 FlatButton {
-                                    required property int index
-                                    required property string modelData
-
-                                    text: modelData
-                                    onClicked: {
-                                        backend.beginEdit();
-                                        backend.setValue("cameraX", index % 2 === 0 ? 0.03 : 0.97 - backend.edit.cameraSize);
-                                        backend.setValue("cameraY", index < 2 ? 0.04 : 0.96 - composition.cameraH / 1080);
-                                        backend.endEdit();
-                                    }
+                                    text: "Circle"
+                                    primary: backend.edit.cameraShape === "circle"
+                                    onClicked: backend.setValue("cameraShape", "circle")
                                 }
 
                             }
 
-                        }
+                            Setting {
+                                Layout.fillWidth: true
+                                label: "Camera corners"
+                                fieldName: "cameraCorners"
+                                to: 0.5
+                                current: backend.edit.cameraCorners ?? 0.12
+                                suffix: "%"
+                                enabled: backend.edit.cameraShape !== "circle"
+                            }
 
-                        Label {
-                            text: "AUDIO"
-                            font.bold: true
-                        }
+                            Setting {
+                                Layout.fillWidth: true
+                                label: "Camera shadow"
+                                fieldName: "cameraShadow"
+                                current: backend.edit.cameraShadow ?? 0.45
+                                suffix: "%"
+                            }
 
-                        CheckBox {
-                            text: "Microphone / source audio"
-                            checked: backend.edit.mic ?? true
-                            onToggled: backend.setValue("mic", checked)
-                        }
+                            Label {
+                                text: "Drag the camera in the preview."
+                                wrapMode: Text.Wrap
+                                Layout.fillWidth: true
+                                color: theme.colors.dark_foreground
+                            }
 
-                        CheckBox {
-                            text: "Desktop audio"
-                            checked: backend.edit.desktop ?? true
-                            onToggled: backend.setValue("desktop", checked)
+                            RowLayout {
+                                Repeater {
+                                    model: ["↖", "↗", "↙", "↘"]
+
+                                    FlatButton {
+                                        required property int index
+                                        required property string modelData
+
+                                        text: modelData
+                                        onClicked: {
+                                            backend.beginEdit();
+                                            backend.setValue("cameraX", index % 2 === 0 ? 0.03 : 0.97 - backend.edit.cameraSize);
+                                            backend.setValue("cameraY", index < 2 ? 0.04 : 0.96 - composition.cameraH / 1080);
+                                            backend.endEdit();
+                                        }
+                                    }
+
+                                }
+
+                            }
+
+                            Label {
+                                text: "AUDIO"
+                                font.bold: true
+                            }
+
+                            CheckBox {
+                                text: "Microphone / source audio"
+                                checked: backend.edit.mic ?? true
+                                onToggled: backend.setValue("mic", checked)
+                            }
+
+                            CheckBox {
+                                text: "Desktop audio"
+                                checked: backend.edit.desktop ?? true
+                                onToggled: backend.setValue("desktop", checked)
+                            }
                         }
 
                     }
@@ -816,13 +1234,13 @@ ApplicationWindow {
         Timeline {
             id: timeline
 
-            visible: win.editing
+            visible: win.editing && !win.still
             enabled: backend.phase === "editor"
             Layout.fillWidth: true
         }
 
         RowLayout {
-            visible: backend.phase === "exporting"
+            visible: backend.phase === "exporting" && !win.still
             Layout.fillWidth: true
 
             Label {
@@ -843,10 +1261,18 @@ ApplicationWindow {
 
         RowLayout {
             Layout.fillWidth: true
-            visible: backend.message !== "" || backend.lastExport !== ""
+            visible: backend.message !== "" || backend.lastExport !== "" || (win.still && win.editing)
+
+            Label {
+                objectName: "stillSize"
+                visible: win.still && win.editing
+                text: "Source " + backend.sourceSize.width + "×" + backend.sourceSize.height + " · PNG " + backend.stillSize.width + "×" + backend.stillSize.height
+                color: theme.colors.dark_foreground
+            }
 
             Label {
                 text: backend.message
+                horizontalAlignment: win.still ? Text.AlignRight : Text.AlignLeft
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
                 color: theme.colors.dark_foreground
@@ -871,13 +1297,16 @@ ApplicationWindow {
     Dialog {
         id: discardDialog
 
+        objectName: "discardDialog"
+
         anchors.centerIn: parent
         modal: true
         title: "Discard this session?"
         width: 420
+        onClosed: win.captureAfterDiscard = false
 
         contentItem: Label {
-            text: "This session has unexported changes. Discard removes its temporary media."
+            text: "This session has unexported changes. " + (backend.original ? (win.still ? "The image" : "The recording") + " stays at " + backend.original + "." : "Discard removes its temporary media.")
             wrapMode: Text.Wrap
         }
 
@@ -890,11 +1319,14 @@ ApplicationWindow {
             FlatButton {
                 text: "Discard"
                 onClicked: {
+                    const capture = win.captureAfterDiscard;
                     discardDialog.close();
                     backend.discard();
                     if (win.closeAfterDiscard) {
                         win.allowClose = true;
                         win.close();
+                    } else if (capture) {
+                        backend.takeScreenshot();
                     }
                 }
             }
@@ -953,7 +1385,8 @@ ApplicationWindow {
             }
 
             Label {
-                text: format.currentIndex === 0 ? "Quality" : "Duration in seconds"
+                visible: format.currentIndex === 0
+                text: "Quality"
             }
 
             ComboBox {
@@ -966,19 +1399,8 @@ ApplicationWindow {
                 onActivated: backend.remember("export/quality", currentIndex)
             }
 
-            SpinBox {
-                id: gifLength
-
-                visible: format.currentIndex === 1
-                from: 1
-                to: Math.max(1, Math.ceil(backend.duration))
-                value: Math.min(backend.preference("export/gifSeconds", 10), to)
-                onValueModified: backend.remember("export/gifSeconds", value)
-                editable: true
-            }
-
             Label {
-                text: format.currentIndex === 1 ? "Silent loop. Rough estimate: " + (parseInt(outputWidth.currentText) * parseInt(outputWidth.currentText) * 9 / 16 * parseInt(outputFps.currentText) * gifLength.value * 0.03 / 1e+06).toFixed(1) + "–" + (parseInt(outputWidth.currentText) * parseInt(outputWidth.currentText) * 9 / 16 * parseInt(outputFps.currentText) * gifLength.value * 0.2 / 1e+06).toFixed(1) + " MB. Motion and detail affect the final size." : "H.264 video + AAC audio"
+                text: format.currentIndex === 1 ? "Silent loop of the whole edit. Busy motion makes large files." : "H.264 video + AAC audio"
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
                 color: theme.colors.dark_foreground
@@ -997,7 +1419,7 @@ ApplicationWindow {
                 primary: true
                 onClicked: {
                     exportDialog.close();
-                    backend.exportVideo(format.currentIndex === 1, parseInt(outputWidth.currentText), parseInt(outputFps.currentText), [18, 23, 28][quality.currentIndex], gifLength.value);
+                    backend.exportVideo(format.currentIndex === 1, parseInt(outputWidth.currentText), parseInt(outputFps.currentText), [18, 23, 28][quality.currentIndex]);
                 }
             }
 
