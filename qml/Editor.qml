@@ -230,10 +230,20 @@ FocusScope {
 
     }
 
+    // In the bottom-left corner, with the rows that fit clear of the picture. Beside the dock,
+    // which leaves it room while the timeline still fits (720 px); hidden otherwise.
     HotkeyLegend {
-        visible: !stage.windowed
+        id: legend
+
+        // Where the dock may start.
+        readonly property real reach: x + width + 12
+        readonly property bool beside: !stage.windowed && !editor.cropping && parent.width - 2 * reach >= 720
+
+        visible: beside && rows > 0
         x: 14
-        y: parent.height - 14 - height
+        floor: parent.height - 14
+        ceiling: toolbar.y + toolbar.height + 12
+        avoid: preview.picture
         entries: [["Esc", "Back · close"], ["W", "Window"], ["E", "Export"], ["B F G P", "Backdrop · frame · glass · camera"], ["K", "Crop"], ["S", "Split at playhead"], ["Z", "Zoom at playhead"], ["C V", "Cut · select"], ["Del", "Delete selection"], ["← →", "Step a frame"], ["Space", "Play · pause"], ["Ctrl+Z", "Undo · Shift redoes"]]
     }
 
@@ -284,7 +294,7 @@ FocusScope {
         id: dock
 
         visible: !editor.cropping
-        width: Math.min(parent.width - 28, Math.max(860, parent.width * 0.6))
+        width: Math.min(parent.width - 28, Math.max(860, parent.width * 0.6), legend.beside ? parent.width - 2 * legend.reach : Infinity)
         height: timeline.implicitHeight + 24
         x: (parent.width - width) / 2
         y: parent.height - height - 14
@@ -302,6 +312,7 @@ FocusScope {
     }
 
     StatusPill {
+        width: Math.min(implicitWidth, dock.width)
         x: (parent.width - width) / 2
         y: (editor.cropping ? parent.height : dock.y) - height - 12
         text: editor.status

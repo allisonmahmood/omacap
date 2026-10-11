@@ -9,6 +9,8 @@ Item {
     property int zoomIndex: -1
     readonly property bool aiming: zoomIndex >= 0 && !backend.playing
     readonly property alias composition: composition
+    // Where the styled recording is drawn, in the parent's coordinates.
+    readonly property rect picture: Qt.rect(x + fit.x, y + fit.y, fit.width, fit.height)
 
     // A click on the recording itself, outside the camera and the aim.
     signal clicked()
