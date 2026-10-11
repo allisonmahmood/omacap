@@ -72,6 +72,7 @@ class VideoStage : public QObject {
 
     void phaseChanged();
     void decideSession();
+    void askReplace();
     void showCard(const QString &kind);
     void dropCard();
     void closeEditor();

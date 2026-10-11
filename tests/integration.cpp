@@ -700,11 +700,11 @@ class Integration : public QObject {
         click(track, .5);
         QTest::keyClick(win, Qt::Key_Escape);
         QCOMPARE(timeline->property("selection").toString(), QString());
-        QVERIFY(!editor->property("discarding").toBool());
+        QCOMPARE(editor->property("discarding").toString(), QString());
         QTest::keyClick(win, Qt::Key_Escape);
-        QVERIFY(editor->property("discarding").toBool());
+        QCOMPARE(editor->property("discarding").toString(), QString("close"));
         QTest::keyClick(win, Qt::Key_Escape);
-        QVERIFY(!editor->property("discarding").toBool());
+        QCOMPARE(editor->property("discarding").toString(), QString());
         QCOMPARE(b.phase(), QString("editor"));
         QTest::keyClick(win, Qt::Key_Escape);
         QTest::keyClick(win, Qt::Key_Return);
@@ -1345,7 +1345,7 @@ class Integration : public QObject {
         QCOMPARE(finished.count(), 1);
         QVERIFY(b.duration() > .5 && b.duration() < 2.5);
 
-        // An edited session is only replaced once the UI agrees.
+        // An edited session is only replaced once the UI agrees, which discards it at once.
         b.setValue("padding", b.edit()["padding"].toDouble() + .01);
         QSignalSpy asked(&b, &Backend::replaceRequested);
         std::optional<bool> answer;
@@ -1357,10 +1357,11 @@ class Integration : public QObject {
         b.answerReplace(false);
         QCOMPARE(answer, std::optional(false));
         QCOMPARE(b.phase(), QString("editor"));
+        const QString first = b.original();
         b.confirmReplace([&](bool yes) { answer = yes; });
         b.answerReplace(true);
         QCOMPARE(answer, std::optional(true));
-        const QString first = b.original();
+        QCOMPARE(b.phase(), QString("idle"));
         QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
         QVERIFY(QFile::exists(first));
         b.stop();
@@ -1426,15 +1427,70 @@ class Integration : public QObject {
         QCOMPARE(ask(recordKey)["action"].toString(), QString("stopped"));
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
 
-        QCOMPARE(ask({{"cmd", "open"}, {"path", video}})["ok"].toBool(), true);
+        const QJsonObject open{{"cmd", "open"}, {"path", video}};
+        QCOMPARE(ask(open)["ok"].toBool(), true);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
-        QCOMPARE(ask(recordKey)["action"].toString(), QString("pick")); // nothing edited
-        b.setValue("padding", b.edit()["padding"].toDouble() + .01);
+        // The record key starts over: a session without unsaved edits ends at once.
+        QCOMPARE(ask(recordKey)["action"].toString(), QString("pick"));
+        QCOMPARE(b.phase(), QString("idle"));
+        // Whatever would replace unsaved edits asks first; yes discards them.
         bool replace = false;
         QObject::connect(&b, &Backend::replaceRequested, &b, [&] { b.answerReplace(replace); });
+        const auto edit = [&] {
+            if (b.phase() != "editor") {
+                b.loadFile(video);
+                QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+            }
+            b.setValue("padding", b.edit()["padding"].toDouble() + .01);
+            QVERIFY(b.dirty());
+        };
+        edit();
         QCOMPARE(ask(recordKey)["action"].toString(), QString("busy"));
+        QCOMPARE(ask(record)["error"].toString(), QString("OmaCap is busy."));
+        QCOMPARE(ask(open)["ok"].toBool(), false);
+        QVERIFY(b.dirty());
         replace = true;
         QCOMPARE(ask(recordKey)["action"].toString(), QString("pick"));
+        QCOMPARE(b.phase(), QString("idle"));
+        edit();
+        QCOMPARE(ask(open)["ok"].toBool(), true);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QVERIFY(!b.dirty());
+        b.discard();
+    }
+    // The editor asks before a command replaces unexported edits; Esc keeps them.
+    void replaceWhileEditing() {
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
+        VideoOwner owner;
+        QVERIFY(owner.acquire());
+        owner.attach(b);
+        QObject::disconnect(&b, &Backend::exitRequested, nullptr, nullptr);
+        QObject::disconnect(&b, &Backend::backgroundError, nullptr, nullptr);
+        auto win = openEditor(s, "tests/out/delayed.mkv");
+        QVERIFY(win);
+        auto editor = s.stage.editor();
+        b.setValue("padding", b.edit()["padding"].toDouble() + .01);
+        auto keyReply = QtConcurrent::run([] { return askVideoOwner({{"cmd", "record-key"}}); });
+        QTRY_COMPARE(editor->property("discarding").toString(), QString("replace"));
+        QVERIFY(find(win->contentItem(), "discardDialog")->isVisible());
+        QTest::keyClick(win, Qt::Key_Escape);
+        QTRY_VERIFY(keyReply.isFinished());
+        QCOMPARE(keyReply.result().value_or(QJsonObject())["action"].toString(), QString("busy"));
+        QCOMPARE(b.phase(), QString("editor"));
+        QVERIFY(b.dirty());
+        // Enter discards the edit, and the video opens in its place.
+        const QString video = QDir::current().absoluteFilePath("tests/out/delayed.mkv");
+        auto openReply = QtConcurrent::run(
+            [video] { return askVideoOwner({{"cmd", "open"}, {"path", video}}); });
+        QTRY_COMPARE(editor->property("discarding").toString(), QString("replace"));
+        QTest::keyClick(win, Qt::Key_Return);
+        QTRY_VERIFY(openReply.isFinished());
+        QVERIFY(openReply.result().value_or(QJsonObject())["ok"].toBool());
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QTRY_VERIFY(s.stage.editorWindow());
+        QVERIFY(!b.dirty());
         b.discard();
     }
     // The backend ends the process once no card or editor is open and nothing records,

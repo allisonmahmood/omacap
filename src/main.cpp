@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
         return runVideoApp(argc, argv);
     if (args == QStringList{"--record"}) {
         // The video process answers once the user has decided about an unsaved edit.
-        const auto reply = askVideoOwner({{"cmd", "record-key"}}, 120000);
+        const auto reply = askVideoOwner({{"cmd", "record-key"}}, answerTimeoutMs);
         if (reply && (*reply)["action"].toString() != "pick")
             return 0;
         // With no video process running, an earlier session's unfinished edit is offered

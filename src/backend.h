@@ -60,7 +60,9 @@ class Backend : public QObject {
     double focusX() const;
     double focusY() const;
     double progress() const { return m_progress; }
-    bool dirty() const { return m_dirty; }
+    // Edits made since the last export, which closing or replacing the session would lose.
+    // The recording itself is kept either way.
+    bool dirty() const { return m_dirty && (!past.isEmpty() || recoveredEdits); }
     // Whether an earlier session left an unfinished edit or recording behind. Static, so
     // `omacap --record` can ask before a video process runs (once the app's name is set).
     static bool recoverable();
@@ -69,19 +71,18 @@ class Backend : public QObject {
     QString original() const { return m_original; }
     QSize sourceSize() const { return {sourceWidth, sourceHeight}; }
     // Starts the countdown for a recording, replacing the session. Returns why it can't start
-    // (it would lose edits the user hasn't agreed to replace, or can't record the request);
-    // empty when it started.
+    // (it would lose unsaved edits, or can't record the request); empty when it started.
     QString startRecording(const RecordRequest &request, bool synthetic = false);
     // Cancels the countdown, or stops the recording.
     Q_INVOKABLE void stop();
     // The UI reports whether a card or editor is open, counting one hidden for a recording.
     // Once nothing is open and the phase is idle, exitRequested() follows.
     void setUiOpen(bool open);
-    // Answers replaceRequested(): true discards the edit for the new recording or file.
-    Q_INVOKABLE void answerReplace(bool replace);
     // Calls `answer` with whether a new recording or file may replace the session. Asks the UI
-    // first (replaceRequested) when that would lose edits; false while busy.
+    // first (replaceRequested) when that would lose unsaved edits; false while busy.
     void confirmReplace(std::function<void(bool)> answer);
+    // Answers replaceRequested(). Yes discards the session at once, so it can be replaced.
+    Q_INVOKABLE void answerReplace(bool replace);
     // A failure that leaves nothing loaded: back to idle, with backgroundError() when no card
     // or editor is open to show it.
     void fail(const QString &message);
@@ -149,8 +150,7 @@ class Backend : public QObject {
     double m_position = 0, m_aspect = 16. / 9, m_progress = 0;
     int sourceWidth = 1920, sourceHeight = 1080, screenRevision = 0, cameraRevision = 0;
     bool m_dirty = false, exportCancelled = false, hasMic = false, hasDesktop = false,
-         hasCamera = false, uiOpen = false, announceRecording = false, replaceConfirmed = false,
-         recoveredEdits = false;
+         hasCamera = false, uiOpen = false, announceRecording = false, recoveredEdits = false;
     std::function<void(bool)> pendingReplace;
     QString captureError;
     QByteArray workerBuffer;
@@ -176,7 +176,6 @@ class Backend : public QObject {
     QSettings settings;
     void status(QString phase, QString message = {});
     bool mayReplace() const;
-    bool unsavedEdits() const;
     void newSession();
     void checkpoint();
     void push();

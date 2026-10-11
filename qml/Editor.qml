@@ -11,7 +11,9 @@ FocusScope {
     // The open popover: "backdrop", "frame", "glass", "camera", "zoom", "export", or "".
     property string popover: ""
     property bool cropping: false
-    property bool discarding: false
+    // What the discard dialog asks about: "close" before closing an edit with unexported
+    // changes, "replace" before a new recording or video replaces it, or "".
+    property string discarding: ""
     readonly property bool editable: backend.phase === "editor"
     readonly property int selectedZoom: timeline.selectedZoom
     readonly property var zoom: selectedZoom >= 0 ? backend.edit.zooms[selectedZoom] ?? null : null
@@ -109,8 +111,8 @@ FocusScope {
     // then the crop view, then the editor itself.
     function stepBack() {
         backend.endEdit();
-        if (discarding)
-            discarding = false;
+        if (discarding !== "")
+            answer(false);
         else if (popover !== "")
             popover = "";
         else if (timeline.selection !== "" || timeline.cutting) {
@@ -129,9 +131,28 @@ FocusScope {
             popover = "export";
             return;
         }
+        if (discarding !== "")
+            return;
         if (backend.dirty)
-            discarding = true;
+            discarding = "close";
         else
+            backend.discard();
+    }
+
+    // VideoStage asks this before a new recording or video replaces unexported edits.
+    function askReplace() {
+        backend.endEdit();
+        popover = "";
+        discarding = "replace";
+    }
+
+    // Answers the discard dialog: discard the edit, or keep editing.
+    function answer(discard) {
+        const question = discarding;
+        discarding = "";
+        if (question === "replace")
+            backend.answerReplace(discard);
+        else if (discard)
             backend.discard();
     }
 
@@ -139,12 +160,12 @@ FocusScope {
         const plain = (event.modifiers & ~Qt.KeypadModifier) === Qt.NoModifier;
         const control = event.modifiers & Qt.ControlModifier;
         const shift = event.modifiers & Qt.ShiftModifier;
-        const open = !cropping && !discarding;
+        const open = !cropping && discarding === "";
         let handled = true;
         if (event.key === Qt.Key_Escape)
             stepBack();
-        else if (discarding && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter))
-            discard.confirm();
+        else if (discarding !== "" && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter))
+            answer(true);
         else if (cropping && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter))
             cropView.confirm();
         else if (control && event.key === Qt.Key_Z && open && editable)
@@ -340,18 +361,11 @@ FocusScope {
         anchorItem: toolbar.button("export")
     }
 
-    // Asks before closing a session with unexported edits.
+    // Asks before closing an edit with unexported changes, or replacing it.
     Item {
-        id: discard
-
-        function confirm() {
-            editor.discarding = false;
-            backend.discard();
-        }
-
         objectName: "discardDialog"
         anchors.fill: parent
-        visible: editor.discarding
+        visible: editor.discarding !== ""
         z: 3
 
         Rectangle {
@@ -360,7 +374,7 @@ FocusScope {
 
             MouseArea {
                 anchors.fill: parent
-                onClicked: editor.discarding = false
+                onClicked: editor.answer(false)
             }
 
         }
@@ -386,7 +400,7 @@ FocusScope {
 
                 Text {
                     Layout.fillWidth: true
-                    text: "It has changes that haven't been exported. " + (backend.original ? "The recording stays at " + backend.original + "." : "Discarding removes its temporary media.")
+                    text: (editor.discarding === "replace" ? "A new recording or video replaces it, and its changes haven't been exported. " : "It has changes that haven't been exported. ") + (backend.original ? "The recording stays at " + backend.original + "." : "Discarding removes its temporary media.")
                     font: theme.font(12)
                     color: theme.alpha(theme.foreground, 190)
                     wrapMode: Text.Wrap
@@ -397,9 +411,10 @@ FocusScope {
                     spacing: 6
 
                     ChromeChip {
+                        objectName: "keepEditing"
                         text: "Keep editing"
                         key: "Esc"
-                        onClicked: editor.discarding = false
+                        onClicked: editor.answer(false)
                     }
 
                     ChromeChip {
@@ -407,7 +422,7 @@ FocusScope {
                         accent: true
                         text: "Discard"
                         key: "Enter"
-                        onClicked: discard.confirm()
+                        onClicked: editor.answer(true)
                     }
 
                 }

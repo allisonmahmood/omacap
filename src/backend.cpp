@@ -243,7 +243,7 @@ void Backend::setUiOpen(bool open) {
         exitCheck.start();
 }
 void Backend::confirmReplace(std::function<void(bool)> answer) {
-    if (m_phase == "idle" || (m_phase == "editor" && !unsavedEdits()))
+    if (mayReplace())
         return answer(true);
     if (m_phase != "editor" || pendingReplace)
         return answer(false);
@@ -251,17 +251,14 @@ void Backend::confirmReplace(std::function<void(bool)> answer) {
     emit replaceRequested();
 }
 void Backend::answerReplace(bool replace) {
-    replaceConfirmed = replace;
-    if (auto answer = std::exchange(pendingReplace, {}))
-        answer(replace);
+    if (replace)
+        discard(); // answers the question: nothing is left to lose
+    else if (auto answer = std::exchange(pendingReplace, {}))
+        answer(false);
 }
 // A new recording or file may replace the session only when no edits would be lost.
 bool Backend::mayReplace() const {
-    return m_phase == "idle" || (m_phase == "editor" && (!unsavedEdits() || replaceConfirmed));
-}
-// Edits made since the last export. The recording itself is kept either way.
-bool Backend::unsavedEdits() const {
-    return m_dirty && (!past.isEmpty() || recoveredEdits);
+    return m_phase == "idle" || (m_phase == "editor" && !dirty());
 }
 QVariant Backend::preference(QString k, QVariant f) const {
     return settings.value(k, f);
@@ -323,11 +320,10 @@ void Backend::checkpoint() {
                                            {"original", m_original}});
 }
 QString Backend::startRecording(const RecordRequest &request, bool synthetic) {
+    if (const QString problem = request.unsupported(); !problem.isEmpty())
+        return problem;
     if (!mayReplace())
         return "OmaCap is busy.";
-    // The stream is in the panel's orientation; cropping it is not supported yet.
-    if (request.transform != 0)
-        return "OmaCap can't record rotated displays yet.";
     discard();
     newSession();
     hasMic = !request.mic.isEmpty();
@@ -375,7 +371,6 @@ void Backend::stop() {
 void Backend::loadFile(QString path) {
     if (!mayReplace())
         return;
-    replaceConfirmed = false;
     discard();
     newSession();
     captureError.clear();
@@ -1128,6 +1123,9 @@ void Backend::discard() {
     emit editChanged();
     emit frameChanged();
     emit cameraFrameChanged();
+    // A question about replacing the session is moot: nothing is left to lose.
+    if (auto answer = std::exchange(pendingReplace, {}))
+        answer(true);
 }
 bool Backend::recoverable() {
     const QString root = scratchRoot();

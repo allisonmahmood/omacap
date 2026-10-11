@@ -60,6 +60,7 @@ VideoStage::VideoStage(QQmlEngine &engine, Backend &backend, Theme &theme)
     connect(&backend, &Backend::changed, this, &VideoStage::phaseChanged);
     // A new recording shows the card; recordingFinished() comes with its move to "editor".
     connect(&backend, &Backend::recordingFinished, this, [this] { recordingDone = true; });
+    connect(&backend, &Backend::replaceRequested, this, &VideoStage::askReplace);
     if (onWayland())
         registerWindowRules(this);
 }
@@ -131,6 +132,16 @@ void VideoStage::decideSession() {
         showCard("recording");
     else
         openEditor();
+}
+
+// A new recording or file would replace unsaved edits: the editor asks. Such a session is
+// always in the editor; it is opened in case it isn't.
+void VideoStage::askReplace() {
+    openEditor();
+    if (editorItem)
+        QMetaObject::invokeMethod(editorItem, "askReplace");
+    else
+        backend.answerReplace(false);
 }
 
 void VideoStage::showCard(const QString &kind) {
