@@ -25,7 +25,8 @@ int runSnap(char *program, const QStringList &args) {
 //
 //   omacap [--screenshot]        the capture overlay's smart capture
 //   omacap shot.png              the screenshot editor
-//   omacap --record              stop the recording, or pick an area to record
+//   omacap --record              stop the recording, offer an unfinished edit, or pick an
+//                                area to record
 //   omacap --record-request JSON record a picked area (from the picker)
 //   omacap video.mp4             open a video in the editor
 //   omacap --export JOB          the offscreen export worker
@@ -45,6 +46,10 @@ int main(int argc, char **argv) {
         const auto reply = askVideoOwner({{"cmd", "record-key"}}, 120000);
         if (reply && (*reply)["action"].toString() != "pick")
             return 0;
+        // With no video process running, an earlier session's unfinished edit is offered
+        // first; the record key then picks as usual.
+        if (!reply && videoRecoverable())
+            return runVideoApp(argc, argv);
         return runSnap(argv[0], {"--record-picker"});
     }
     if (args.contains("--record-request") || !videoArgument(args).isEmpty()) {

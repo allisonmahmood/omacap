@@ -16,6 +16,11 @@ void nameApp() {
 }
 } // namespace
 
+bool videoRecoverable() {
+    nameApp();
+    return Backend::recoverable();
+}
+
 int runVideoApp(int argc, char **argv) {
     // As in Omasnap: LayerShellQt::Window::get gives only the overlay and the card a layer
     // role, so the floating editor and choosers keep Qt's xdg-shell integration. Qt's generic
