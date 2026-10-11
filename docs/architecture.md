@@ -55,7 +55,8 @@ make that hold:
 - **A clean last frame.** Stopping cuts at the moment of the request; the chrome hides
   only after the worker confirms it will keep nothing later.
 - **Other windows.** The editor and card hide when the phase becomes `countdown`, at least
-  three seconds before the first kept frame; `Recorder` hides any still visible.
+  three seconds before the first kept frame. `Recorder` hides any still visible then, and
+  any shown later, before it draws.
 
 The portal shares a monitor only after XDPH's picker, once per monitor: its restore token
 is kept in the settings under `restoreTokens/<monitor>` and replaced after every
