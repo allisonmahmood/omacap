@@ -443,12 +443,11 @@ int snapMain(int argc, char **argv) {
   CaptureEditor editor(std::move(capture), captureMode, quickOutputMode,
                        restoredLog, nullptr, editorWindowMode && !editingImage);
   // A recording that starts while the editor is open (from the video side)
-  // must not show it, or its choosers; they come back when it ends. The
-  // marker may have appeared since the check above, before the watcher.
+  // must not show any of it: the editor, a chooser, a message box over that.
+  // They come back when it ends. The marker may have appeared since the
+  // check above, before the watcher.
   RecordingWatcher recording;
-  QObject::connect(&recording, &RecordingWatcher::recordingChanged, &editor,
-                   &CaptureEditor::setConcealed);
-  editor.setConcealed(recording.recording());
+  const RecordingConcealment concealment(recording);
   editor.setPinDocument(std::move(pinDocument));
   if (recordPicker)
     editor.setRecordMode(true);

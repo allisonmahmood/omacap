@@ -3,10 +3,15 @@
 
 #include "video-ipc.h"
 
+#include <QApplication>
+#include <QEvent>
 #include <QFile>
 #include <QFileInfo>
 #include <QList>
+#include <QMetaObject>
 #include <QSocketNotifier>
+#include <QWidget>
+#include <QWindow>
 
 #include <algorithm>
 #include <cerrno>
@@ -14,6 +19,7 @@
 #include <poll.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <utility>
 
 namespace {
 /// The processes the marker names, one decimal PID per line. Empty when
@@ -128,4 +134,68 @@ void RecordingWatcher::refresh() {
     recording_ = recording;
     emit recordingChanged(recording_);
   }
+}
+
+RecordingConcealment::RecordingConcealment(const RecordingWatcher &recording,
+                                           QWidget *self)
+    : self_(self) {
+  qApp->installEventFilter(this);
+  connect(&recording, &RecordingWatcher::recordingChanged, this,
+          &RecordingConcealment::setConcealed);
+  setConcealed(recording.recording());
+}
+
+bool RecordingConcealment::eventFilter(QObject *watched, QEvent *event) {
+  // A window's Show event comes before it maps; concealed now, it never does.
+  if (active_ && event->type() == QEvent::Show && watched->isWidgetType()) {
+    auto *widget = static_cast<QWidget *>(watched);
+    if (widget->isWindow())
+      conceal(widget);
+  }
+  return QObject::eventFilter(watched, event);
+}
+
+void RecordingConcealment::setConcealed(bool concealed) {
+  if (concealed == active_)
+    return;
+  active_ = concealed;
+  if (concealed) {
+    for (QWidget *window : QApplication::topLevelWidgets()) {
+      if (window->isVisible())
+        conceal(window);
+    }
+    return;
+  }
+  // Parents first: each window comes back over the one it belongs to.
+  QList<QPointer<QWidget>> windows = std::exchange(concealed_, {});
+  const auto depth = [](const QPointer<QWidget> &window) {
+    int levels = 0;
+    for (QWidget *parent = window ? window->parentWidget() : nullptr; parent;
+         parent = parent->parentWidget())
+      ++levels;
+    return levels;
+  };
+  std::ranges::stable_sort(windows, {}, depth);
+  for (const QPointer<QWidget> &window : std::as_const(windows)) {
+    if (!window)
+      continue;
+    window->setAttribute(Qt::WA_DontShowOnScreen, false);
+    // The widget never stopped being visible: this maps its window again.
+    // One hidden meanwhile shows as usual next time.
+    if (window->isVisible())
+      window->windowHandle()->setVisible(true);
+  }
+}
+
+void RecordingConcealment::conceal(QWidget *window) {
+  // A window kept off screen for its own reasons stays as it is.
+  if (window == self_ || window->testAttribute(Qt::WA_DontShowOnScreen))
+    return;
+  // On a visible window this unmaps it, and nothing else.
+  window->setAttribute(Qt::WA_DontShowOnScreen, true);
+  concealed_.append(window);
+  // A menu or tooltip would be stale by the time the recording ends.
+  const Qt::WindowType type = window->windowType();
+  if (type == Qt::Popup || type == Qt::ToolTip)
+    QMetaObject::invokeMethod(window, &QWidget::close, Qt::QueuedConnection);
 }
