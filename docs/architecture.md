@@ -51,7 +51,8 @@ capture. Each surface is a QML item it hosts in a window it owns:
   does. Edit opens the editor; Export uses the last export settings and writes to Videos.
   It fades after 10 seconds without a hover, unless it is kept (pin) or exporting. Closing
   or fading ends the session; the recording itself stays in Videos. At start-up without a
-  file, the card instead offers an earlier session's unfinished edit for recovery.
+  file, the card instead offers an earlier session's unfinished edit for recovery; that
+  card fades the same way, and the edit stays recoverable.
 
 Opening a file goes straight to the editor. The process exits once its session has ended
 and no surface is open. The chrome is painted with Omasnap's own theme, fonts and icon code

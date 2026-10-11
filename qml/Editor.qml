@@ -74,6 +74,10 @@ FocusScope {
             cropping = false;
             timeline.cutting = !timeline.cutting;
             break;
+        case "cutMode":
+            cropping = false;
+            timeline.cutting = true;
+            break;
         case "split":
             timeline.splitAtPlayhead();
             break;
@@ -167,7 +171,7 @@ FocusScope {
                 [Qt.Key_P]: "camera",
                 [Qt.Key_E]: "export",
                 [Qt.Key_K]: "crop",
-                [Qt.Key_C]: "cut",
+                [Qt.Key_C]: "cutMode",
                 [Qt.Key_V]: "select",
                 [Qt.Key_S]: "split",
                 [Qt.Key_Z]: "addZoom",
