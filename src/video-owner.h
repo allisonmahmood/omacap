@@ -16,7 +16,7 @@ class VideoOwner : public QObject {
   public:
     VideoOwner();
     // Takes the video lock. False when another video process already owns it. A recording
-    // marker left by a crashed owner is removed.
+    // marker left by an owner that died goes once nothing it lists runs any more.
     bool acquire();
     // Starts accepting commands and quits the app when the backend asks to exit, then acts on
     // this process's arguments: records `--record-request <json>` or opens a video file.
@@ -27,14 +27,26 @@ class VideoOwner : public QObject {
     QLockFile lock;
     VideoOwnerServer server;
     std::unique_ptr<QSocketNotifier> quitting;
+    Backend *backend = nullptr;
+    // Exiting: commands get no reply, so their callers start a video process of their own.
+    bool closing = false;
+    // Errors to show once the capture has ended.
+    QStringList pending;
     void handleQuitSignals();
+    void clearStaleMarker();
+    bool capturing() const;
+    void notify(const QString &message);
 };
 
-// Shows an error as a desktop notification.
+// Shows an error as a desktop notification, unless a capture is running (it would be
+// recorded); then it goes to stderr only.
 void notifyError(const QString &message);
-// Hands `--record-request <json>` or a video file to the running video process, waiting while
-// it asks about unsaved edits. Returns this process's exit code, or nothing when no video
-// process answered. A refusal is also shown as a notification.
-std::optional<int> forwardToVideoOwner(const QStringList &args);
+// The command `args` ask of the video process: record `--record-request <json>`, or open a
+// video file. Nothing when they ask for neither.
+std::optional<QJsonObject> videoCommand(const QStringList &args);
+// Sends `command` to the running video process, waiting while it asks about unsaved edits.
+// Returns this process's exit code, or nothing when no video process answered. A refusal is
+// also shown as a notification, unless the video process shows it itself.
+std::optional<int> forwardToVideoOwner(const QJsonObject &command);
 // The first argument naming a video file, made absolute; empty when there is none.
 QString videoArgument(const QStringList &args);

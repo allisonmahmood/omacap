@@ -12,7 +12,13 @@ JSON lines: events on stdout, commands on stdin. Times are CLOCK_MONOTONIC nanos
             stop{at}       keep nothing captured after `at` (default now), then finish
 
 Every track starts at the first kept screen frame and is saved relative to it, so the file
-holds nothing from before `start`. SIGINT and SIGTERM stop now; stdin closing does too.
+holds nothing from before `start`. Encoded buffers wait HOLD before reaching the file, so a stop
+can still drop frames that passed the start of the pipeline before it arrived. SIGINT and
+SIGTERM stop now; stdin closing does too. Once the parent (the video process) dies, nothing
+more is kept, even before the main loop runs. The screen must keep the size the crop was made
+for: a stream that changes size ends the recording before any frame of the new size is kept,
+and one that breaks off (XDPH's does when the monitor's mode changes) ends it too; either way
+the file keeps what was recorded before.
 """
 
 import argparse, json, os, signal, subprocess, sys, threading, time
@@ -56,10 +62,18 @@ TRACK_TITLES = {"mic": "Microphone", "desktop": "Desktop"}
 OFFSET_NONE = Gst.BUFFER_OFFSET_NONE
 # Videos stay at most 4K; larger areas are scaled down after cropping.
 MAX_WIDTH, MAX_HEIGHT = 3840, 2160
+# How long encoded buffers wait before the file. A stop's `at` may lie this far in the past.
+HOLD = Gst.SECOND
+# The video process that started this worker; once it dies, this process is re-parented.
+parent = os.getppid()
 
 
 def emit(event, **data):
-    print(json.dumps(dict(event=event, **data)), flush=True)
+    try:
+        print(json.dumps(dict(event=event, **data)), flush=True)
+    except BrokenPipeError:
+        # Nobody reads any more (the parent died); finishing the file still matters.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 
 
 def now():
@@ -72,28 +86,50 @@ class Cut:
 
     Screen timestamps are the compositor's own (XDPH stamps each frame when Hyprland copies
     it), so a frame stamped after `after` was rendered after the chrome was hidden. Repeated
-    frames keep the sequence number of the frame they copy and never open the cut."""
+    frames keep the sequence number of the frame they copy and never open the cut.
+
+    The screen's streaming thread opens and closes the cut; `end` may come from any thread."""
 
     def __init__(self):
         self.after = None
         self.epoch = None
         self.until = None
         self.newest = -1
+        self.last = None  # the newest screen frame kept
+        self.lock = threading.Lock()
 
-    def screen(self, pts, seq):
+    def screen(self, pts, seq, opening=None):
+        """Whether to keep a screen frame. `opening(epoch)` runs just before the cut opens,
+        while every other track still drops all it gets."""
         fresh = seq == OFFSET_NONE or seq > self.newest
         if seq != OFFSET_NONE:
             self.newest = max(self.newest, seq)
+        if not self.keeps(pts):
+            return False
         if self.epoch is None:
             if self.after is None or not fresh or pts <= self.after:
                 return False
+            if opening:
+                opening(pts)
             self.epoch = pts
-        return self.until is None or pts <= self.until
+        self.last = pts
+        return True
+
+    def keeps(self, pts):
+        until = self.until
+        return until is None or pts <= until
 
     def track(self, pts):
-        return self.epoch is not None and self.epoch <= pts and (
-            self.until is None or pts <= self.until
-        )
+        return self.epoch is not None and self.epoch <= pts and self.keeps(pts)
+
+    def end(self, at):
+        """Keep nothing after `at`. An earlier end stands."""
+        with self.lock:
+            self.until = at if self.until is None else min(self.until, at)
+
+    def close(self):
+        """Keep no screen frame after the last one kept, and none at all if none was."""
+        self.end(-1 if self.last is None else self.last)
 
 
 cut = Cut()
@@ -134,8 +170,9 @@ def finish(error=""):
             pass
     if fd is not None:
         os.close(fd)
-    # A cancelled countdown records nothing; don't leave a header-only file behind.
-    if cut.epoch is None:
+    # A cancelled countdown, or a cut before the first frame, records nothing; don't leave a
+    # header-only file behind.
+    if not count:
         output.unlink(missing_ok=True)
     emit("finished", frames=count)
     loop.quit()
@@ -145,10 +182,10 @@ def finish(error=""):
 
 def stop(at=None):
     global stopping
+    cut.end(now() if at is None else at)
     if stopping:
         return False
     stopping = True
-    cut.until = now() if at is None else at
     emit("stopping")
     if pipeline:
         pipeline.send_event(Gst.Event.new_eos())
@@ -188,8 +225,36 @@ def read_commands(source, _condition):
     return True
 
 
-signal.signal(signal.SIGINT, lambda *_: GLib.idle_add(stop))
-signal.signal(signal.SIGTERM, lambda *_: GLib.idle_add(stop))
+def interrupted(*_):
+    # The cut ends here, as soon as Python runs the handler; the rest of the stop follows from
+    # the main loop.
+    cut.end(now())
+    GLib.idle_add(stop)
+
+
+signal.signal(signal.SIGINT, interrupted)
+signal.signal(signal.SIGTERM, interrupted)
+abandoned = threading.Event()
+
+
+def orphaned():
+    """Whether the parent died. The first streaming thread to notice ends the cut, so nothing
+    later is kept however busy the main loop is, and stops."""
+    if os.getppid() == parent:
+        return False
+    if not abandoned.is_set():
+        abandoned.set()
+        cut.end(now())
+        GLib.idle_add(stop)
+    return True
+
+
+def interrupt(message):
+    """Ends the recording early, keeping what the cut kept so far, and says why."""
+    if not stopping and not finished:
+        emit("error", message=message)
+        stop()
+    return False
 
 
 def request(name, values, options, done, timeout=25):
@@ -294,31 +359,74 @@ def shared(result):
 def message(_, msg):
     if msg.type == Gst.MessageType.ERROR:
         err, _ = msg.parse_error()
-        finish(str(err))
+        if msg.src.get_name() != "screen" or cut.epoch is None:
+            finish(str(err))
+            return
+        # The screen stream broke off, as XDPH's does when the monitor's mode changes. What was
+        # recorded is kept: the screen track ends here, and the file is finished as on a stop.
+        cut.close()
+        gate = pipeline.get_by_name("screen_gate").get_static_pad("sink")
+        gate.send_event(Gst.Event.new_eos())
+        interrupt(
+            "The screen stream ended, as it does when the display changes, so OmaCap stopped recording."
+        )
     elif msg.type == Gst.MessageType.EOS:
         finish()
 
 
+def opening(epoch):
+    # Every track is saved relative to the first kept frame. The offsets are in place before
+    # the cut opens, so no track passes a buffer with the old mapping.
+    for gate in gates:
+        gate.get_static_pad("src").set_offset(-epoch)
+    GLib.idle_add(lambda: emit("recording") and False)
+
+
 def screen_gate(pad, info, _):
-    global count
     buf = info.get_buffer()
     first(pad, "screen", buf)
-    opening = cut.epoch is None
-    if not cut.screen(buf.pts, buf.offset):
+    if orphaned() or not cut.screen(buf.pts, buf.offset, opening):
         return Gst.PadProbeReturn.DROP
-    if opening:
-        # Every track is saved relative to the first kept frame.
-        for gate in gates:
-            gate.get_static_pad("src").set_offset(-cut.epoch)
-        GLib.idle_add(lambda: emit("recording") and False)
-    count += 1
     return Gst.PadProbeReturn.OK
 
 
 def track_gate(pad, info, name):
     buf = info.get_buffer()
     first(pad, name, buf)
-    return Gst.PadProbeReturn.OK if cut.track(buf.pts) else Gst.PadProbeReturn.DROP
+    if orphaned() or not cut.track(buf.pts):
+        return Gst.PadProbeReturn.DROP
+    return Gst.PadProbeReturn.OK
+
+
+def screen_events(pad, info, size):
+    """Keeps the screen stream's renegotiations from the rest of the pipeline.
+
+    videocrop's margins were set for the monitor's size: a larger frame would let pixels
+    outside the area in. A stream that changes size keeps nothing more and stops; the new caps
+    never reach videocrop. pipewiresrc flushes when XDPH renegotiates, as when the monitor's
+    mode changes; a flush would empty the hold and the muxer and truncate the file."""
+    event = info.get_event()
+    if event.type in (Gst.EventType.FLUSH_START, Gst.EventType.FLUSH_STOP):
+        return Gst.PadProbeReturn.DROP
+    if event.type != Gst.EventType.CAPS:
+        return Gst.PadProbeReturn.OK
+    caps = event.parse_caps().get_structure(0)
+    if (caps.get_value("width"), caps.get_value("height")) == size:
+        return Gst.PadProbeReturn.OK
+    cut.close()
+    GLib.idle_add(interrupt, "The display changed, so OmaCap stopped recording.")
+    return Gst.PadProbeReturn.DROP
+
+
+def written(pad, info, name):
+    """After the hold: drops what a later cut excludes, and counts the screen frames saved."""
+    global count
+    buf = info.get_buffer()
+    if buf.pts != Gst.CLOCK_TIME_NONE and not cut.keeps(buf.pts):
+        return Gst.PadProbeReturn.DROP
+    if name == "screen":
+        count += 1
+    return Gst.PadProbeReturn.OK
 
 
 def first(pad, name, buf):
@@ -394,6 +502,7 @@ def start(node=None, props=None):
         # arrival; the cut depends on them.
         source = f"pipewiresrc name=screen fd={fd} {target} do-timestamp=false stream-properties=props,stream.is-live=false use-bufferpool=false always-copy=true min-buffers=8 max-buffers=16 on-disconnect=error keepalive-time=100 resend-last=true"
     left, top, right, bottom = crop_box(width, height)
+    hold = f"queue max-size-buffers=0 max-size-bytes=0 max-size-time={5 * HOLD} min-threshold-time={HOLD}"
     out_width, out_height = encoded_size(width - left - right, height - top - bottom)
     # Element properties are assigned below; device names and output paths never enter pipeline syntax.
     enc = (
@@ -405,7 +514,7 @@ def start(node=None, props=None):
         "matroskamux name=mux ! filesink name=output async=false "
         f"{source} ! identity name=screen_gate ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! "
         f"videocrop left={left} top={top} right={right} bottom={bottom} ! videoconvert ! videoscale ! "
-        f'capsfilter caps="video/x-raw,format=NV12,width={out_width},height={out_height},pixel-aspect-ratio=1/1" ! {enc} ! queue ! mux.video_0 '
+        f'capsfilter caps="video/x-raw,format=NV12,width={out_width},height={out_height},pixel-aspect-ratio=1/1" ! {enc} ! {hold} name=screen_hold ! mux.video_0 '
     )
     if a.camera:
         cam = (
@@ -413,14 +522,14 @@ def start(node=None, props=None):
             if a.synthetic
             else "v4l2src name=camera do-timestamp=true ! decodebin"
         )
-        desc += f"{cam} ! identity name=camera_gate ! queue ! videoconvert ! videoscale ! video/x-raw,format=I420,width=640,height=480 ! vp8enc deadline=1 cpu-used=8 threads=2 ! queue ! mux.video_1 "
+        desc += f"{cam} ! identity name=camera_gate ! queue ! videoconvert ! videoscale ! video/x-raw,format=I420,width=640,height=480 ! vp8enc deadline=1 cpu-used=8 threads=2 ! {hold} name=camera_hold ! mux.video_1 "
     for i, name in enumerate(n for n in ["mic", "desktop"] if getattr(a, n)):
         source = (
             f"audiotestsrc name={name} is-live=true freq={440 + i * 440}"
             if a.synthetic
             else f"pulsesrc name={name} do-timestamp=true"
         )
-        desc += f"{source} ! identity name={name}_gate ! queue ! audioconvert ! audioresample ! audio/x-raw,rate=48000 ! opusenc ! taginject name={name}_title ! queue ! mux.audio_{i} "
+        desc += f"{source} ! identity name={name}_gate ! queue ! audioconvert ! audioresample ! audio/x-raw,rate=48000 ! opusenc ! taginject name={name}_title ! {hold} name={name}_hold ! mux.audio_{i} "
     try:
         pipeline = Gst.parse_launch(desc)
         # Running time is CLOCK_MONOTONIC, the clock the compositor and OmaCap stamp with.
@@ -445,6 +554,14 @@ def start(node=None, props=None):
                     screen_gate if name == "screen" else track_gate,
                     name,
                 )
+                pipeline.get_by_name(f"{name}_hold").get_static_pad("src").add_probe(
+                    Gst.PadProbeType.BUFFER, written, name
+                )
+        pipeline.get_by_name("screen_gate").get_static_pad("src").add_probe(
+            Gst.PadProbeType.EVENT_DOWNSTREAM | Gst.PadProbeType.EVENT_FLUSH,
+            screen_events,
+            (width, height),
+        )
         for name, title in TRACK_TITLES.items():
             element = pipeline.get_by_name(f"{name}_title")
             if element:

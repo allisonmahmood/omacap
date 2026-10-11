@@ -9,12 +9,18 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QEvent>
+#include <QSaveFile>
 #include <QWindow>
 #include <signal.h>
 #include <sys/prctl.h>
+#include <unistd.h>
 
 namespace {
 QString tokenKey(const QString &monitor) { return "restoreTokens/" + monitor; }
+
+// How late Qt may tell us that a monitor changed. A stop after a change cuts this far back;
+// the worker holds encoded frames back for longer (HOLD), so none rendered since is saved.
+constexpr qint64 changeNoticeNs = 500'000'000;
 
 // Nothing but the recording chrome may be on screen once a recording starts. The editor and
 // card hide on the countdown phase; this makes sure.
@@ -53,7 +59,12 @@ class WindowGuard : public QObject {
 Recorder::Recorder(QObject *parent) : QObject(parent) {
     countdownTimer.setInterval(1000);
     connect(&countdownTimer, &QTimer::timeout, this, &Recorder::tick);
-    worker.setChildProcessModifier([] { prctl(PR_SET_PDEATHSIG, SIGTERM); });
+    // The worker stops when this process dies, also when it died before the signal was armed.
+    worker.setChildProcessModifier([parent = ::getpid()] {
+        prctl(PR_SET_PDEATHSIG, SIGTERM);
+        if (::getppid() != parent)
+            _exit(1);
+    });
     connect(&worker, &QProcess::readyReadStandardOutput, this, &Recorder::parseWorker);
     connect(&worker, &QProcess::finished, this, [this] {
         parseWorker();
@@ -90,12 +101,17 @@ Recorder::~Recorder() {
             worker.waitForFinished(2000);
         }
     }
-    removeMarker();
+    if (worker.state() == QProcess::NotRunning)
+        removeMarker();
 }
 
-void Recorder::start(const RecordRequest &next, const QString &path, bool synthetic) {
+QString Recorder::start(const RecordRequest &next, const QString &path, bool synthetic) {
     if (m_state != State::Idle)
-        return;
+        return "OmaCap is already recording.";
+    // First of all: while the marker lists this process, no other OmaCap surface shows.
+    if (const QString problem = publishMarker({QCoreApplication::applicationPid()});
+        !problem.isEmpty())
+        return "OmaCap can't record: " + problem;
     request = next;
     output = path;
     error.clear();
@@ -103,10 +119,10 @@ void Recorder::start(const RecordRequest &next, const QString &path, bool synthe
     recording = false;
     m_countdown = 3;
     setState(State::Countdown);
-    writeMarker();
     stopHint = "Run omacap --record again to stop";
     chrome = std::make_unique<RecordingChrome>(request, stopHint);
     connect(chrome.get(), &RecordingChrome::stopClicked, this, &Recorder::stop);
+    connect(chrome.get(), &RecordingChrome::displayChanged, this, &Recorder::displayChanged);
     if (!synthetic) {
         guard = std::make_unique<WindowGuard>(*chrome);
         lookUpHotkey();
@@ -143,24 +159,43 @@ void Recorder::start(const RecordRequest &next, const QString &path, bool synthe
     hideWindows = !synthetic;
     worker.setProcessEnvironment(QProcessEnvironment::systemEnvironment());
     worker.start("/usr/bin/python", args);
+    // The worker may keep frames until it exits, so it is listed too. Nothing shows before it
+    // streams, so one that can't be listed ends before anything has.
+    if (const qint64 pid = worker.processId(); pid > 0) {
+        if (const QString problem = publishMarker({QCoreApplication::applicationPid(), pid});
+            !problem.isEmpty()) {
+            error = "OmaCap can't record: " + problem;
+            worker.kill();
+        }
+    }
+    return {};
 }
 
-void Recorder::stop() {
-    if (m_state == State::Countdown) {
-        // Nothing has been kept yet, so the worker finishes without a recording.
-        countdownTimer.stop();
-        setState(State::Stopping);
-        send({{"cmd", "stop"}});
-    } else if (m_state == State::Recording) {
-        setState(State::Stopping);
-        send({{"cmd", "stop"}, {"at", monotonicNow()}});
-    } else {
+void Recorder::stop() { stopAt(monotonicNow()); }
+
+// Keeps nothing captured after `at` (CLOCK_MONOTONIC nanoseconds). Stopped during the
+// countdown, the worker finishes without a recording.
+void Recorder::stopAt(qint64 at) {
+    if (m_state != State::Countdown && m_state != State::Recording)
         return;
-    }
+    countdownTimer.stop();
+    setState(State::Stopping);
+    send({{"cmd", "stop"}, {"at", at}});
     QTimer::singleShot(10000, this, [this, pid = worker.processId()] {
         if (worker.state() != QProcess::NotRunning && worker.processId() == pid)
             worker.kill();
     });
+}
+
+// The recorded monitor or the HUD's changed scale, size or rotation, so the chrome may now be
+// in the area. It goes first; then the recording ends before the change.
+void Recorder::displayChanged() {
+    if (m_state != State::Countdown && m_state != State::Recording)
+        return;
+    const qint64 noticed = monotonicNow();
+    chrome->conceal();
+    error = "The display changed, so OmaCap stopped recording.";
+    stopAt(noticed - changeNoticeNs);
 }
 
 void Recorder::tick() {
@@ -202,12 +237,11 @@ void Recorder::parseWorker() {
             if (m_state == State::Countdown)
                 setState(State::Recording);
         } else if (event == "stopping") {
-            // Nothing captured from now on is kept, so the chrome may go and other OmaCap
-            // windows may show again.
+            // Nothing captured from now on is kept, so the chrome may go and this process's
+            // windows may show again. The marker stays until the worker has exited.
             guard.reset();
             if (chrome)
                 chrome->hide();
-            removeMarker();
         } else if (event == "error") {
             error = message["message"].toString();
         }
@@ -225,10 +259,17 @@ void Recorder::setState(State next) {
     emit stateChanged();
 }
 
-void Recorder::writeMarker() {
-    QFile marker(recordingMarkerPath());
-    if (marker.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        marker.write(QByteArray::number(QCoreApplication::applicationPid()) + '\n');
+// Replaces the marker in one step, so a reader sees the old one or all of the new one. Returns
+// what went wrong, or nothing.
+QString Recorder::publishMarker(const QList<qint64> &pids) {
+    QSaveFile marker(recordingMarkerPath());
+    if (marker.open(QIODevice::WriteOnly)) {
+        for (const qint64 pid : pids)
+            marker.write(QByteArray::number(pid) + '\n');
+        if (marker.commit())
+            return {};
+    }
+    return QString("%1 could not be written (%2).").arg(marker.fileName(), marker.errorString());
 }
 
 void Recorder::removeMarker() { QFile::remove(recordingMarkerPath()); }

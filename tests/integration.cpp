@@ -1393,8 +1393,8 @@ class Integration : public QObject {
                                                    {"description", "Screenrecording"}}})),
                  QString());
     }
-    // The marker exists from the first countdown frame until capture ends; a cancelled
-    // countdown leaves no recording behind.
+    // The marker lists this process and the worker from the request until the worker has
+    // exited; a cancelled countdown leaves no recording behind.
     void recordingLifecycle() {
         Theme t;
         Frames f;
@@ -1404,9 +1404,10 @@ class Integration : public QObject {
         const QString marker = recordingMarkerPath();
         QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
         QCOMPARE(b.phase(), QString("countdown"));
-        QFile pid(marker);
-        QVERIFY(pid.open(QIODevice::ReadOnly));
-        QCOMPARE(pid.readAll().trimmed().toLongLong(), QCoreApplication::applicationPid());
+        const QList<qint64> pids = recordingMarkerPids();
+        QCOMPARE(pids.size(), 2);
+        QCOMPARE(pids[0], QCoreApplication::applicationPid());
+        QVERIFY(processRunning(pids[1]));
         QVERIFY(!b.startRecording(syntheticRequest(), true).isEmpty());
         const QString cancelled = b.original();
         b.stop();
@@ -1419,10 +1420,12 @@ class Integration : public QObject {
 
         QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recording"), 15000);
-        QVERIFY(QFile::exists(marker));
+        const qint64 worker = recordingMarkerPids().value(1);
+        QVERIFY(processRunning(worker));
         QTest::qWait(1000);
         b.stop();
         QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(marker), 10000);
+        QVERIFY(!processRunning(worker));
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 20000);
         QCOMPARE(finished.count(), 1);
         QVERIFY(b.duration() > .5 && b.duration() < 2.5);
@@ -1449,6 +1452,18 @@ class Integration : public QObject {
         b.stop();
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
         QFile::remove(first);
+    }
+    // Without a marker, nothing would keep OmaCap's other surfaces out of the recording.
+    void unwritableMarker() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        QVERIFY(QDir().mkpath(recordingMarkerPath())); // can't be replaced by a file
+        const QString error = b.startRecording(syntheticRequest(), true);
+        QVERIFY(QDir().rmdir(recordingMarkerPath()));
+        QVERIFY2(error.startsWith("OmaCap can't record: "), qPrintable(error));
+        QCOMPARE(b.phase(), QString("idle"));
+        QVERIFY(b.sessionPath().isEmpty());
     }
     // Quitting mid-recording finalizes the file, which the next run recovers.
     void quitWhileRecording() {
@@ -1507,16 +1522,41 @@ class Integration : public QObject {
         Theme t;
         Frames f;
         Backend b(&t, &f);
+        // Left by an owner that died while its worker still runs: kept until the worker exits.
+        QProcess survivor;
+        survivor.start("sleep", {"30"});
+        QVERIFY(survivor.waitForStarted());
         QFile stale(recordingMarkerPath());
         QVERIFY(stale.open(QIODevice::WriteOnly));
+        stale.write("999999999\n" + QByteArray::number(survivor.processId()) + "\n");
         stale.close();
         VideoOwner owner;
         QVERIFY(owner.acquire());
-        QVERIFY(!QFile::exists(recordingMarkerPath())); // left by a crashed owner
+        QTest::qWait(700);
+        QVERIFY(QFile::exists(recordingMarkerPath()));
+        survivor.kill();
+        QTRY_VERIFY(!QFile::exists(recordingMarkerPath()));
         owner.attach(b);
-        // Keep the test process running and the desktop free of notifications.
+        // Keep the test process running and the desktop free of notifications: they go to a
+        // log instead.
         QObject::disconnect(&b, &Backend::exitRequested, nullptr, nullptr);
         QObject::disconnect(&b, &Backend::backgroundError, nullptr, nullptr);
+        QTemporaryDir bin;
+        QFile notifier(bin.filePath("omarchy-notification-send"));
+        QVERIFY(notifier.open(QIODevice::WriteOnly));
+        notifier.write("#!/bin/sh\nfor last; do :; done\nprintf '%s\\n' \"$last\" >>\"$0.log\"\n");
+        notifier.close();
+        notifier.setPermissions(QFileDevice::ReadOwner | QFileDevice::ExeOwner);
+        const QByteArray path = qgetenv("PATH");
+        qputenv("PATH", QFile::encodeName(bin.path()) + ":" + path);
+        const auto notified = [&] {
+            QFile log(notifier.fileName() + ".log");
+            QStringList lines;
+            if (log.open(QIODevice::ReadOnly))
+                lines = QString::fromUtf8(log.readAll()).split('\n', Qt::SkipEmptyParts);
+            lines.sort();
+            return lines;
+        };
         const auto ask = [](const QJsonObject &command) {
             auto reply = QtConcurrent::run([command] { return askVideoOwner(command); });
             QTest::qWaitFor([&] { return reply.isFinished(); }, 5000);
@@ -1531,15 +1571,30 @@ class Integration : public QObject {
         QVERIFY(ask({{"cmd", "record"}, {"request", rotated.toJson()}})["error"].toString().contains(
             "rotated"));
 
+        // Refused during a capture, and shown only once it has ended.
         QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
         const QJsonObject record{{"cmd", "record"}, {"request", syntheticRequest().toJson()}};
-        QCOMPARE(ask(record)["ok"].toBool(), false);
+        const QJsonObject refused = ask(record);
+        QCOMPARE(refused["ok"].toBool(), false);
+        QVERIFY(refused["deferred"].toBool());
+        QCOMPARE(refused["error"].toString(),
+                 QString("OmaCap is recording, so it can't start another recording."));
         const QString video = QDir::current().absoluteFilePath("tests/out/delayed.mkv");
-        QCOMPARE(ask({{"cmd", "open"}, {"path", video}})["ok"].toBool(), false);
+        const QJsonObject open{{"cmd", "open"}, {"path", video}};
+        QCOMPARE(ask(open)["deferred"].toBool(), true);
+        auto forwarded = QtConcurrent::run([open] { return forwardToVideoOwner(open); });
+        QTRY_VERIFY(forwarded.isFinished());
+        QCOMPARE(forwarded.result(), std::optional(1));
+        QTest::qWait(300);
+        QVERIFY(notified().isEmpty());
         QCOMPARE(ask(recordKey)["action"].toString(), QString("stopped"));
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+        const QString didntOpen = "OmaCap was recording, so it didn't open delayed.mkv.";
+        QTRY_COMPARE(notified(),
+                     (QStringList{didntOpen, didntOpen,
+                                  "OmaCap was recording, so it didn't start another recording."}));
+        qputenv("PATH", path);
 
-        const QJsonObject open{{"cmd", "open"}, {"path", video}};
         QCOMPARE(ask(open)["ok"].toBool(), true);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
         // The record key starts over: a session without unsaved edits ends at once.
@@ -1568,6 +1623,29 @@ class Integration : public QObject {
         QCOMPARE(ask(open)["ok"].toBool(), true);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
         QVERIFY(!b.dirty());
+        b.discard();
+    }
+    // A video process that loses the race to one still starting hands its file over once that
+    // one listens, instead of giving up.
+    void forwardWhileStarting() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        VideoOwner owner;
+        QVERIFY(owner.acquire());
+        QProcess loser;
+        loser.setProcessChannelMode(QProcess::ForwardedChannels);
+        loser.start(QCoreApplication::applicationDirPath() + "/omacap",
+                    {QDir::current().absoluteFilePath("tests/out/delayed.mkv")});
+        QVERIFY(loser.waitForStarted());
+        QTest::qWait(1500); // it found the lock taken and nobody listening
+        QCOMPARE(loser.state(), QProcess::Running);
+        owner.attach(b);
+        QObject::disconnect(&b, &Backend::exitRequested, nullptr, nullptr);
+        QObject::disconnect(&b, &Backend::backgroundError, nullptr, nullptr);
+        QTRY_COMPARE_WITH_TIMEOUT(loser.state(), QProcess::NotRunning, 10000);
+        QCOMPARE(loser.exitCode(), 0);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
         b.discard();
     }
     // The editor asks before a command replaces unexported edits; Esc keeps them.

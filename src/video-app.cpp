@@ -5,8 +5,10 @@
 #include "video-owner.h"
 #include "video-stage.h"
 #include <QApplication>
+#include <QDeadlineTimer>
 #include <QQmlEngine>
 #include <QQuickStyle>
+#include <QThread>
 
 namespace {
 // The names QSettings and QStandardPaths file the video process's settings and sessions under.
@@ -38,12 +40,19 @@ int runVideoApp(int argc, char **argv) {
     QApplication::setFont(chromeDefaultFont());
     QQuickStyle::setStyle("Basic");
     VideoOwner owner;
-    if (!owner.acquire()) {
-        // Another video process started first: it records the request or opens the file.
-        if (const auto forwarded = forwardToVideoOwner(app.arguments().mid(1)))
+    // Another video process started first: it records the request or opens the file. One that
+    // is starting listens only once it is ready, and one that is exiting answers nothing and
+    // then lets go of the lock, so keep trying to hand the command over, or to take its place.
+    const auto command = videoCommand(app.arguments().mid(1));
+    const QDeadlineTimer deadline(10000);
+    while (!owner.acquire()) {
+        if (const auto forwarded = command ? forwardToVideoOwner(*command) : std::nullopt)
             return *forwarded;
-        qWarning("OmaCap is already running.");
-        return 1;
+        if (!command || deadline.hasExpired()) {
+            qWarning("OmaCap is already running.");
+            return 1;
+        }
+        QThread::msleep(50);
     }
     Theme theme;
     QQmlEngine engine;

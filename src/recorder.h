@@ -16,7 +16,8 @@ class WindowGuard;
 // picker appears once per monitor. Once every source delivers, a three-second countdown runs
 // over the area; then the countdown turns transparent and the worker keeps frames from the
 // first one the compositor rendered after that. The HUD and outline never touch the encoded
-// area. While a countdown or recording runs, recordingMarkerPath() holds this process's PID.
+// area; when the monitor changes so that they might, they go and the recording ends. From
+// start() until the worker has exited, recordingMarkerPath() lists this process and the worker.
 class Recorder : public QObject {
     Q_OBJECT
   public:
@@ -24,7 +25,9 @@ class Recorder : public QObject {
     explicit Recorder(QObject *parent = nullptr);
     ~Recorder() override;
     // Records `request` into `output`. Synthetic sources stand in for the portal and devices.
-    void start(const RecordRequest &request, const QString &output, bool synthetic = false);
+    // Returns why it can't, e.g. when the recording marker can't be written; empty when it
+    // started.
+    QString start(const RecordRequest &request, const QString &output, bool synthetic = false);
     // Cancels a countdown, or ends the recording.
     void stop();
     State state() const { return m_state; }
@@ -39,8 +42,10 @@ class Recorder : public QObject {
     void setState(State state);
     void parseWorker();
     void tick();
+    void stopAt(qint64 at);
+    void displayChanged();
     void send(const QJsonObject &command);
-    void writeMarker();
+    QString publishMarker(const QList<qint64> &pids);
     void removeMarker();
     void lookUpHotkey();
     State m_state = State::Idle;

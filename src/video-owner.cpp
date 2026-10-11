@@ -5,11 +5,14 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QProcess>
+#include <QTimer>
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
+#include <utility>
 
 namespace {
 int quitPipe[2] = {-1, -1};
@@ -74,8 +77,10 @@ void handle(Backend &backend, const QJsonObject &command, const VideoOwnerServer
 
 // As Omasnap does, says what went wrong when nothing is open to say it.
 void notifyError(const QString &message) {
-    QProcess::startDetached("omarchy-notification-send",
-                            {"--app-name", "omacap", "-t", "4500", "OmaCap", message});
+    std::fprintf(stderr, "%s\n", qPrintable(message));
+    if (std::ranges::none_of(recordingMarkerPids(), processRunning))
+        QProcess::startDetached("omarchy-notification-send",
+                                {"--app-name", "omacap", "-t", "4500", "OmaCap", message});
 }
 
 VideoOwner::VideoOwner() : lock(omacapRuntimeDir() + "/video.lock") {}
@@ -83,10 +88,34 @@ VideoOwner::VideoOwner() : lock(omacapRuntimeDir() + "/video.lock") {}
 bool VideoOwner::acquire() {
     if (!lock.tryLock(100))
         return false;
-    // Only the lock holder writes the marker, so one found now outlived its owner.
-    QFile::remove(recordingMarkerPath());
+    clearStaleMarker();
     handleQuitSignals();
     return true;
+}
+
+// Only the lock holder writes the marker, so one found now outlived its owner. Its worker may
+// still be finishing, and OmaCap stays hidden until it has.
+void VideoOwner::clearStaleMarker() {
+    const QList<qint64> pids = recordingMarkerPids();
+    if (pids.contains(QCoreApplication::applicationPid()))
+        return; // this process is recording now
+    if (std::ranges::none_of(pids, processRunning))
+        QFile::remove(recordingMarkerPath());
+    else
+        QTimer::singleShot(500, this, &VideoOwner::clearStaleMarker);
+}
+
+bool VideoOwner::capturing() const {
+    const QString phase = backend ? backend->phase() : QString();
+    return phase == "countdown" || phase == "recording" || phase == "stopping";
+}
+
+// A notification now would be recorded: it waits until the capture has ended.
+void VideoOwner::notify(const QString &message) {
+    if (capturing())
+        pending << message;
+    else
+        notifyError(message);
 }
 
 // SIGINT and SIGTERM quit through the event loop rather than killing the process, so the
@@ -109,16 +138,41 @@ void VideoOwner::handleQuitSignals() {
 }
 
 bool VideoOwner::attach(Backend &backend) {
+    this->backend = &backend;
     if (!server.listen())
         qWarning("OmaCap cannot accept commands: %s", qPrintable(server.errorString()));
     connect(&server, &VideoOwnerServer::command, &backend,
-            [&backend](const QJsonObject &command, const VideoOwnerServer::Reply &reply) {
+            [this, &backend](const QJsonObject &command, const VideoOwnerServer::Reply &reply) {
+                if (closing)
+                    return;
+                const QString cmd = command["cmd"].toString();
+                if ((cmd == "record" || cmd == "open") && capturing()) {
+                    const QString what =
+                        cmd == "record"
+                            ? "start another recording"
+                            : "open " + QFileInfo(command["path"].toString()).fileName();
+                    notify("OmaCap was recording, so it didn't " + what + ".");
+                    return reply({{"ok", false},
+                                  {"error", "OmaCap is recording, so it can't " + what + "."},
+                                  {"deferred", true}});
+                }
                 handle(backend, command, reply);
             });
-    // Queued, so a reply written just before still reaches its caller. A failed startup,
-    // such as an invalid request, exits 1.
-    connect(&backend, &Backend::exitRequested, qApp, &QCoreApplication::exit, Qt::QueuedConnection);
-    connect(&backend, &Backend::backgroundError, this, notifyError);
+    // The backend asks from its exit check, which has just found nothing open and nothing
+    // running, so the exit is decided there and then. A command that still arrives gets no
+    // reply: its caller starts a video process of its own. A failed startup, such as an
+    // invalid request, exits 1.
+    connect(&backend, &Backend::exitRequested, this, [this](int code) {
+        closing = true;
+        server.close();
+        QCoreApplication::exit(code);
+    });
+    connect(&backend, &Backend::backgroundError, this, &VideoOwner::notify);
+    connect(&backend, &Backend::changed, this, [this] {
+        if (!capturing())
+            for (const QString &message : std::exchange(pending, {}))
+                notifyError(message);
+    });
     const QStringList args = QCoreApplication::arguments().mid(1);
     if (args.contains("--record-request")) {
         const auto request = RecordRequest::fromJson(requestArgument(args));
@@ -135,23 +189,27 @@ bool VideoOwner::attach(Backend &backend) {
     return true;
 }
 
-std::optional<int> forwardToVideoOwner(const QStringList &args) {
-    QJsonObject command;
+std::optional<QJsonObject> videoCommand(const QStringList &args) {
     if (args.contains("--record-request"))
-        command = {{"cmd", "record"}, {"request", requestArgument(args)}};
-    else if (const QString video = videoArgument(args); !video.isEmpty())
-        command = {{"cmd", "open"}, {"path", video}};
-    else
-        return std::nullopt;
+        return QJsonObject{{"cmd", "record"}, {"request", requestArgument(args)}};
+    if (const QString video = videoArgument(args); !video.isEmpty())
+        return QJsonObject{{"cmd", "open"}, {"path", video}};
+    return std::nullopt;
+}
+
+std::optional<int> forwardToVideoOwner(const QJsonObject &command) {
     const auto reply = askVideoOwner(command, answerTimeoutMs);
     if (!reply)
         return std::nullopt;
     if ((*reply)["ok"].toBool())
         return 0;
-    // The picker starts this process detached, so stderr alone would go unseen.
+    // The picker starts this process detached, so stderr alone would go unseen. A refusal
+    // during a capture, the video process shows once it has ended.
     const QString error = (*reply)["error"].toString();
-    std::fprintf(stderr, "%s\n", qPrintable(error));
-    notifyError(error);
+    if ((*reply)["deferred"].toBool())
+        std::fprintf(stderr, "%s\n", qPrintable(error));
+    else
+        notifyError(error);
     return 1;
 }
 

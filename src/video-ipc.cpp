@@ -1,10 +1,16 @@
 #include "video-ipc.h"
 #include <QDir>
+#include <QFile>
 #include <QJsonDocument>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QPointer>
 #include <QStandardPaths>
+#include <cerrno>
+#include <poll.h>
+#include <signal.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 QString omacapRuntimeDir() {
     // OMACAP_RUNTIME_DIR isolates test runs from a running OmaCap.
@@ -22,6 +28,33 @@ QString omacapRuntimeDir() {
 QString videoOwnerSocketPath() { return omacapRuntimeDir() + "/video.sock"; }
 
 QString recordingMarkerPath() { return omacapRuntimeDir() + "/recording"; }
+
+QList<qint64> recordingMarkerPids() {
+    QFile marker(recordingMarkerPath());
+    if (!marker.open(QIODevice::ReadOnly))
+        return {};
+    QList<qint64> pids;
+    for (const QByteArray &line : marker.readAll().split('\n')) {
+        bool ok = false;
+        if (const qint64 pid = line.trimmed().toLongLong(&ok); ok && pid > 0)
+            pids << pid;
+    }
+    return pids;
+}
+
+bool processRunning(qint64 pid) {
+    if (pid <= 0)
+        return false;
+    // A pidfd turns readable once the process exits, even before it is reaped, where kill(pid,
+    // 0) would still succeed.
+    const int fd = int(::syscall(SYS_pidfd_open, pid, 0));
+    if (fd < 0)
+        return errno != ESRCH && (::kill(pid_t(pid), 0) == 0 || errno == EPERM);
+    pollfd exited{fd, POLLIN, 0};
+    const bool running = ::poll(&exited, 1, 0) == 0;
+    ::close(fd);
+    return running;
+}
 
 std::optional<QJsonObject> askVideoOwner(const QJsonObject &command, int timeoutMs) {
     QLocalSocket socket;
@@ -72,5 +105,7 @@ bool VideoOwnerServer::listen() {
     QLocalServer::removeServer(videoOwnerSocketPath());
     return server->listen(videoOwnerSocketPath());
 }
+
+void VideoOwnerServer::close() { server->close(); }
 
 QString VideoOwnerServer::errorString() const { return server->errorString(); }

@@ -52,8 +52,8 @@ int main(int argc, char **argv) {
             return runVideoApp(argc, argv);
         return runSnap(argv[0], {"--record-picker"});
     }
-    if (args.contains("--record-request") || !videoArgument(args).isEmpty()) {
-        if (const auto forwarded = forwardToVideoOwner(args))
+    if (const auto command = videoCommand(args)) {
+        if (const auto forwarded = forwardToVideoOwner(*command))
             return *forwarded;
         return runVideoApp(argc, argv);
     }

@@ -1,5 +1,6 @@
 #pragma once
 #include <QJsonObject>
+#include <QList>
 #include <QObject>
 #include <QString>
 #include <functional>
@@ -22,15 +23,26 @@ class QLocalServer;
 //                         `record`.
 //
 // A command that would replace unsaved edits asks the user first, so its reply can wait for
-// them (answerTimeoutMs).
+// them (answerTimeoutMs). A refusal while a capture runs also carries "deferred":true: the
+// video process tells the user itself once the capture has ended, and the caller must not
+// show it (a notification now would be recorded). A video process that is exiting closes a
+// command's connection without a reply; the caller then starts a video process of its own.
 
 // Per-session runtime directory for OmaCap's sockets, locks and markers (0700).
 // $OMACAP_RUNTIME_DIR overrides it, so tests never meet a running OmaCap.
 QString omacapRuntimeDir();
 QString videoOwnerSocketPath();
-// Exists exactly while a countdown or recording is running. Previews and pins hide while it
-// exists, so no OmaCap surface ends up in a recording.
+// Exists from the moment a recording is requested until its capture worker has exited, and
+// holds one decimal PID per line: the video process's, then the worker's once it runs. While
+// any process it lists is running, no other OmaCap surface may show (pins, previews, the
+// picker, notifications), so none ends up in a recording. The video process writes it whole
+// (written aside, then renamed over it); one listing only exited processes is left over from
+// a crash and means nothing.
 QString recordingMarkerPath();
+// The processes recordingMarkerPath() lists; empty when there is none.
+QList<qint64> recordingMarkerPids();
+// Whether `pid` is running. One that has exited but not been reaped is not.
+bool processRunning(qint64 pid);
 
 // Sends one command to the running video process. Returns its reply, or nothing when no
 // video process is running or it did not answer in time.
@@ -47,6 +59,8 @@ class VideoOwnerServer : public QObject {
     explicit VideoOwnerServer(QObject *parent = nullptr);
     // Call only while holding the video lock: it removes a stale socket first.
     bool listen();
+    // Stops accepting connections and removes the socket.
+    void close();
     QString errorString() const;
   signals:
     void command(const QJsonObject &command, const VideoOwnerServer::Reply &reply);
