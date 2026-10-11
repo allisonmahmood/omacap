@@ -41,10 +41,11 @@ exports and spotlight sampling cannot disagree.
 - Fresh captures start with the last-used look, remembered in
   `~/.local/state/omacap/capture.ini`; the first default is the wallpaper. Opened files
   start plain. Omasnap's `[background]` config is gone.
-- The wallpaper is resolved when a document is created. Pictures are stored once, by
-  content, in `~/.local/state/omacap/backdrops/` and documents refer to them by id, so
-  undo, reopening and recents survive a wallpaper change. Recording a recent prunes
-  pictures nothing refers to any more.
+- The wallpaper is resolved when a document is created, or when a document that never
+  had one first shows it; nothing is pinned, kept or handed off before that. Pictures are
+  stored once, by content, in `~/.local/state/omacap/backdrops/` and documents refer to
+  them by id, so undo, reopening and recents survive a wallpaper change. Recording a
+  recent prunes day-old pictures that no recent, pin or open document refers to.
 - A fixed aspect grows the canvas around the card and never crops or downscales. It
   applies while the canvas is no larger than 8192 × 8192 logical px (or the Auto
   canvas, if larger); a tall scroll stitch, or a layer dragged far off, keeps Auto.
@@ -60,10 +61,11 @@ exports and spotlight sampling cannot disagree.
   (`src/editor-record.cpp`) and Enter hands a `RecordRequest` to the video process
   (`src/record-picker.hpp`), starting one with `--record-request` if none answers. The
   overlay closes before the handoff completes. Microphone, camera and desktop audio
-  choices are remembered in `capture.ini`.
+  choices are remembered in `capture.ini`, and can be changed once the devices are
+  listed.
 - While the recording marker exists and names a live process (`src/recording-state.hpp`:
   inotify plus the recorder's pidfd, no polling), previews and pins paint nothing, take
   no input and pause their countdown; other screenshot UI refuses to open, and an open
-  editor steps aside.
+  editor and its chooser step aside until it ends (`CaptureEditor::setConcealed`).
 
 `README.md` in this directory is upstream's, kept for reference.
