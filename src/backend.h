@@ -14,6 +14,7 @@
 #include <QVideoFrame>
 #include <QVideoSink>
 #include <memory>
+#include <sys/types.h>
 class Backend : public QObject {
     Q_OBJECT
     Q_PROPERTY(QVariantMap waveforms READ waveformData NOTIFY waveformsChanged)
@@ -107,6 +108,10 @@ class Backend : public QObject {
     Q_INVOKABLE void exportVideo(bool gif, int width, int fps, int quality);
     // Renders the styled screenshot once, then copies it, saves it, or both.
     Q_INVOKABLE void outputImage(bool copy, bool save);
+    // Hides OmaCap, runs Omarchy's region picker and opens the shot in the editor.
+    Q_INVOKABLE void takeScreenshot();
+    // `omacap --screenshot`: no window is open yet, and cancelling the pick quits.
+    void screenshotAtLaunch();
     Q_INVOKABLE void cancelExport();
     Q_INVOKABLE void revealExport();
     Q_INVOKABLE void openExport();
@@ -125,6 +130,8 @@ class Backend : public QObject {
     void positionChanged();
     void frameChanged();
     void cameraFrameChanged();
+    // Another `omacap --screenshot` asked this running instance for a new shot.
+    void screenshotRequested();
 
   private:
     Theme *theme;
@@ -142,7 +149,7 @@ class Backend : public QObject {
     int sourceWidth = 1920, sourceHeight = 1080, m_countdown = 0, screenRevision = 0,
         cameraRevision = 0;
     bool m_dirty = false, exportCancelled = false, hasMic = false, hasDesktop = false,
-         hasCamera = false, copyStill = false, saveStill = false;
+         hasCamera = false, copyStill = false, saveStill = false, quitOnCancel = false;
     QString captureError;
     QByteArray workerBuffer;
     QMediaPlayer screen, camera, mic, desktop;
@@ -174,6 +181,12 @@ class Backend : public QObject {
     void showImage(const QImage &image);
     void runExporter(const QJsonObject &job);
     void finishStill(int code);
+    void pickRegion();
+    void grabRegion(const QString &geometry);
+    // Ends the running pick's process group, which holds the screen freeze.
+    void endFreeze();
+    pid_t captureGroup = 0;
+    void endCapture(const QString &message);
     void ready();
     void openPlayers();
     qint64 screenSeekEnd = 0;
