@@ -71,11 +71,11 @@ inline constexpr qreal kDefaultLookShadow = 0.45;
 /// Mat kept beyond a layer that grows a Framed canvas, so it never ends flush
 /// against the edge.
 inline constexpr qreal kFramedLayerMargin = 15.0;
-/// A fixed aspect applies while the canvas's longer edge stays within this
-/// many logical pixels, or within the Auto canvas's longer edge if that is
-/// longer. Past it (a tall or wide scroll capture) the canvas stays Auto:
-/// nothing is ever cropped or downscaled, and a 16:9 frame around a
-/// 30 000 px stitch would be absurd.
+/// A fixed aspect applies while the canvas it gives is no larger than a
+/// square with edges this many logical pixels long, or than the Auto canvas
+/// if that is larger. Past it (a tall or wide scroll capture, or a layer far
+/// beyond the card) the canvas stays Auto: nothing is ever cropped or
+/// downscaled, and a 16:9 frame around a 30 000 px stitch would be absurd.
 inline constexpr qreal kMaximumAspectEdge = 8192.0;
 
 /// Where everything sits, in annotation space: the screenshot's logical

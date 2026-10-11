@@ -91,6 +91,20 @@ bool checkLayoutMaths(QString &error) {
     error = QStringLiteral("Growth did not keep the aspect and the corners");
     return false;
   }
+  // So does a wide one; a layer dragged far off keeps the grown canvas Auto
+  // rather than heightening it to 16:9 as well.
+  if (framedCanvas(QSizeF(30000, 500), look) !=
+      framedCanvas(QSizeF(30000, 500), automaticLook)) {
+    error = QStringLiteral("A wide stitch took a fixed aspect");
+    return false;
+  }
+  const QRectF distant(30000, 100, 80, 40);
+  if (captureLayout(wide, distant, CanvasBoundaryMode::Framed, look).canvas !=
+      captureLayout(wide, distant, CanvasBoundaryMode::Framed, automaticLook)
+          .canvas) {
+    error = QStringLiteral("A far layer widened a fixed aspect past its limit");
+    return false;
+  }
   // Overflow and Image never frame; Off frames nothing.
   const CaptureLayout overflow =
       captureLayout(wide, layer, CanvasBoundaryMode::Overflow, look);

@@ -46,9 +46,10 @@ exports and spotlight sampling cannot disagree.
   undo, reopening and recents survive a wallpaper change. Recording a recent prunes
   pictures nothing refers to any more.
 - A fixed aspect grows the canvas around the card and never crops or downscales. It
-  applies while the canvas's longer edge stays within 8192 logical px (or the Auto
-  canvas's, if longer); a tall scroll stitch keeps Auto. Framed growth adds 15 px beyond
-  a layer, then widens back to the aspect. Overflow and Image never frame.
+  applies while the canvas is no larger than 8192 × 8192 logical px (or the Auto
+  canvas, if larger); a tall scroll stitch, or a layer dragged far off, keeps Auto.
+  Framed growth adds 15 px beyond a layer, then widens back to the aspect. Overflow and
+  Image never frame.
 - The toolbar's style group has Backdrop, Frame and Glass popovers (`src/editor-look.cpp`).
   Colour… and Image… use the Save As chooser handoff (`src/editor-choosers.cpp`).
 

@@ -41,7 +41,17 @@ struct Frame {
   /// Width over height the frame was shaped to; 0 for Auto, including a
   /// fixed aspect that fell back to it.
   qreal aspect = 0.0;
+  /// The Auto frame: the card plus its padding.
+  QRectF automatic = rect;
 };
+
+/// Whether a fixed aspect may shape the canvas to `shaped` where Auto gives
+/// `automatic` (kMaximumAspectEdge).
+bool aspectFits(const QRectF &shaped, const QRectF &automatic) {
+  return shaped.width() * shaped.height() <=
+         std::max(kMaximumAspectEdge * kMaximumAspectEdge,
+                  automatic.width() * automatic.height());
+}
 
 qreal aspectRatio(CanvasAspect aspect) {
   switch (aspect) {
@@ -75,13 +85,11 @@ Frame lookFrame(const QSizeF &source, const CaptureLook &look) {
                               ratio * (1.0 / aspect - 2.0 * padding));
   const qreal width = source.width() / fill;
   const qreal height = width / aspect;
-  const qreal limit = std::max(
-      kMaximumAspectEdge, std::max(automatic.width(), automatic.height()));
-  if (std::max(width, height) > limit)
+  const QRectF shaped(-(width - source.width()) / 2.0,
+                      -(height - source.height()) / 2.0, width, height);
+  if (!aspectFits(shaped, automatic))
     return {automatic};
-  return {QRectF(-(width - source.width()) / 2.0,
-                 -(height - source.height()) / 2.0, width, height),
-          aspect};
+  return {shaped, aspect, automatic};
 }
 
 /// Grows `rect` about its center along the short axis until it is `aspect`.
@@ -188,12 +196,18 @@ CaptureLayout captureLayout(const QSizeF &source, const QRectF &layers,
       layout.styled ? lookFrame(source, look) : Frame{layout.card};
   QRectF canvas = frame.rect;
   if (grows) {
-    canvas = canvas.united(layers.adjusted(-kFramedLayerMargin,
+    const QRectF reached = layers.adjusted(-kFramedLayerMargin,
                                            -kFramedLayerMargin,
                                            kFramedLayerMargin,
-                                           kFramedLayerMargin));
-    if (frame.aspect > 0.0)
-      canvas = widenedToAspect(canvas, frame.aspect);
+                                           kFramedLayerMargin);
+    canvas = canvas.united(reached);
+    if (frame.aspect > 0.0) {
+      // The same limit as for the card alone: a layer dragged far off would
+      // otherwise widen 16:9 around it to billions of pixels.
+      const QRectF automatic = frame.automatic.united(reached);
+      const QRectF widened = widenedToAspect(canvas, frame.aspect);
+      canvas = aspectFits(widened, automatic) ? widened : automatic;
+    }
   }
   // A bare card keeps its exact, possibly fractional, size.
   if (grows || layout.styled)
