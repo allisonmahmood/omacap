@@ -30,9 +30,11 @@ class VideoOwner : public QObject {
     void handleQuitSignals();
 };
 
+// Shows an error as a desktop notification.
+void notifyError(const QString &message);
 // Hands `--record-request <json>` or a video file to the running video process, waiting while
 // it asks about unsaved edits. Returns this process's exit code, or nothing when no video
-// process answered.
+// process answered. A refusal is also shown as a notification.
 std::optional<int> forwardToVideoOwner(const QStringList &args);
 // The first argument naming a video file, made absolute; empty when there is none.
 QString videoArgument(const QStringList &args);

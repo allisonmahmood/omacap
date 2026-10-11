@@ -72,6 +72,12 @@ void handle(Backend &backend, const QJsonObject &command, const VideoOwnerServer
 }
 } // namespace
 
+// As Omasnap does, says what went wrong when nothing is open to say it.
+void notifyError(const QString &message) {
+    QProcess::startDetached("omarchy-notification-send",
+                            {"--app-name", "omacap", "-t", "4500", "OmaCap", message});
+}
+
 VideoOwner::VideoOwner() : lock(omacapRuntimeDir() + "/video.lock") {}
 
 bool VideoOwner::acquire() {
@@ -112,11 +118,7 @@ bool VideoOwner::attach(Backend &backend) {
     // Queued, so a reply written just before still reaches its caller. A failed startup,
     // such as an invalid request, exits 1.
     connect(&backend, &Backend::exitRequested, qApp, &QCoreApplication::exit, Qt::QueuedConnection);
-    // As Omasnap says what went wrong when nothing is open to say it.
-    connect(&backend, &Backend::backgroundError, this, [](const QString &message) {
-        QProcess::startDetached("omarchy-notification-send",
-                                {"--app-name", "omacap", "-t", "4500", "OmaCap", message});
-    });
+    connect(&backend, &Backend::backgroundError, this, notifyError);
     const QStringList args = QCoreApplication::arguments().mid(1);
     if (args.contains("--record-request")) {
         const auto request = RecordRequest::fromJson(requestArgument(args));
@@ -146,7 +148,10 @@ std::optional<int> forwardToVideoOwner(const QStringList &args) {
         return std::nullopt;
     if ((*reply)["ok"].toBool())
         return 0;
-    std::fprintf(stderr, "%s\n", qPrintable((*reply)["error"].toString()));
+    // The picker starts this process detached, so stderr alone would go unseen.
+    const QString error = (*reply)["error"].toString();
+    std::fprintf(stderr, "%s\n", qPrintable(error));
+    notifyError(error);
     return 1;
 }
 
