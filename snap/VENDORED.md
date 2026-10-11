@@ -69,6 +69,10 @@ exports and spotlight sampling cannot disagree.
   countdown, and other screenshot UI refuses to open. Every other window of an open
   editor or pin process (the editor, its choosers, their message boxes, menus and
   tooltips) goes off screen until it ends, and none shown meanwhile maps
-  (`RecordingConcealment`). Desktop notifications are logged instead.
+  (`RecordingConcealment`). A drag in progress is cancelled, and none starts.
+  Desktop notifications are logged instead.
+- Every notification is sent with `omarchy-notification-send -p`; a detached shell
+  appends the id it prints to `omacapRuntimeDir()/notifications`, one line in one
+  `O_APPEND` write. The recorder closes the listed ones when a countdown starts.
 
 `README.md` in this directory is upstream's, kept for reference.

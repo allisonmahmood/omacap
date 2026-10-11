@@ -2385,7 +2385,8 @@ QString recognizeText(const QImage &image, QString &error) {
 
 QStringList captureNotificationArguments(const QString &message,
                                          const QString &imagePath) {
-  QStringList arguments{QStringLiteral("-g"), QStringLiteral(""),
+  // -p prints the new notification's id, which sendCaptureNotification keeps.
+  QStringList arguments{QStringLiteral("-p"), QStringLiteral("-g"), QStringLiteral(""),
                         QStringLiteral("--app-name"), QStringLiteral("OmaCap"),
                         QStringLiteral("-t"), QStringLiteral("4500"), message};
   if (!imagePath.isEmpty()) {
@@ -2407,8 +2408,22 @@ void sendCaptureNotification(const QString &message, const QString &imagePath) {
     qInfo().noquote() << message;
     return;
   }
-  QProcess::startDetached(QStringLiteral("omarchy-notification-send"),
-                          captureNotificationArguments(message, imagePath));
+  // One sent just before a recording could still be up once it starts: the
+  // recorder closes every notification listed in OmaCap's notifications
+  // file then. A detached shell waits for the id and appends it, one line in
+  // one O_APPEND write, so neither this thread nor this process's exit waits.
+  static constexpr auto keepId = R"sh(
+ids=$1; shift
+id=$("$@") || exit
+case $id in '' | *[!0-9]*) exit ;; esac
+printf '%s\n' "$id" >> "$ids")sh";
+  QProcess::startDetached(
+      QStringLiteral("sh"),
+      QStringList{QStringLiteral("-c"), QString::fromLatin1(keepId),
+                  QStringLiteral("sh"),
+                  omacapRuntimeDir() + QStringLiteral("/notifications"),
+                  QStringLiteral("omarchy-notification-send")} +
+          captureNotificationArguments(message, imagePath));
 }
 
 void describeFileCapture(CaptureData &capture, QImage image,

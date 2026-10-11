@@ -6331,6 +6331,11 @@ bool runNotificationArgvCheck(QString &error) {
     error = QStringLiteral("-t must precede --exec");
     return false;
   }
+  const qsizetype printId = saved.indexOf(QStringLiteral("-p"));
+  if (printId < 0 || printId > exec || !plain.contains(QStringLiteral("-p"))) {
+    error = QStringLiteral("-p, for the notification's id, must precede --exec");
+    return false;
+  }
   const qsizetype image = saved.indexOf(QStringLiteral("--image"));
   if (image < 0 || saved.at(image + 1) != imagePath) {
     error = QStringLiteral("--image does not carry the saved path");
@@ -6338,13 +6343,14 @@ bool runNotificationArgvCheck(QString &error) {
   }
 
   // Sending runs omarchy-notification-send, here a stand-in that records
-  // what it was asked. While OmaCap records, the notification would be in
-  // the recording: the message goes to the log instead.
+  // what it was asked and answers -p with an id. While OmaCap records, the
+  // notification would be in the recording: the message goes to the log
+  // instead. Otherwise its id joins those the recorder closes when one
+  // starts, after any already listed.
   const QTemporaryDir bin;
-  const QString sent = bin.filePath(QStringLiteral("sent"));
   QFile sender(bin.filePath(QStringLiteral("omarchy-notification-send")));
   if (!bin.isValid() || !sender.open(QIODevice::WriteOnly) ||
-      sender.write("#!/bin/sh\necho \"$*\" >> \"$0.log\"\n") < 0 ||
+      sender.write("#!/bin/sh\necho \"$*\" >> \"$0.log\"\necho 4242\n") < 0 ||
       !sender.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
                              QFileDevice::ExeOwner)) {
     error = QStringLiteral("Could not prepare the notification stand-in");
@@ -6360,25 +6366,37 @@ bool runNotificationArgvCheck(QString &error) {
     return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll())
                                           : QString();
   };
+  QFile ids(omacapRuntimeDir() + QStringLiteral("/notifications"));
+  const auto idsText = [&] {
+    QFile file(ids.fileName());
+    return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+  };
   QFile marker(recordingMarkerPath());
-  if (!marker.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+  if (!ids.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+      ids.write("7\n") < 0 ||
+      !marker.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
       marker.write(QByteArray::number(QCoreApplication::applicationPid()) + '\n') < 0) {
     error = QStringLiteral("Could not write the recording marker");
     return false;
   }
+  ids.close();
   marker.close();
   sendCaptureNotification(QStringLiteral("during the recording"));
   marker.remove();
   sendCaptureNotification(QStringLiteral("after the recording"));
   QDeadlineTimer deadline(3000);
-  while (!sentText().contains(QStringLiteral("after the recording")) &&
-         !deadline.hasExpired())
+  while (idsText() != "7\n4242\n" && !deadline.hasExpired())
     QThread::msleep(10);
   QThread::msleep(100);
   if (!sentText().contains(QStringLiteral("after the recording")) ||
       sentText().contains(QStringLiteral("during the recording"))) {
     error = QStringLiteral("A notification was sent during a recording: %1")
                 .arg(sentText());
+    return false;
+  }
+  if (idsText() != "7\n4242\n") {
+    error = QStringLiteral("The notification's id was not appended: %1")
+                .arg(QString::fromUtf8(idsText()));
     return false;
   }
   return true;
