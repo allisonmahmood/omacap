@@ -1,6 +1,7 @@
 #include "recording-chrome.h"
 #include "chrome-theme.hpp"
 #include "overlay-chrome.hpp"
+#include "video-icons.h"
 #include <LayerShellQt/Window>
 #include <QGuiApplication>
 #include <QMouseEvent>
@@ -9,6 +10,8 @@
 #include <QScreen>
 #include <QWidget>
 #include <ctime>
+#include <optional>
+#include <utility>
 #include <wayland-client.h>
 
 qint64 monotonicNow() {
@@ -57,7 +60,9 @@ class ChromeSurface : public QWidget {
                   std::function<void(QPainter &, const QRect &)> paint)
         : paint(std::move(paint)) {
         setAttribute(Qt::WA_TranslucentBackground);
-        if (!input)
+        if (input)
+            setMouseTracking(true);
+        else
             setWindowFlag(Qt::WindowTransparentForInput);
         resize(global.size());
         winId();
@@ -74,6 +79,8 @@ class ChromeSurface : public QWidget {
         layer->setScreen(screen);
     }
     std::function<void(QPoint)> clicked;
+    // The pointer's position as it moves over the surface, and nothing once it leaves.
+    std::function<void(std::optional<QPoint>)> hovered;
 
   protected:
     void paintEvent(QPaintEvent *) override {
@@ -87,6 +94,14 @@ class ChromeSurface : public QWidget {
     void mousePressEvent(QMouseEvent *event) override {
         if (clicked)
             clicked(event->position().toPoint());
+    }
+    void mouseMoveEvent(QMouseEvent *event) override {
+        if (hovered)
+            hovered(event->position().toPoint());
+    }
+    void leaveEvent(QEvent *) override {
+        if (hovered)
+            hovered(std::nullopt);
     }
 
   private:
@@ -123,11 +138,17 @@ RecordingChrome::RecordingChrome(const RecordRequest &request, const QString &st
     if (layout.hud) {
         hud = add(layout.hudMonitor, *layout.hud, true,
                   [this](QPainter &painter, const QRect &bounds) { paintHud(painter, bounds); });
-        if (hud)
+        if (hud) {
             hud->clicked = [this](QPoint at) {
                 if (stopButton.contains(at))
                     emit stopClicked();
             };
+            hud->hovered = [this](std::optional<QPoint> at) {
+                const bool over = at && stopButton.contains(*at);
+                if (std::exchange(stopHovered, over) != over)
+                    hud->update();
+            };
+        }
         // A HUD whose monitor goes away is gone, never moved onto the recorded area.
         connect(qGuiApp, &QGuiApplication::screenRemoved, this, [this](QScreen *screen) {
             if (hud && hud->windowHandle()->screen() == screen) {
@@ -227,13 +248,16 @@ void RecordingChrome::paintHud(QPainter &painter, const QRect &bounds) const {
     painter.setFont(chromeMonoFont(13, true));
     painter.drawText(QRect(30, 0, 54, bounds.height()), Qt::AlignVCenter | Qt::AlignLeft,
                      QString("%1:%2").arg(seconds / 60).arg(seconds % 60, 2, 10, QChar('0')));
-    QPainterPath button;
-    button.addRoundedRect(QRectF(stopButton).adjusted(.5, .5, -.5, -.5), 7, 7);
-    painter.fillPath(button, colors.button);
-    painter.setPen(QPen(colors.buttonBorder.brush(stopButton), 1));
-    painter.drawPath(button);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(recordRed);
-    painter.drawRoundedRect(QRectF(stopButton.center().x() - 4.5, stopButton.center().y() - 4.5, 10, 10),
-                            2, 2);
+    // Omasnap's toolbar button, with the stop glyph in the recording red at 18 px.
+    const QRectF face = QRectF(stopButton).adjusted(.5, .5, -.5, -.5);
+    const ChromeThemeBorder &edge = stopHovered ? colors.buttonHoverBorder : colors.buttonBorder;
+    painter.setPen(QPen(edge.brush(face), 1));
+    painter.setBrush(stopHovered ? colors.buttonHover : colors.button);
+    painter.drawRoundedRect(face, 8, 8);
+    painter.save();
+    painter.translate(face.center());
+    painter.scale(18. / 19, 18. / 19);
+    painter.translate(-face.center());
+    drawVideoIcon(painter, face, "stop", recordRed);
+    painter.restore();
 }

@@ -47,14 +47,15 @@ QPainterPath openBox(qreal left, qreal top, qreal right, qreal bottom) {
 
 // Draws `name` on Lucide's 24-unit grid. False when the icon is Omasnap's.
 bool drawLucide(QPainter &p, const QString &name, const QColor &color) {
-    if (name == "play" || name == "pause") {
+    if (name == "play" || name == "pause" || name == "stop") {
         p.setBrush(color);
         if (name == "play")
             p.drawPolygon(QPolygonF{{6.5, 4}, {19.5, 12}, {6.5, 20}});
-        else {
+        else if (name == "pause") {
             p.drawRoundedRect(QRectF(6, 4, 4, 16), 1, 1);
             p.drawRoundedRect(QRectF(14, 4, 4, 16), 1, 1);
-        }
+        } else
+            p.drawRoundedRect(QRectF(5, 5, 14, 14), 2.5, 2.5);
     } else if (name == "frame") {
         p.drawRoundedRect(QRectF(2.5, 2.5, 19, 19), 4, 4);
         p.drawRoundedRect(QRectF(7, 7, 10, 10), 1.5, 1.5);
