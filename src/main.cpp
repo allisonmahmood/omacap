@@ -11,16 +11,20 @@
 #include <QSocketNotifier>
 #include <QStandardPaths>
 #include <QTextStream>
+#include <cerrno>
 #include <fcntl.h>
 #include <memory>
 #include <signal.h>
 #include <unistd.h>
 namespace {
 int quitPipe[2] = {-1, -1};
-// Async-signal-safe: the event loop sees the byte and quits.
+// Async-signal-safe: the event loop sees the byte and quits. The pipe never blocks; when
+// it's full, a quit is already pending.
 void requestQuit(int) {
+    const int saved = errno;
     const char byte = 1;
     [[maybe_unused]] const auto written = ::write(quitPipe[1], &byte, 1);
+    errno = saved;
 }
 } // namespace
 int main(int argc, char **argv) {
@@ -60,10 +64,15 @@ int main(int argc, char **argv) {
     // SIGINT and SIGTERM quit through the event loop rather than killing the process, so
     // the backend's destructor still ends a screen freeze left by an interrupted capture.
     std::unique_ptr<QSocketNotifier> quitting;
-    if (::pipe2(quitPipe, O_CLOEXEC) == 0) {
+    if (::pipe2(quitPipe, O_CLOEXEC | O_NONBLOCK) == 0) {
         quitting = std::make_unique<QSocketNotifier>(quitPipe[0], QSocketNotifier::Read);
-        QObject::connect(quitting.get(), &QSocketNotifier::activated, &app,
-                         &QCoreApplication::quit);
+        QObject::connect(quitting.get(), &QSocketNotifier::activated, &app, [&] {
+            char bytes[256];
+            while (::read(quitPipe[0], bytes, sizeof bytes) > 0) {
+            }
+            quitting->setEnabled(false);
+            app.quit();
+        });
         struct sigaction action = {};
         action.sa_handler = requestQuit;
         sigaction(SIGINT, &action, nullptr);
