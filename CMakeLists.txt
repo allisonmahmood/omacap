@@ -31,6 +31,7 @@ add_library(omacap-video STATIC
   src/theme.cpp src/theme.h
   src/video-icons.cpp src/video-icons.h
   src/video-owner.cpp src/video-owner.h
+  src/video-stage.cpp src/video-stage.h
   src/waveforms.cpp src/waveforms.h
 )
 target_include_directories(omacap-video PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")

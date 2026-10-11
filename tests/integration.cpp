@@ -1,13 +1,13 @@
 #include "../src/backend.h"
 #include "../src/exporter.h"
+#include "../src/video-stage.h"
 #include <QApplication>
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QPainter>
-#include <QQmlApplicationEngine>
-#include <QQmlContext>
+#include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickItemGrabResult>
 #include <QQuickStyle>
@@ -27,6 +27,34 @@
 class Integration : public QObject {
     Q_OBJECT
     QTemporaryDir themeRoot;
+    // The video UI as runVideoApp builds it: a stage presenting a backend's sessions.
+    struct Studio {
+        Theme theme;
+        QQmlEngine engine;
+        Frames *frames = new Frames;
+        Backend backend{&theme, frames};
+        VideoStage stage{engine, backend, theme};
+        Studio() { engine.addImageProvider("frames", frames); }
+    };
+    // The item named `name` under `item`. Repeater delegates and hosted QML are visual
+    // children, not QObject children, so walk the item tree.
+    static QQuickItem *find(QQuickItem *item, const QString &name) {
+        if (item->objectName() == name)
+            return item;
+        for (auto child : item->childItems())
+            if (auto match = find(child, name))
+                return match;
+        return nullptr;
+    }
+    // Opens the editor on `path` and waits for it to be on screen and focused.
+    static QQuickWindow *openEditor(Studio &studio, const QString &path) {
+        studio.backend.loadFile(QDir::current().absoluteFilePath(path));
+        if (!QTest::qWaitFor([&] { return studio.stage.editorWindow() != nullptr; }, 10000))
+            return nullptr;
+        auto win = studio.stage.editorWindow();
+        win->requestActivate();
+        return QTest::qWaitForWindowActive(win) ? win : nullptr;
+    }
 
   private slots:
     void initTestCase() {
@@ -251,26 +279,72 @@ class Integration : public QObject {
         QCOMPARE(b.position(), 4.49);
         b.discard();
     }
-    void windowModes() {
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-        QCOMPARE(win->minimumSize(), QSize(520, 640));
-        QCOMPARE(win->maximumSize(), QSize(520, 640));
+    void presentation() {
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
+        QSignalSpy finished(&s.stage, &VideoStage::finished);
+        const QString fixture = QDir::current().absoluteFilePath("tests/out/delayed.mkv");
+        // An opened file goes straight to the editor, over the desktop.
+        auto overlay = openEditor(s, "tests/out/delayed.mkv");
+        QVERIFY(overlay);
+        QVERIFY(s.stage.card().isEmpty());
+        QVERIFY(!s.stage.windowed());
+        auto editor = s.stage.editor();
+        QCOMPARE(overlay->size(), overlay->screen()->size());
+        // W moves the same editor, popover and all, into a floating window, and back.
+        editor->setProperty("popover", "frame");
+        QTest::keyClick(overlay, Qt::Key_W);
+        QTRY_VERIFY(s.stage.editorWindow() && s.stage.editorWindow() != overlay);
+        auto window = s.stage.editorWindow();
+        QVERIFY(s.stage.windowed());
+        QVERIFY(QSettings().value("editor/window").toBool());
+        QCOMPARE(window->minimumSize(), QSize(1000, 680));
+        QCOMPARE(s.stage.editor(), editor);
+        QCOMPARE(editor->window(), window);
+        QCOMPARE(editor->property("popover").toString(), QString("frame"));
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        s.stage.setWindowed(false);
+        QTRY_VERIFY(s.stage.editorWindow() != window);
+        QCOMPARE(s.stage.editor(), editor);
+        // No OmaCap pixels while a countdown or recording runs.
+        for (const QString phase : {"countdown", "recording", "stopping"}) {
+            b.status(phase);
+            QVERIFY(!s.stage.editorWindow()->isVisible());
+        }
         b.status("editor");
-        QTRY_COMPARE(win->minimumSize(), QSize(1000, 680));
-        QVERIFY(win->maximumWidth() > 1280);
-        win->resize(1100, 720);
-        QTRY_COMPARE(win->size(), QSize(1100, 720));
+        QVERIFY(s.stage.editorWindow()->isVisible());
+        // Ending the session closes the editor, and with nothing left open the process may go.
+        b.discard();
+        QVERIFY(!s.stage.editorWindow());
+        QCOMPARE(finished.count(), 1);
+        // A new recording shows its card, which never comes up during a recording.
+        QVERIFY(QMetaObject::invokeMethod(&s.stage, "noteRecordingFinished"));
+        b.loadFile(fixture);
+        QTRY_COMPARE_WITH_TIMEOUT(s.stage.card(), QString("recording"), 10000);
+        QVERIFY(!s.stage.editorWindow());
+        auto card = s.stage.cardWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(card));
+        QCOMPARE(card->size(), QSize(200, 113));
+        b.status("countdown");
+        QVERIFY(!card->isVisible());
+        b.status("editor");
+        QVERIFY(card->isVisible());
+        // E on the card opens the editor in its place.
+        card->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(card));
+        QTest::keyClick(card, Qt::Key_E);
+        QTRY_VERIFY(s.stage.editorWindow());
+        QVERIFY(s.stage.card().isEmpty());
+        b.discard();
+        // Closing a recording's card ends its session; the recording stays where it is.
+        QVERIFY(QMetaObject::invokeMethod(&s.stage, "noteRecordingFinished"));
+        b.loadFile(fixture);
+        QTRY_COMPARE_WITH_TIMEOUT(s.stage.card(), QString("recording"), 10000);
+        s.stage.closeCard();
+        QCOMPARE(b.phase(), QString("recorder"));
+        QVERIFY(QFile::exists(fixture));
+        QCOMPARE(finished.count(), 3);
     }
     void mapping() {
         Edit e;
@@ -465,40 +539,22 @@ class Integration : public QObject {
         b.discard();
     }
     void timelineGestures() {
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-        b.loadFile(QDir::current().absoluteFilePath("tests/out/delayed.mkv"));
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
+        auto win = openEditor(s, "tests/out/delayed.mkv");
+        QVERIFY(win);
         QTRY_VERIFY(!b.screenSource().isEmpty());
-        std::function<QQuickItem *(QQuickItem *, const QString &)> find =
-            [&](QQuickItem *item, const QString &name) -> QQuickItem * {
-            if (item->objectName() == name)
-                return item;
-            for (auto child : item->childItems())
-                if (auto match = find(child, name))
-                    return match;
-            return nullptr;
-        };
-        win->requestActivate();
-        QVERIFY(QTest::qWaitForWindowActive(win));
-        auto timeline = find(win->contentItem(), "timeline");
-        auto track = find(win->contentItem(), "recordingTimeline");
-        auto zoomLane = find(win->contentItem(), "zoomLane");
+        auto root = win->contentItem();
+        auto editor = s.stage.editor();
+        auto timeline = find(root, "timeline");
+        auto track = find(root, "recordingTimeline");
+        auto zoomLane = find(root, "zoomLane");
         QVERIFY(timeline);
         QVERIFY(track);
         QVERIFY(zoomLane);
         auto click = [&](QQuickItem *item, double fraction) {
-            QTest::qWait(40); // Let the contextual panel finish its layout before hit testing.
+            QTest::qWait(40); // Let the editor finish its layout before hit testing.
             QTest::mouseClick(
                 win, Qt::LeftButton, Qt::NoModifier,
                 item->mapToScene(QPointF(item->width() * fraction, item->height() / 2)).toPoint());
@@ -508,54 +564,62 @@ class Integration : public QObject {
         QVERIFY(timeline->isEnabled());
         QTRY_VERIFY(b.zoom() > 1.7);
         const auto initialFocus = b.state.zooms[0].x;
-        auto picker = find(win->contentItem(), "zoomFocusPicker");
-        QVERIFY(picker && picker->isVisible());
-        // Selecting a zoom changes the sidebar layout. Hit-test the rendered layout.
+        // A selected zoom is aimed on the preview: its view lit over the whole frame.
+        auto aim = find(root, "zoomAim");
+        QVERIFY(aim && aim->isVisible());
+        QVERIFY(find(root, "zoomButton")->property("selected").toBool());
         QSignalSpy laidOut(win, &QQuickWindow::frameSwapped);
         win->update();
         QVERIFY(laidOut.wait(3000));
+        const auto frame = aim->parentItem()->property("frame").toRectF();
+        const auto at = [&](double fx, double fy) {
+            return aim->mapToScene(QPointF(frame.x() + frame.width() * fx,
+                                           frame.y() + frame.height() * fy))
+                .toPoint();
+        };
+        // Dragging the view aims it live, as one undo step.
         const auto beforeDrag = b.past.size();
-        const auto start = picker->mapToScene(QPointF(picker->width() * .25, picker->height() / 2));
-        const auto end = picker->mapToScene(QPointF(picker->width() * .8, picker->height() / 2));
-        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, start.toPoint());
-        QVERIFY(picker->property("pressed").toBool());
-        QTest::mouseMove(win, end.toPoint(), 40);
-        // Observe the live result while the button is still held.
+        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, at(.5, .5));
+        QVERIFY(aim->property("pressed").toBool());
+        QTest::mouseMove(win, at(.9, .5), 40);
         QTRY_VERIFY_WITH_TIMEOUT(b.state.zooms[0].x > .7, 1000);
         QCOMPARE(b.past.size(), beforeDrag);
-        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, end.toPoint());
+        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, at(.9, .5));
         QCOMPARE(b.past.size(), beforeDrag + 1);
         const auto movedFocus = b.state.zooms[0].x;
         b.undo();
         QCOMPARE(b.state.zooms[0].x, initialFocus);
         b.redo();
         QCOMPARE(b.state.zooms[0].x, movedFocus);
-        // Clicking footage keeps the focus edit and restores normal controls/seeking.
+        // The wheel changes the amount; a run of notches is one undo step.
+        const auto beforeWheel = b.past.size();
+        for (int i = 0; i < 3; ++i) {
+            QWheelEvent notch(at(.5, .5), win->mapToGlobal(at(.5, .5)), {}, {0, 120}, Qt::NoButton,
+                              Qt::NoModifier, Qt::NoScrollPhase, false);
+            QGuiApplication::sendEvent(win, &notch);
+        }
+        QTRY_VERIFY(std::abs(b.state.zooms[0].amount - 2.1) < .001);
+        QTRY_COMPARE_WITH_TIMEOUT(b.past.size(), beforeWheel + 1, 1000);
+        // Clicking footage keeps the aim, ends aiming and seeks.
         click(track, .8);
-        QVERIFY(!picker->isVisible());
+        QVERIFY(!aim->isVisible());
         QCOMPARE(timeline->property("selectedZoom").toInt(), -1);
-        auto appearance = find(win->contentItem(), "appearanceControls");
-        auto controls = find(win->contentItem(), "zoomControls");
-        QVERIFY(appearance && controls);
-        QVERIFY(appearance->isVisible());
-        QVERIFY(!controls->isVisible());
         QVERIFY(std::abs(b.position() - .8 * b.duration()) < .02);
         QCOMPARE(b.state.zooms[0].x, movedFocus);
-        auto zoomBodyForFocus = find(win->contentItem(), "zoomDrag0");
-        QVERIFY(zoomBodyForFocus);
-        click(zoomBodyForFocus, .5);
-        QVERIFY(controls->isVisible() && picker->isVisible());
-        QVERIFY(!appearance->isVisible());
-        click(picker, .6);
-        QVERIFY(std::abs(b.state.zooms[0].x - .6) < .02);
-        auto ruler = find(win->contentItem(), "timelineRuler");
+        // Clicking the zoom aims it again; a click outside the view centres it there.
+        click(find(root, "zoomDrag0"), .5);
+        QVERIFY(aim->isVisible());
+        QTest::qWait(40);
+        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(.3, .5));
+        QVERIFY(std::abs(b.state.zooms[0].x - .3) < .02);
+        auto ruler = find(root, "timelineRuler");
         QVERIFY(ruler);
         click(ruler, .15);
         QCOMPARE(timeline->property("selectedZoom").toInt(), -1);
-        QVERIFY(appearance->isVisible());
+        QVERIFY(!aim->isVisible());
         QVERIFY(std::abs(b.position() - .15 * b.duration()) < .02);
         b.seek(0);
-        auto zoomBody = find(win->contentItem(), "zoomDrag0");
+        auto zoomBody = find(root, "zoomDrag0");
         QVERIFY(zoomBody);
         click(zoomBody, .5);
         QTRY_VERIFY(b.zoom() > 1.7);
@@ -577,13 +641,15 @@ class Integration : public QObject {
         QCOMPARE(timeline->property("selection").toString(), QString("clip"));
         b.setValue("cameraCorners", .3);
         QCOMPARE(timeline->property("selection").toString(), QString("clip"));
-        auto dialog = win->findChild<QObject *>("exportDialog");
-        QVERIFY(dialog);
-        QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        // Delete belongs to the export settings while they are open.
+        editor->setProperty("popover", "export");
         QTest::qWait(100);
         QTest::keyClick(win, Qt::Key_Delete);
         QCOMPARE(b.duration(), original);
-        QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+        // Escape closes the popover before it touches the selection.
+        QTest::keyClick(win, Qt::Key_Escape);
+        QCOMPARE(editor->property("popover").toString(), QString());
+        QCOMPARE(timeline->property("selection").toString(), QString("clip"));
         click(track, .8);
         QTest::keyClick(win, Qt::Key_Delete);
         QVERIFY(std::abs(b.duration() - original * .4) < .02);
@@ -600,12 +666,33 @@ class Integration : public QObject {
         QTest::keyClick(win, Qt::Key_Backspace);
         QVERIFY(std::abs(b.duration() - original * .9) < .02);
         b.undo();
+        // S splits at the playhead and Z adds a zoom there.
+        b.seek(original / 2);
+        QTest::keyClick(win, Qt::Key_S);
+        QCOMPARE(b.state.spans.size(), 3);
+        QTest::keyClick(win, Qt::Key_Z);
+        QCOMPARE(b.state.zooms.size(), 1);
+        b.undo();
+        b.undo();
         b.removeRange(0, b.duration());
         QCOMPARE(b.duration(), 0.);
         QVERIFY(!b.playing());
         b.undo();
         QCOMPARE(b.duration(), original);
-        b.discard();
+        // Escape walks back to closing; unexported edits ask first.
+        click(track, .5);
+        QTest::keyClick(win, Qt::Key_Escape);
+        QCOMPARE(timeline->property("selection").toString(), QString());
+        QVERIFY(!editor->property("discarding").toBool());
+        QTest::keyClick(win, Qt::Key_Escape);
+        QVERIFY(editor->property("discarding").toBool());
+        QTest::keyClick(win, Qt::Key_Escape);
+        QVERIFY(!editor->property("discarding").toBool());
+        QCOMPARE(b.phase(), QString("editor"));
+        QTest::keyClick(win, Qt::Key_Escape);
+        QTest::keyClick(win, Qt::Key_Return);
+        QCOMPARE(b.phase(), QString("recorder"));
+        QVERIFY(!s.stage.editorWindow());
     }
     void playbackCuts() {
         Theme t;
@@ -759,35 +846,19 @@ class Integration : public QObject {
         delete scene;
     }
     void transparencyControls() {
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects().value(0));
-        QVERIFY(win);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
         b.newSession();
         b.status("editor");
-        win->resize(1280, 900);
+        QTRY_VERIFY(s.stage.editorWindow());
+        auto win = s.stage.editorWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(win));
         QTest::qWait(100);
-        auto setting = win->findChild<QQuickItem *>("windowOpacitySetting");
+        auto setting = find(win->contentItem(), "windowOpacitySetting");
         QVERIFY(setting);
         auto click = [&](const QString &name) {
-            // Repeater delegates are visual children, not QObject children of the window.
-            std::function<QQuickItem *(QQuickItem *)> find = [&](QQuickItem *item) -> QQuickItem * {
-                if (item->objectName() == name)
-                    return item;
-                for (auto child : item->childItems())
-                    if (auto match = find(child))
-                        return match;
-                return nullptr;
-            };
-            auto button = find(win->contentItem());
+            auto button = find(win->contentItem(), name);
             QVERIFY(button);
             QTest::mouseClick(
                 win, Qt::LeftButton, Qt::NoModifier,
@@ -795,6 +866,8 @@ class Integration : public QObject {
             QTest::qWait(40);
         };
         QCOMPARE(b.state.windowTransparency, QString("off"));
+        // Window transparency lives in the toolbar's glass popover.
+        click("glassButton");
         QVERIFY(!setting->isVisible());
         click("transparencyLight");
         QCOMPARE(b.state.windowTransparency, QString("light"));
@@ -841,20 +914,11 @@ class Integration : public QObject {
     }
     void cropEditor() {
         QFETCH(double, aspect);
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-        b.loadFile(QDir::current().absoluteFilePath("tests/out/frames15.mkv"));
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
+        auto win = openEditor(s, "tests/out/frames15.mkv");
+        QVERIFY(win);
         QTRY_VERIFY_WITH_TIMEOUT(!b.seeking && !b.screenSource().isEmpty(), 3000);
         // Exercise the same source-coordinate mapping in both display orientations.
         b.m_aspect = aspect;
@@ -878,16 +942,14 @@ class Integration : public QObject {
                 item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint());
             return true;
         };
-        win->requestActivate();
-        QVERIFY(QTest::qWaitForWindowActive(win));
         b.togglePlay();
         QTRY_VERIFY(b.playing());
-        QVERIFY(click("Crop"));
+        QVERIFY(click("cropButton"));
         QVERIFY(!b.playing());
-        auto view = win->findChild<QQuickItem *>("cropView");
+        auto view = find(win->contentItem(), "cropView");
         QVERIFY2(view && view->isVisible(), "Crop must open a dedicated full-source editor");
-        auto image = win->findChild<QQuickItem *>("cropImage");
-        auto selection = win->findChild<QQuickItem *>("cropSelection");
+        auto image = find(win->contentItem(), "cropImage");
+        auto selection = find(win->contentItem(), "cropSelection");
         QVERIFY(image && selection);
         QTRY_VERIFY(image->width() > 100 && image->height() > 100);
         QVERIFY(std::abs(image->width() / image->height() - aspect) < .001);
@@ -919,21 +981,21 @@ class Integration : public QObject {
         QVERIFY(std::abs(cropped.x() - .2) < .01);
         QVERIFY(std::abs(cropped.y() - .2) < .01);
         QVERIFY(std::abs(cropped.width() - .6) < .01);
-        auto composition = win->findChild<QQuickItem *>("composition");
+        auto composition = find(win->contentItem(), "composition");
         QVERIFY(composition);
         QCOMPARE(composition->property("crop").toList(), b.edit()["crop"].toList());
         b.undo();
         QCOMPARE(b.state.crop, full);
         b.redo();
         QCOMPARE(b.state.crop, cropped);
-        QVERIFY(click("Crop"));
+        QVERIFY(click("cropButton"));
         QTRY_VERIFY(view->isVisible());
         QVERIFY(selection->width() < image->width() * .65);
         QVERIFY(drag("cropCorner0", -inset));
         QVERIFY(selection->width() > image->width() * .75); // Expand beyond the old crop.
         QVERIFY(click("Cancel"));
         QCOMPARE(b.state.crop, cropped);
-        QVERIFY(click("Crop"));
+        QVERIFY(click("cropButton"));
         QTRY_VERIFY(view->isVisible());
         QVERIFY(drag("cropSelection",
                      QPoint(qRound(image->width() * .45), qRound(image->height() * .45))));
@@ -946,7 +1008,7 @@ class Integration : public QObject {
         QCOMPARE(b.state.crop, full);
         b.undo();
         QCOMPARE(b.state.crop, cropped);
-        QVERIFY(click("Crop"));
+        QVERIFY(click("cropButton"));
         QTRY_VERIFY(view->isVisible());
         QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier);
         QCOMPARE(b.state.crop, cropped);
@@ -965,18 +1027,9 @@ class Integration : public QObject {
         b.discard();
     }
     void styledPreviewMatchesExport() {
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
         b.newSession();
         b.hasCamera = true;
         b.prepare(QDir::current().absoluteFilePath("tests/out/camera-wide.mkv"), true);
@@ -990,7 +1043,9 @@ class Integration : public QObject {
         b.edited();
         b.seek(0);
         QTRY_VERIFY_WITH_TIMEOUT(!b.seeking && !b.cameraSource().isEmpty(), 3000);
-        auto composition = win->findChild<QQuickItem *>("composition");
+        QVERIFY(s.stage.editorWindow());
+        QVERIFY(QTest::qWaitForWindowExposed(s.stage.editorWindow()));
+        auto composition = find(s.stage.editorWindow()->contentItem(), "composition");
         QVERIFY(composition);
         struct Style {
             QString mode, shape;
@@ -1062,306 +1117,6 @@ class Integration : public QObject {
         QCOMPARE(Edit::fromJson({{"canvas", "21:9"}}).canvas, QString("auto"));
         QCOMPARE(Edit::fromJson(e.json()).json(), e.json());
     }
-    void screenshotEditor() {
-        QTemporaryDir dir;
-        QImage shot(900, 600, QImage::Format_RGB32);
-        shot.fill(QColor("#202830"));
-        QPainter(&shot).fillRect(360, 240, 180, 120, QColor("#e04040"));
-        const QString source = dir.path() + "/shot.png";
-        QVERIFY(shot.save(source));
-        // A stand-in wl-copy records what Copy sends, leaving the real clipboard alone.
-        const QString clipboard = dir.path() + "/clipboard.png", slow = dir.path() + "/slow";
-        QFile fake(dir.path() + "/wl-copy");
-        QVERIFY(fake.open(QIODevice::WriteOnly));
-        fake.write(QString("#!/bin/sh\n[ -e '%2' ] && sleep 1\n"
-                           "[ \"$*\" = \"--type image/png\" ] && cat > '%1'\n")
-                       .arg(clipboard, slow)
-                       .toUtf8());
-        fake.close();
-        fake.setPermissions(fake.permissions() | QFileDevice::ExeOwner);
-        const auto path = qgetenv("PATH");
-        qputenv("PATH", dir.path().toUtf8() + ":" + path);
-        auto restorePath = qScopeGuard([&] { qputenv("PATH", path); });
-
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        // Opening the image first starts the window in the editor, as `omacap shot.png` does.
-        b.loadFile(source);
-        QCOMPARE(b.phase(), QString("editor"));
-        QCOMPARE(b.kind(), QString("image"));
-        QCOMPARE(b.sourceSize(), QSize(900, 600));
-        QVERIFY(QFile::exists(b.sessionPath() + "/source.png"));
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-        b.setValue("crop", QVariantList{.1, .1, .8, .8});
-        b.setValue("padding", .08);
-        b.setValue("windowTransparency", "light");
-        auto composition = win->findChild<QQuickItem *>("composition");
-        QVERIFY(composition);
-        for (const QString canvas : {"auto", "1:1"}) {
-            b.setValue("canvas", canvas);
-            QCOMPARE(b.state.canvas, canvas);
-            const QSize size = b.stillSize();
-            QTRY_COMPARE(composition->height(), 1920 / b.canvasAspect());
-            QTest::qWait(100);
-            auto grab = composition->grabToImage(
-                QSize(qRound(composition->width()), qRound(composition->height())));
-            QVERIFY(grab);
-            QSignalSpy ready(grab.data(), &QQuickItemGrabResult::ready);
-            QVERIFY(ready.wait(5000));
-            const auto preview = grab->image();
-            b.outputImage(true, true);
-            QCOMPARE(b.phase(), QString("exporting"));
-            QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
-            QVERIFY2(b.message().startsWith("Copied and saved omacap-"), qPrintable(b.message()));
-            QVERIFY(!b.dirty());
-            QCOMPARE(QFileInfo(b.lastExport()).absolutePath(),
-                     QStandardPaths::writableLocation(QStandardPaths::PicturesLocation) +
-                         "/Screenshots");
-            const QImage saved(b.lastExport());
-            QCOMPARE(saved.size(), size);
-            QCOMPARE(QImage(clipboard), saved);
-            QCOMPARE(saved.pixelColor(2, 2), QColor("#223344"));
-            const QColor red = saved.pixelColor(size.width() / 2, size.height() / 2);
-            QVERIFY2(red.red() > 200 && red.green() < 80, qPrintable(red.name()));
-            const auto exported =
-                saved.scaled(preview.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-            double error = 0;
-            for (int y = 0; y < preview.height(); y += 4)
-                for (int x = 0; x < preview.width(); x += 4) {
-                    const auto p = preview.pixelColor(x, y), e = exported.pixelColor(x, y);
-                    error += std::abs(p.red() - e.red()) + std::abs(p.green() - e.green()) +
-                             std::abs(p.blue() - e.blue());
-                }
-            error /= preview.width() * preview.height() * 3. / 16;
-            qInfo() << "STILL_PREVIEW_EXPORT" << canvas << "mean_channel_error=" << error;
-            QVERIFY2(error < 5, qPrintable(QString::number(error)));
-            QFile::remove(b.lastExport());
-            if (canvas == "auto") {
-                QTest::qWait(100);
-                win->grabWindow().save("tests/out/preview-screenshot-editor.png");
-            }
-        }
-        // Save and Copy are independent: an unusable screenshot folder still copies.
-        qputenv("OMARCHY_SCREENSHOT_DIR", (source + "/folder").toUtf8());
-        auto restoreFolder = qScopeGuard([] { qunsetenv("OMARCHY_SCREENSHOT_DIR"); });
-        QFile::remove(clipboard);
-        b.setValue("padding", .1);
-        b.outputImage(true, true);
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
-        QVERIFY2(b.message().startsWith("Copied to the clipboard. Could not save"),
-                 qPrintable(b.message()));
-        QVERIFY(QFile::exists(clipboard));
-        QVERIFY(!b.dirty());
-        // A slow clipboard doesn't hold up the editor while it finishes.
-        QVERIFY(QFile(slow).open(QIODevice::WriteOnly));
-        QElapsedTimer beat;
-        qint64 longest = 0;
-        QTimer heartbeat;
-        heartbeat.setInterval(10);
-        connect(&heartbeat, &QTimer::timeout, [&] { longest = std::max(longest, beat.restart()); });
-        beat.start();
-        heartbeat.start();
-        b.outputImage(true, false);
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
-        heartbeat.stop();
-        QCOMPARE(b.message(), QString("Copied to the clipboard."));
-        QVERIFY2(longest < 500, qPrintable(QString::number(longest)));
-        b.setValue("padding", .12);
-        QVERIFY(b.dirty());
-        b.discard();
-        QCOMPARE(b.kind(), QString("video"));
-        QVERIFY(QFile::exists(source));
-    }
-    void tallScreenshot() {
-        QTemporaryDir dir;
-        QImage shot(160, 4000, QImage::Format_RGB32);
-        shot.fill(QColor("#336699"));
-        QVERIFY(shot.save(dir.path() + "/tall.png"));
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        b.loadFile(dir.path() + "/tall.png");
-        QCOMPARE(b.kind(), QString("image"));
-        // Earlier tests leave a remembered canvas; a tall shot needs auto.
-        b.setValue("canvas", "auto");
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-        // The preview stays within 1920 px however tall the shot, and renders.
-        auto composition = win->findChild<QQuickItem *>("composition");
-        QVERIFY(composition);
-        QTRY_COMPARE(composition->height(), 1920.);
-        QVERIFY(composition->width() < 100);
-        QTest::qWait(200);
-        b.outputImage(false, true);
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
-        QVERIFY(b.stillSize().height() > 4000);
-        QCOMPARE(QImage(b.lastExport()).size(), b.stillSize());
-        QFile::remove(b.lastExport());
-        b.discard();
-    }
-    void screenshotCapture() {
-        QTemporaryDir dir;
-        QImage shot(300, 200, QImage::Format_RGB32);
-        shot.fill(QColor("#336699"));
-        QVERIFY(shot.save(dir.path() + "/shot.png"));
-        // Stand-ins for Omarchy's picker and grim. The picker starts a "freeze" that must
-        // be ended afterwards. Marker files make it cancel, fail, hang, garble its output,
-        // or report someone else's PID.
-        const auto tool = [&](const QString &name, const QString &body) {
-            QFile f(dir.path() + "/" + name);
-            QVERIFY(f.open(QIODevice::WriteOnly));
-            f.write(("#!/bin/sh\n" + body).toUtf8());
-            f.close();
-            f.setPermissions(f.permissions() | QFileDevice::ExeOwner);
-        };
-        const QString d = dir.path();
-        tool("omarchy-capture-region",
-             QString("echo \"$@\" > '%1/picker-args'\n"
-                     "sleep 30 & echo $! > '%1/freeze'\n"
-                     "if [ -e '%1/liar' ]; then cat '%1/liar'; else cat '%1/freeze'; fi\n"
-                     "[ -e '%1/hang' ] && wait\n"
-                     "[ -e '%1/cancel' ] && exit 1\n"
-                     "[ -e '%1/fail' ] && { echo boom >&2; exit 2; }\n"
-                     "[ -e '%1/garbled' ] && { echo 'not a region'; exit 0; }\n"
-                     "echo '10,20 300x200'\n")
-                 .arg(d));
-        const auto mark = [&](const QString &name, bool on) {
-            QFile f(d + "/" + name);
-            QVERIFY(on ? f.open(QIODevice::WriteOnly) : (!f.exists() || f.remove()));
-        };
-        tool("grim", QString("echo \"$@\" > '%1/grim-args'\ncp '%1/shot.png' \"$3\"\n").arg(d));
-        const auto path = qgetenv("PATH");
-        qputenv("PATH", d.toUtf8() + ":" + path);
-        auto restorePath = qScopeGuard([&] { qputenv("PATH", path); });
-        // An orphaned freeze may linger as a zombie in containers without a reaping init.
-        const auto freezeEnded = [&] {
-            QFile pid(d + "/freeze");
-            if (!pid.open(QIODevice::ReadOnly))
-                return false;
-            QFile stat("/proc/" + pid.readAll().trimmed() + "/stat");
-            return !stat.open(QIODevice::ReadOnly) || stat.readAll().contains(") Z ");
-        };
-
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-
-        b.takeScreenshot();
-        QCOMPARE(b.phase(), QString("capturing"));
-        QVERIFY(!win->isVisible());
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 5000);
-        QVERIFY(win->isVisible());
-        QCOMPARE(b.kind(), QString("image"));
-        QCOMPARE(b.sourceSize(), QSize(300, 200));
-        QVERIFY(b.dirty());
-        QVERIFY(b.original().isEmpty());
-        auto read = [&](const QString &name) {
-            QFile f(d + "/" + name);
-            return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()).trimmed()
-                                               : QString();
-        };
-        QCOMPARE(read("picker-args"), QString("smart --keep-freeze"));
-        QCOMPARE(read("grim-args"), "-g 10,20 300x200 " + b.sessionPath() + "/source.png");
-        QTRY_VERIFY(freezeEnded());
-        b.discard();
-
-        // A cancelled pick returns to the start window and still ends the freeze.
-        mark("cancel", true);
-        QFile::remove(d + "/freeze");
-        b.takeScreenshot();
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recorder"), 5000);
-        QVERIFY(win->isVisible());
-        QVERIFY(b.sessionPath().isEmpty());
-        QVERIFY(b.message().isEmpty());
-        QTRY_VERIFY(freezeEnded());
-        mark("cancel", false);
-
-        // Only the picker's own process group is signalled, never a PID it reports.
-        QProcess bystander;
-        bystander.start("sleep", {"30"});
-        QVERIFY(bystander.waitForStarted());
-        auto stopBystander = qScopeGuard([&] {
-            bystander.kill();
-            bystander.waitForFinished();
-        });
-        QFile liar(d + "/liar");
-        QVERIFY(liar.open(QIODevice::WriteOnly));
-        liar.write(QByteArray::number(bystander.processId()) + "\n");
-        liar.close();
-        b.takeScreenshot();
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 5000);
-        QTRY_VERIFY(freezeEnded());
-        QCOMPARE(bystander.state(), QProcess::Running);
-        b.discard();
-        mark("liar", false);
-
-        // Picker failures are reported rather than passed off as a cancel.
-        for (const QString failure : {"fail", "garbled"}) {
-            mark(failure, true);
-            b.takeScreenshot();
-            QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recorder"), 5000);
-            QVERIFY2(b.message().startsWith("The region picker failed."), qPrintable(b.message()));
-            QVERIFY(failure != "fail" || b.message().contains("boom"));
-            QTRY_VERIFY(freezeEnded());
-            mark(failure, false);
-        }
-
-        // Quitting mid-pick ends the freeze as well.
-        mark("hang", true);
-        QFile::remove(d + "/freeze");
-        {
-            Frames f;
-            Backend quitting(&theme, &f);
-            quitting.takeScreenshot();
-            QTRY_VERIFY(QFile(d + "/freeze").size() > 0);
-        }
-        QTRY_VERIFY(freezeEnded());
-        mark("hang", false);
-
-        // A request from a second `omacap --screenshot` closes a video's export dialog.
-        b.loadFile(QDir::current().absoluteFilePath("tests/out/delayed.mkv"));
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
-        auto exportDialog = win->findChild<QObject *>("exportDialog");
-        QVERIFY(exportDialog);
-        QMetaObject::invokeMethod(exportDialog, "open");
-        QTRY_VERIFY(exportDialog->property("opened").toBool());
-        emit b.screenshotRequested();
-        QTRY_VERIFY(!exportDialog->property("opened").toBool());
-        QTRY_VERIFY(win->findChild<QObject *>("discardDialog")->property("opened").toBool());
-        QMetaObject::invokeMethod(win->findChild<QObject *>("discardDialog"), "close");
-        b.discard();
-
-        // Without the picker, the start window says what is missing.
-        qputenv("PATH", "/nonexistent");
-        b.takeScreenshot();
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recorder"), 5000);
-        QVERIFY2(b.message().contains("omarchy-capture-region"), qPrintable(b.message()));
-    }
     void animatedImages() {
         QTemporaryDir dir;
         const auto make = [&](const QString &name) {
@@ -1414,292 +1169,6 @@ class Integration : public QObject {
         Edit e;
         e.annotations = {box, parse({{"kind", "step"}, {"points", QJsonArray{QJsonArray{5, 6}}}})};
         QCOMPARE(Edit::fromJson(e.json()).json(), e.json());
-    }
-    void annotationEditing() {
-        // Script errors in the drawing code would otherwise only be logged.
-        QTest::failOnWarning(QRegularExpression("annotations\\.js|Annotation"));
-        QTemporaryDir dir;
-        QImage shot(900, 600, QImage::Format_RGB32);
-        shot.fill(QColor("#202830"));
-        QVERIFY(shot.save(dir.path() + "/shot.png"));
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        b.loadFile(dir.path() + "/shot.png");
-        b.setValue("canvas", "auto");
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-        win->requestActivate();
-        QVERIFY(QTest::qWaitForWindowActive(win));
-        auto editor = win->findChild<QQuickItem *>("annotationEditor");
-        QVERIFY(editor);
-        QTRY_VERIFY(editor->property("k").toDouble() > 0);
-        const double k = editor->property("k").toDouble();
-        // Source pixels to window coordinates, through the preview's scale.
-        const auto at = [&](double x, double y) {
-            return editor
-                ->mapToScene({editor->property("originX").toDouble() + x * k,
-                              editor->property("originY").toDouble() + y * k})
-                .toPoint();
-        };
-        const auto drag = [&](QPoint from, QPoint to) {
-            QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, from);
-            QTest::mouseMove(win, (from + to) / 2, 20);
-            QTest::mouseMove(win, to, 20);
-            QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, to, 20);
-        };
-        const auto near = [&](QPointF actual, QPointF expected) {
-            return std::abs(actual.x() - expected.x()) <= 2 / k &&
-                   std::abs(actual.y() - expected.y()) <= 2 / k;
-        };
-
-        // A box lands where it was drawn, and the tool returns to Select.
-        QTest::keyClick(win, Qt::Key_R);
-        QCOMPARE(editor->property("tool").toString(), QString("box"));
-        drag(at(100, 100), at(300, 200));
-        QTRY_COMPARE(b.state.annotations.size(), 1);
-        auto box = b.state.annotations[0];
-        QCOMPARE(box.kind, QString("box"));
-        QVERIFY(near(box.points[0], {100, 100}) && near(box.points[1], {300, 200}));
-        QCOMPARE(editor->property("tool").toString(), QString("select"));
-        QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier);
-        QCOMPARE(b.state.annotations.size(), 0);
-        QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
-        QCOMPARE(b.state.annotations.size(), 1);
-
-        // Dragging it moves it as one undo step; Delete removes it.
-        drag(at(200, 100), at(260, 140));
-        QTRY_VERIFY(near(b.state.annotations[0].points[0], {160, 140}));
-        QCOMPARE(editor->property("selectedId").toString(), box.id);
-        QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier);
-        QVERIFY(near(b.state.annotations[0].points[0], {100, 100}));
-        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(200, 100));
-        QTest::keyClick(win, Qt::Key_5);
-        QCOMPARE(b.state.annotations[0].color, QString("#0a84ff"));
-        QTest::keyClick(win, Qt::Key_Delete);
-        QCOMPARE(b.state.annotations.size(), 0);
-
-        // Text is typed in place and committed with Enter.
-        QTest::keyClick(win, Qt::Key_T);
-        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(400, 300));
-        QTRY_VERIFY(editor->property("typing").isValid() && !editor->property("typing").isNull());
-        for (char c : QByteArray("Ship it"))
-            QTest::keyClick(win, c);
-        QTest::keyClick(win, Qt::Key_Return);
-        QTRY_COMPARE(b.state.annotations.size(), 1);
-        QCOMPARE(b.state.annotations[0].kind, QString("text"));
-        QCOMPARE(b.state.annotations[0].text, QString("Ship it"));
-        QVERIFY(near(b.state.annotations[0].points[0], {400, 300}));
-
-        // Steps are placed with a click.
-        for (int i = 0; i < 2; i++) {
-            QTest::keyClick(win, Qt::Key_C);
-            QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(100 + i * 100, 500));
-        }
-        QTRY_COMPARE(b.state.annotations.size(), 3);
-        QCOMPARE(b.state.annotations[2].kind, QString("step"));
-
-        // The pen keeps the pointer's path.
-        QTest::keyClick(win, Qt::Key_F);
-        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, at(500, 100));
-        for (int i = 1; i <= 10; i++)
-            QTest::mouseMove(win, at(500 + i * 20, 100 + (i % 2) * 30), 10);
-        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, at(700, 100), 10);
-        QTRY_COMPARE(b.state.annotations.size(), 4);
-        QCOMPARE(b.state.annotations[3].kind, QString("pen"));
-        QVERIFY(b.state.annotations[3].points.size() > 5);
-
-        // A stroke stops sampling at the model's point limit rather than being rejected.
-        editor->setProperty("maxPoints", 20);
-        QTest::keyClick(win, Qt::Key_F);
-        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, at(500, 400));
-        for (int i = 1; i <= 40; i++)
-            QTest::mouseMove(win, at(500 + i * 8, 400 + (i % 2) * 20), 5);
-        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, at(820, 400), 5);
-        QTRY_COMPARE(b.state.annotations.size(), 5);
-        QCOMPARE(b.state.annotations[4].points.size(), 20);
-        editor->setProperty("maxPoints", 5000);
-
-        // Escape cancels a move for good, even if the pointer keeps going.
-        QTest::keyClick(win, Qt::Key_R);
-        drag(at(100, 250), at(250, 350));
-        QTRY_COMPARE(b.state.annotations.size(), 6);
-        const auto before = b.state.annotations[5].points;
-        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, at(175, 250));
-        QTest::mouseMove(win, at(200, 270), 20);
-        QTest::keyClick(win, Qt::Key_Escape);
-        QTest::mouseMove(win, at(260, 300), 20);
-        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, at(260, 300), 20);
-        QCOMPARE(b.state.annotations[5].points, before);
-
-        // The Undo button mid-typing commits the edit, then undoes it.
-        QTest::mouseDClick(win, Qt::LeftButton, Qt::NoModifier, at(420, 315));
-        QTRY_VERIFY(!editor->property("typing").isNull());
-        QTest::keyClick(win, '!');
-        const auto click = [&](const char *name) {
-            auto button = win->findChild<QQuickItem *>(name);
-            QVERIFY(button);
-            QTest::mouseClick(
-                win, Qt::LeftButton, Qt::NoModifier,
-                button->mapToScene({button->width() / 2, button->height() / 2}).toPoint());
-        };
-        click("undo");
-        QCOMPARE(b.state.annotations[0].text, QString("Ship it"));
-        QVERIFY(editor->property("typing").isNull());
-
-        // Save mid-typing includes the text, so nothing unexported is left behind.
-        QTest::keyClick(win, Qt::Key_T);
-        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(600, 300));
-        QTRY_VERIFY(!editor->property("typing").isNull());
-        for (char c : QByteArray("Saved"))
-            QTest::keyClick(win, c);
-        click("saveImage");
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
-        QCOMPARE(b.state.annotations.last().text, QString("Saved"));
-        QVERIFY(!b.dirty());
-        QFile::remove(b.lastExport());
-
-        // Text is drawn as typed, never as markup.
-        QTest::keyClick(win, Qt::Key_T);
-        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(100, 50));
-        QTRY_VERIFY(!editor->property("typing").isNull());
-        for (char c : QByteArray("<b>x</b>"))
-            QTest::keyClick(win, c);
-        // A screenshot request mid-typing keeps the text, so the discard prompt sees it. No
-        // tools are on PATH for the rest of the test, so a regression can't start the real
-        // picker on the desktop.
-        const auto path = qgetenv("PATH");
-        qputenv("PATH", "/nonexistent");
-        auto restorePath = qScopeGuard([&] { qputenv("PATH", path); });
-        emit b.screenshotRequested();
-        QTRY_VERIFY(win->findChild<QObject *>("discardDialog")->property("opened").toBool());
-        QCOMPARE(b.phase(), QString("editor"));
-        QCOMPARE(b.state.annotations.last().text, QString("<b>x</b>"));
-        QMetaObject::invokeMethod(win->findChild<QObject *>("discardDialog"), "close");
-        // Repeater delegates are visual children, so walk the item tree.
-        std::function<QQuickItem *(QQuickItem *)> find = [&](QQuickItem *item) -> QQuickItem * {
-            if (item->property("text").toString() == "<b>x</b>")
-                return item;
-            for (auto child : item->childItems())
-                if (auto found = find(child))
-                    return found;
-            return nullptr;
-        };
-        auto drawn = find(win->findChild<QQuickItem *>("composition"));
-        QVERIFY(drawn);
-        QCOMPARE(drawn->property("textFormat").toInt(), int(Qt::PlainText));
-        b.discard();
-    }
-    void annotationExport() {
-        QTest::failOnWarning(QRegularExpression("annotations\\.js|Annotation"));
-        QTemporaryDir dir;
-        QImage shot(900, 600, QImage::Format_RGB32);
-        shot.fill(QColor("#202830"));
-        QPainter(&shot).fillRect(360, 240, 180, 120, QColor("#e04040"));
-        QVERIFY(shot.save(dir.path() + "/shot.png"));
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        b.loadFile(dir.path() + "/shot.png");
-        b.setValue("canvas", "auto");
-        b.setValue("padding", .08);
-        b.setValue("windowTransparency", "custom");
-        b.setValue("windowOpacity", .5);
-        const auto points = [](std::initializer_list<QPointF> ps) {
-            QVariantList list;
-            for (auto p : ps)
-                list << QVariant(QVariantList{p.x(), p.y()});
-            return list;
-        };
-        QVERIFY(!b.addAnnotation({{"kind", "redact"}, {"points", points({{350, 230}, {550, 370}})}})
-                     .isEmpty());
-        QVERIFY(!b.addAnnotation({{"kind", "box"},
-                                  {"points", points({{100, 100}, {300, 200}})},
-                                  {"color", "#30d158"},
-                                  {"size", 8}})
-                     .isEmpty());
-        b.addAnnotation({{"kind", "arrow"},
-                         {"points", points({{600, 100}, {800, 250}})},
-                         {"color", "#ff375f"},
-                         {"size", 6}});
-        b.addAnnotation({{"kind", "text"},
-                         {"points", points({{560, 450}})},
-                         {"text", "Hello"},
-                         {"size", 30},
-                         {"color", "#0a84ff"}});
-        b.addAnnotation({{"kind", "step"}, {"points", points({{80, 500}})}, {"size", 40}});
-        b.addAnnotation(
-            {{"kind", "ellipse"}, {"points", points({{620, 300}, {760, 380}})}, {"fill", "tint"}});
-        b.addAnnotation({{"kind", "line"}, {"points", points({{100, 400}, {300, 420}})}});
-        b.addAnnotation({{"kind", "marker"},
-                         {"points", points({{100, 560}, {200, 565}, {300, 560}})},
-                         {"color", "#ffd60a"},
-                         {"size", 18}});
-        QCOMPARE(b.state.annotations.size(), 8);
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-        auto composition = win->findChild<QQuickItem *>("composition");
-        QVERIFY(composition);
-        QTest::qWait(200);
-        auto grab = composition->grabToImage(
-            QSize(qRound(composition->width()), qRound(composition->height())));
-        QVERIFY(grab);
-        QSignalSpy ready(grab.data(), &QQuickItemGrabResult::ready);
-        QVERIFY(ready.wait(5000));
-        const auto preview = grab->image();
-        // The editor with the box selected, for the CI test evidence.
-        win->findChild<QQuickItem *>("annotationEditor")
-            ->setProperty("selectedId", b.state.annotations[1].id);
-        QTest::qWait(100);
-        win->grabWindow().save("tests/out/preview-annotation-editor.png");
-        b.outputImage(false, true);
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
-        const QImage saved(b.lastExport());
-        QCOMPARE(saved.size(), b.stillSize());
-        // Where a source pixel lands in the saved PNG, from Composition's layout.
-        const double w = saved.width(), h = saved.height(), pad = .08 * w;
-        const double frameW = std::min(w - 2 * pad, (h - 2 * pad) * 1.5), scale = frameW / 900;
-        const auto out = [&](double x, double y) {
-            return saved.pixelColor(qRound((w - frameW) / 2 + x * scale),
-                                    qRound((h - frameW / 1.5) / 2 + y * scale));
-        };
-        // Annotations stay opaque over a half-transparent window.
-        QCOMPARE(out(450, 300), QColor("#000000"));
-        const auto green = out(200, 100);
-        QVERIFY2(std::abs(green.red() - 0x30) <= 3 && std::abs(green.green() - 0xd1) <= 3 &&
-                     std::abs(green.blue() - 0x58) <= 3,
-                 qPrintable(green.name()));
-        const auto pill = out(590, 452);
-        QVERIFY2(pill.blue() > 200 && pill.red() < 40, qPrintable(pill.name()));
-        const auto exported =
-            saved.scaled(preview.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-        double error = 0;
-        for (int y = 0; y < preview.height(); y += 4)
-            for (int x = 0; x < preview.width(); x += 4) {
-                const auto p = preview.pixelColor(x, y), e = exported.pixelColor(x, y);
-                error += std::abs(p.red() - e.red()) + std::abs(p.green() - e.green()) +
-                         std::abs(p.blue() - e.blue());
-            }
-        error /= preview.width() * preview.height() * 3. / 16;
-        qInfo() << "ANNOTATED_PREVIEW_EXPORT mean_channel_error=" << error;
-        saved.save("tests/out/export-annotated.png");
-        QVERIFY2(error < 5, qPrintable(QString::number(error)));
-        QFile::remove(b.lastExport());
-        b.discard();
     }
     void screenshotRecovery() {
         QTemporaryDir dir;
@@ -1855,25 +1324,21 @@ class Integration : public QObject {
         b.discard();
     }
     void workflow() {
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        QVERIFY(win);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
         b.record("test", "test", true, true);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recording"), 15000);
         QTest::qWait(4000);
         b.stop();
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 20000);
         QVERIFY2(b.duration() > 3, qPrintable(b.message()));
+        // A recording shows its card; this edit continues in the editor.
+        QTRY_VERIFY(s.stage.editorWindow() || !s.stage.card().isEmpty());
+        s.stage.openEditor();
+        auto win = s.stage.editorWindow();
+        QVERIFY(win);
+        QVERIFY(QTest::qWaitForWindowExposed(win));
         const QString recording = b.original();
         QCOMPARE(QFileInfo(recording).absolutePath(),
                  QStandardPaths::writableLocation(QStandardPaths::MoviesLocation));
@@ -1895,15 +1360,7 @@ class Integration : public QObject {
         b.updateZoom(z, zm["start"].toDouble(), zm["end"].toDouble(), .72, .35, 1.9);
         b.updateZoom(z, zm["start"].toDouble(), zm["start"].toDouble() + .8, .72, .35, 1.9);
         QTest::qWait(150);
-        std::function<QQuickItem *(QQuickItem *)> findDrag = [&](QQuickItem *item) -> QQuickItem * {
-            if (item->objectName() == "zoomDrag0")
-                return item;
-            for (auto child : item->childItems())
-                if (auto found = findDrag(child))
-                    return found;
-            return nullptr;
-        };
-        auto drag = findDrag(win->contentItem());
+        auto drag = find(win->contentItem(), "zoomDrag0");
         QVERIFY(drag);
         auto point = drag->mapToScene(QPointF(drag->width() / 2, drag->height() / 2)).toPoint();
         double beforeDrag = b.edit()["zooms"].toList()[0].toMap()["start"].toDouble();

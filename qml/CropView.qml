@@ -1,13 +1,17 @@
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Layouts
+import OmaCap
 
+// Crops the recording on its full source, so reopening it can widen an earlier crop. Drag
+// the corners to resize or inside to move; nothing changes until Confirm crop.
 ColumnLayout {
     id: root
 
     property string source: ""
     property real sourceAspect: 16 / 9
     property rect selection: Qt.rect(0, 0, 1, 1)
+
+    readonly property color shade: theme.alpha(theme.scrim, 153)
 
     signal accepted(var crop)
     signal canceled()
@@ -40,24 +44,7 @@ ColumnLayout {
         selection = Qt.rect(left, top, right - left, bottom - top);
     }
 
-    spacing: 16
-
-    RowLayout {
-        Layout.fillWidth: true
-
-        Label {
-            text: "O M A C A P"
-            font.bold: true
-            font.pixelSize: 14
-            Layout.fillWidth: true
-        }
-
-        Label {
-            text: backend.kind === "image" ? "Crop screenshot" : "Crop recording"
-            color: theme.colors.dark_foreground
-        }
-
-    }
+    spacing: 12
 
     Item {
         Layout.fillWidth: true
@@ -77,21 +64,21 @@ ColumnLayout {
             Rectangle {
                 width: picture.width
                 height: selected.y
-                color: "#99000000"
+                color: root.shade
             }
 
             Rectangle {
                 y: selected.y + selected.height
                 width: picture.width
                 height: picture.height - y
-                color: "#99000000"
+                color: root.shade
             }
 
             Rectangle {
                 y: selected.y
                 width: selected.x
                 height: selected.height
-                color: "#99000000"
+                color: root.shade
             }
 
             Rectangle {
@@ -99,7 +86,7 @@ ColumnLayout {
                 y: selected.y
                 width: picture.width - x
                 height: selected.height
-                color: "#99000000"
+                color: root.shade
             }
 
             Rectangle {
@@ -111,8 +98,14 @@ ColumnLayout {
                 width: root.selection.width * picture.width
                 height: root.selection.height * picture.height
                 color: "transparent"
-                border.color: "white"
-                border.width: 2
+
+                ChromeBox {
+                    anchors.fill: parent
+                    anchors.margins: -1
+                    radius: 0
+                    borderWidth: 2
+                    border: "selection"
+                }
 
                 MouseArea {
                     property point origin
@@ -159,13 +152,15 @@ ColumnLayout {
                         }
                     }
 
-                    Rectangle {
+                    // Omasnap's crop handle.
+                    ChromeBox {
                         anchors.centerIn: parent
                         width: 12
                         height: 12
-                        color: "white"
-                        border.color: "#303030"
-                        border.width: 1
+                        radius: 3
+                        fill: theme.foreground
+                        borderWidth: 2
+                        border: "selection"
                     }
 
                 }
@@ -176,29 +171,38 @@ ColumnLayout {
 
     }
 
-    RowLayout {
-        Layout.fillWidth: true
+    ChromePanel {
+        Layout.alignment: Qt.AlignHCenter
+        implicitWidth: actions.implicitWidth + 16
+        implicitHeight: actions.implicitHeight + 16
 
-        Label {
-            text: "Drag corners to resize. Drag inside to move."
-            color: theme.colors.dark_foreground
-            Layout.fillWidth: true
-        }
+        Row {
+            id: actions
 
-        FlatButton {
-            text: "Reset"
-            onClicked: root.selection = Qt.rect(0, 0, 1, 1)
-        }
+            anchors.centerIn: parent
+            spacing: 6
 
-        FlatButton {
-            text: "Cancel"
-            onClicked: root.canceled()
-        }
+            ChromeChip {
+                icon: "undo"
+                text: "Reset"
+                tooltip: "Select the whole recording"
+                onClicked: root.selection = Qt.rect(0, 0, 1, 1)
+            }
 
-        FlatButton {
-            text: "Confirm crop"
-            primary: true
-            onClicked: root.accepted([root.selection.x, root.selection.y, root.selection.width, root.selection.height])
+            ChromeChip {
+                text: "Cancel"
+                key: "Esc"
+                onClicked: root.canceled()
+            }
+
+            ChromeChip {
+                accent: true
+                icon: "check"
+                text: "Confirm crop"
+                key: "Enter"
+                onClicked: root.accepted([root.selection.x, root.selection.y, root.selection.width, root.selection.height])
+            }
+
         }
 
     }

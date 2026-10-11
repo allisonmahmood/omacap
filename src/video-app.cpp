@@ -1,15 +1,22 @@
 #include "video-app.h"
 #include "backend.h"
 #include "exporter.h"
+#include "overlay-chrome.hpp"
 #include "video-owner.h"
+#include "video-stage.h"
 #include <QApplication>
 #include <QFileInfo>
-#include <QQmlApplicationEngine>
-#include <QQmlContext>
+#include <QQmlEngine>
 #include <QQuickStyle>
 #include <QTextStream>
 
 int runVideoApp(int argc, char **argv) {
+    // As in Omasnap: LayerShellQt::Window::get gives only the overlay and the card a layer
+    // role, so the floating editor and choosers keep Qt's xdg-shell integration. Qt's generic
+    // platform theme skips loading GTK; choosers are Qt's own, styled from the Omarchy theme.
+    qunsetenv("QT_WAYLAND_SHELL_INTEGRATION");
+    qputenv("QT_QPA_PLATFORMTHEME", "generic");
+    QGuiApplication::setDesktopFileName("omacap");
     QApplication app(argc, argv);
     app.setApplicationName("omacap");
     app.setOrganizationName("OmaCap");
@@ -22,6 +29,7 @@ int runVideoApp(int argc, char **argv) {
         int i = app.arguments().indexOf("--export");
         return i + 1 < argc ? exportRecording(app.arguments()[i + 1]) : 2;
     }
+    QApplication::setFont(chromeDefaultFont());
     QQuickStyle::setStyle("Basic");
     VideoOwner owner;
     if (!owner.acquire()) {
@@ -33,20 +41,20 @@ int runVideoApp(int argc, char **argv) {
         return 1;
     }
     Theme theme;
-    QQmlApplicationEngine engine;
+    QQmlEngine engine;
     auto frames = new Frames;
     engine.addImageProvider("frames", frames);
     Backend backend(&theme, frames);
     owner.attach(backend);
-    engine.rootContext()->setContextProperty("theme", &theme);
-    engine.rootContext()->setContextProperty("backend", &backend);
-    engine.load(QUrl("qrc:/qml/Main.qml"));
-    if (engine.rootObjects().isEmpty())
+    VideoStage stage(engine, backend, theme);
+    if (!stage.load())
         return 1;
+    // The process lives as long as its card, editor or recording does.
+    app.setQuitOnLastWindowClosed(false);
+    QObject::connect(&stage, &VideoStage::finished, &app, &QCoreApplication::quit);
     if (argc > 1)
         backend.testLoad(QFileInfo(app.arguments()[1]).absoluteFilePath());
-    int result = app.exec();
-    for (auto root : engine.rootObjects())
-        delete root;
-    return result;
+    else
+        stage.offerRecovery();
+    return app.exec();
 }
