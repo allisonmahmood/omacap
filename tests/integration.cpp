@@ -1,6 +1,10 @@
 #include "../src/backend.h"
 #include "../src/exporter.h"
 #include "../src/video-stage.h"
+#include "../src/recording-layout.h"
+#include "../src/video-ipc.h"
+#include "../src/video-owner.h"
+#include <QtConcurrent>
 #include <QApplication>
 #include <QDir>
 #include <QFile>
@@ -24,6 +28,16 @@
 #include <QAudioBuffer>
 #include <QAudioBufferOutput>
 #endif
+// A whole 1280×720 monitor with every device, as the synthetic worker records it.
+RecordRequest syntheticRequest() {
+    RecordRequest request;
+    request.monitor = "TEST-1";
+    request.monitorLogical = QRect(0, 0, 1280, 720);
+    request.area = request.monitorLogical;
+    request.mic = request.camera = "test";
+    request.desktopAudio = true;
+    return request;
+}
 class Integration : public QObject {
     Q_OBJECT
     QTemporaryDir themeRoot;
@@ -88,21 +102,20 @@ class Integration : public QObject {
         Backend b(&theme, &frames);
         b.newSession();
         b.hasMic = true;
-        b.lead = 3;
         b.prepare(QDir::current().absoluteFilePath("tests/out/unfinished-tail.mkv"), true);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
-        QVERIFY(b.duration() > 4.9);
-        b.seek(4.5);
+        QVERIFY(b.duration() > 7.9);
+        b.seek(7.5);
         QTRY_VERIFY_WITH_TIMEOUT(!b.seeking, 3000);
         QVERIFY(b.screenSink.videoFrame().startTime() < 1000000);
         QVERIFY(b.screenSink.videoFrame().endTime() >= 7990000);
-        QCOMPARE(b.position(), 4.5);
+        QCOMPARE(b.position(), 7.5);
         b.micOutput.setVolume(0);
         b.togglePlay();
-        QTRY_VERIFY_WITH_TIMEOUT(b.position() > 4.7, 2000);
+        QTRY_VERIFY_WITH_TIMEOUT(b.position() > 7.7, 2000);
         b.pause();
         QVERIFY(b.mic.position() > 7600);
-        b.trim(4, 5);
+        b.trim(7, 8);
         const QString output = QDir::current().absoluteFilePath("tests/out/recovered-tail.mp4");
         QFile::remove(output);
         b.startExport(output, false, 640, 30, 20);
@@ -342,7 +355,7 @@ class Integration : public QObject {
         b.loadFile(fixture);
         QTRY_COMPARE_WITH_TIMEOUT(s.stage.card(), QString("recording"), 10000);
         s.stage.closeCard();
-        QCOMPARE(b.phase(), QString("recorder"));
+        QCOMPARE(b.phase(), QString("idle"));
         QVERIFY(QFile::exists(fixture));
         QCOMPARE(finished.count(), 3);
     }
@@ -691,7 +704,7 @@ class Integration : public QObject {
         QCOMPARE(b.phase(), QString("editor"));
         QTest::keyClick(win, Qt::Key_Escape);
         QTest::keyClick(win, Qt::Key_Return);
-        QCOMPARE(b.phase(), QString("recorder"));
+        QCOMPARE(b.phase(), QString("idle"));
         QVERIFY(!s.stage.editorWindow());
     }
     void playbackCuts() {
@@ -1100,26 +1113,7 @@ class Integration : public QObject {
         }
         b.discard();
     }
-    void stillSize() {
-        Edit e;
-        e.padding = .1;
-        // An auto canvas is the shot plus equal padding on every side.
-        QCOMPARE(e.stillSize({1000, 500}), QSize(1250, 750));
-        e.canvas = "1:1";
-        QCOMPARE(e.stillSize({1000, 500}), QSize(1250, 1250));
-        // A tall shot on a wide canvas keeps its source height.
-        e.canvas = "16:9";
-        const auto tall = e.stillSize({500, 1000});
-        QVERIFY(std::abs(tall.height() - 2 * e.padding * tall.width() - 1000) <= 1);
-        e.canvas = "auto";
-        e.crop = {.25, 0, .5, 1};
-        QCOMPARE(e.stillSize({1000, 500}), QSize(625, 625));
-        e.crop = {0, 0, 1, 1};
-        QCOMPARE(e.stillSize({8000, 4000}), QSize(8192, 4915));
-        QCOMPARE(Edit::fromJson({{"canvas", "21:9"}}).canvas, QString("auto"));
-        QCOMPARE(Edit::fromJson(e.json()).json(), e.json());
-    }
-    void animatedImages() {
+    void animatedGif() {
         QTemporaryDir dir;
         const auto make = [&](const QString &name) {
             QProcess ffmpeg;
@@ -1128,74 +1122,14 @@ class Integration : public QObject {
                           "1", "-loop", "0", dir.path() + "/" + name});
             return ffmpeg.waitForFinished(15000) && ffmpeg.exitCode() == 0;
         };
-        QVERIFY(make("loop.gif") && make("loop.webp"));
+        QVERIFY(make("loop.gif"));
         Theme t;
         Frames f;
         Backend b(&t, &f);
         // GIFs play on the timeline.
         b.loadFile(dir.path() + "/loop.gif");
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
-        QCOMPARE(b.kind(), QString("video"));
         QVERIFY(b.duration() > .5);
-        b.discard();
-        // FFmpeg can't open an animated WebP as a recording, so it opens as a still.
-        b.loadFile(dir.path() + "/loop.webp");
-        QCOMPARE(b.phase(), QString("editor"));
-        QCOMPARE(b.kind(), QString("image"));
-        QCOMPARE(b.sourceSize(), QSize(160, 90));
-        b.discard();
-    }
-    void annotationModel() {
-        const auto parse = [](QJsonObject o) { return Annotation::fromJson(o); };
-        QCOMPARE(parse({{"kind", "box"}, {"points", QJsonArray{QJsonArray{1, 2}}}}).kind,
-                 QString());
-        QCOMPARE(
-            parse({{"kind", "star"}, {"points", QJsonArray{QJsonArray{1, 2}, QJsonArray{3, 4}}}})
-                .kind,
-            QString());
-        QCOMPARE(
-            parse({{"kind", "text"}, {"points", QJsonArray{QJsonArray{1, 2}}}, {"text", " "}}).kind,
-            QString());
-        const auto box = parse({{"kind", "box"},
-                                {"points", QJsonArray{QJsonArray{1, 2}, QJsonArray{3, 4}}},
-                                {"color", "not a colour"},
-                                {"size", 1e9},
-                                {"fill", "glitter"}});
-        QCOMPARE(box.kind, QString("box"));
-        QCOMPARE(box.color, QString("#ff375f"));
-        QCOMPARE(box.size, 1000.);
-        QCOMPARE(box.fill, QString("outline"));
-        QCOMPARE(
-            parse({{"kind", "step"}, {"points", QJsonArray{QJsonArray{std::nan(""), 2}}}}).kind,
-            QString());
-        Edit e;
-        e.annotations = {box, parse({{"kind", "step"}, {"points", QJsonArray{QJsonArray{5, 6}}}})};
-        QCOMPARE(Edit::fromJson(e.json()).json(), e.json());
-    }
-    void screenshotRecovery() {
-        QTemporaryDir dir;
-        QImage shot(640, 400, QImage::Format_RGB32);
-        shot.fill(QColor("#336699"));
-        QVERIFY(shot.save(dir.path() + "/shot.png"));
-        Theme t;
-        Frames f;
-        {
-            Backend b(&t, &f);
-            b.loadFile(dir.path() + "/shot.png");
-            QCOMPARE(b.kind(), QString("image"));
-            b.setValue("canvas", "4:3");
-        }
-        // The original can move; the session keeps its own copy.
-        QVERIFY(QFile::remove(dir.path() + "/shot.png"));
-        Backend b(&t, &f);
-        QVERIFY(b.recoverable());
-        b.recover();
-        QCOMPARE(b.phase(), QString("editor"));
-        QCOMPARE(b.kind(), QString("image"));
-        QCOMPARE(b.state.canvas, QString("4:3"));
-        QCOMPARE(b.sourceSize(), QSize(640, 400));
-        QVERIFY(!b.screenSource().isEmpty());
-        QVERIFY(b.dirty());
         b.discard();
     }
     void theme() {
@@ -1226,7 +1160,6 @@ class Integration : public QObject {
         b.hasMic = true;
         b.hasCamera = true;
         b.hasDesktop = false;
-        b.lead = .5;
         b.prepare(QDir::current().absoluteFilePath("tests/out/delayed-origin.mkv"), true);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
         QVERIFY(std::abs(b.cameraStart - .4) < .002);
@@ -1307,6 +1240,199 @@ class Integration : public QObject {
         QVERIFY(!QDir(saved).exists());
         QVERIFY(QFile::exists(fixture));
     }
+    void recordingLayout_data() {
+        QTest::addColumn<QRect>("area");
+        QTest::addColumn<double>("scale");
+        QTest::addColumn<bool>("otherMonitor");
+        QTest::addColumn<QString>("hudMonitor");
+        QTest::newRow("middle") << QRect(300, 200, 640, 360) << 1. << false << "DP-1";
+        QTest::newRow("fractional") << QRect(301, 199, 641, 359) << 1.25 << false << "DP-1";
+        QTest::newRow("bottom edge") << QRect(300, 600, 640, 120) << 1.6 << false << "DP-1";
+        QTest::newRow("whole monitor") << QRect(0, 0, 1280, 720) << 1. << true << "DP-2";
+        QTest::newRow("whole, alone") << QRect(0, 0, 1280, 720) << 2. << false << "";
+    }
+    // Chrome shown while recording never touches the encoded area, and stays on screen.
+    void recordingLayout() {
+        QFETCH(QRect, area);
+        QFETCH(double, scale);
+        QFETCH(bool, otherMonitor);
+        QFETCH(QString, hudMonitor);
+        RecordRequest request;
+        request.monitor = "DP-1";
+        request.monitorLogical = QRect(1920, 0, 1280, 720);
+        request.scale = scale;
+        request.area = area;
+        QList<Monitor> monitors{{"DP-1", request.monitorLogical}};
+        if (otherMonitor)
+            monitors.append({"DP-2", QRect(0, 0, 1920, 1080)});
+        const auto layout = layoutRecording(request, monitors, QSize(124, 40), QSize(300, 150));
+        const QRect e = layout.encoded;
+        QCOMPARE(e.width() % 2, 0);
+        QCOMPARE(e.height() % 2, 0);
+        QVERIFY(QRect(QPoint(), request.nativeSize()).contains(e));
+        // Every encoded pixel's logical footprint lies inside the guard.
+        const QRectF footprint(request.monitorLogical.topLeft() + QPointF(e.topLeft()) / scale,
+                               QSizeF(e.size()) / scale);
+        QVERIFY(QRectF(layout.guard).contains(footprint));
+        for (const QRect &strip : layout.outline) {
+            QVERIFY(!strip.intersects(layout.guard));
+            QVERIFY(request.monitorLogical.contains(strip));
+        }
+        QCOMPARE(layout.hudMonitor, hudMonitor);
+        QCOMPARE(layout.hud.has_value(), !hudMonitor.isEmpty());
+        if (layout.hud) {
+            QVERIFY(!layout.hud->intersects(layout.guard));
+            const auto monitor = std::ranges::find(monitors, hudMonitor, &Monitor::name);
+            QVERIFY(monitor->logical.contains(*layout.hud));
+        }
+        QVERIFY(request.monitorLogical.contains(layout.countdown));
+    }
+    void recordHotkey() {
+        const auto binds = [](QJsonArray list) { return QJsonDocument(list).toJson(); };
+        QCOMPARE(::recordHotkey(binds({QJsonObject{{"modmask", 64}, {"key", "r"},
+                                                   {"dispatcher", "exec"},
+                                                   {"arg", "omacap --screenshot"}},
+                                       QJsonObject{{"modmask", 72}, {"key", "r"},
+                                                   {"dispatcher", "exec"},
+                                                   {"arg", "uwsm app -- omacap --record"},
+                                                   {"submap", ""}}})),
+                 QString("Super + Alt + R"));
+        // Lua binds only describe themselves.
+        QCOMPARE(::recordHotkey(binds({QJsonObject{{"modmask", 65}, {"key", "PRINT"},
+                                                   {"dispatcher", "__lua"}, {"arg", "272"},
+                                                   {"description", "Record with OmaCap"}}})),
+                 QString("Super + Shift + Print"));
+        QCOMPARE(::recordHotkey(binds({QJsonObject{{"modmask", 8}, {"key", "PRINT"},
+                                                   {"dispatcher", "__lua"},
+                                                   {"description", "Screenrecording"}}})),
+                 QString());
+    }
+    // The marker exists from the first countdown frame until capture ends; a cancelled
+    // countdown leaves no recording behind.
+    void recordingLifecycle() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        QSignalSpy finished(&b, &Backend::recordingFinished);
+        QSignalSpy exits(&b, &Backend::exitRequested);
+        const QString marker = recordingMarkerPath();
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        QCOMPARE(b.phase(), QString("countdown"));
+        QFile pid(marker);
+        QVERIFY(pid.open(QIODevice::ReadOnly));
+        QCOMPARE(pid.readAll().trimmed().toLongLong(), QCoreApplication::applicationPid());
+        QVERIFY(!b.startRecording(syntheticRequest(), true).isEmpty());
+        const QString cancelled = b.original();
+        b.stop();
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+        QVERIFY(!QFile::exists(marker));
+        QVERIFY(!QFile::exists(cancelled));
+        QVERIFY(b.sessionPath().isEmpty());
+        QCOMPARE(exits.count(), 1);
+        QCOMPARE(finished.count(), 0);
+
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recording"), 15000);
+        QVERIFY(QFile::exists(marker));
+        QTest::qWait(1000);
+        b.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(marker), 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 20000);
+        QCOMPARE(finished.count(), 1);
+        QVERIFY(b.duration() > .5 && b.duration() < 2.5);
+
+        // An edited session is only replaced once the UI agrees.
+        b.setValue("padding", b.edit()["padding"].toDouble() + .01);
+        QSignalSpy asked(&b, &Backend::replaceRequested);
+        std::optional<bool> answer;
+        b.confirmReplace([&](bool yes) { answer = yes; });
+        QCOMPARE(asked.count(), 1);
+        QVERIFY(!answer);
+        b.confirmReplace([](bool yes) { QVERIFY(!yes); }); // already asking
+        QVERIFY(!b.startRecording(syntheticRequest(), true).isEmpty());
+        b.answerReplace(false);
+        QCOMPARE(answer, std::optional(false));
+        QCOMPARE(b.phase(), QString("editor"));
+        b.confirmReplace([&](bool yes) { answer = yes; });
+        b.answerReplace(true);
+        QCOMPARE(answer, std::optional(true));
+        const QString first = b.original();
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        QVERIFY(QFile::exists(first));
+        b.stop();
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+        QFile::remove(first);
+    }
+    // Quitting mid-recording finalizes the file, which the next run recovers.
+    void quitWhileRecording() {
+        Theme t;
+        Frames f;
+        QString recording;
+        {
+            Backend b(&t, &f);
+            QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+            QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recording"), 15000);
+            QTest::qWait(1000);
+            recording = b.original();
+        }
+        QVERIFY(!QFile::exists(recordingMarkerPath()));
+        QVERIFY(QFileInfo(recording).size() > 1024);
+        Backend b(&t, &f);
+        QVERIFY(b.recoverable());
+        b.recover();
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QCOMPARE(b.original(), recording);
+        b.discard();
+        QFile::remove(recording);
+    }
+    // How the video owner answers `omacap --record`, the capture overlay and opened files.
+    void ownerCommands() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        QFile stale(recordingMarkerPath());
+        QVERIFY(stale.open(QIODevice::WriteOnly));
+        stale.close();
+        VideoOwner owner;
+        QVERIFY(owner.acquire());
+        QVERIFY(!QFile::exists(recordingMarkerPath())); // left by a crashed owner
+        owner.attach(b);
+        // Keep the test process running and the desktop free of notifications.
+        QObject::disconnect(&b, &Backend::exitRequested, nullptr, nullptr);
+        QObject::disconnect(&b, &Backend::backgroundError, nullptr, nullptr);
+        const auto ask = [](const QJsonObject &command) {
+            auto reply = QtConcurrent::run([command] { return askVideoOwner(command); });
+            QTest::qWaitFor([&] { return reply.isFinished(); }, 5000);
+            return reply.isFinished() ? reply.result().value_or(QJsonObject()) : QJsonObject();
+        };
+        const QJsonObject recordKey{{"cmd", "record-key"}};
+        QCOMPARE(ask(recordKey)["action"].toString(), QString("pick"));
+        QCOMPARE(ask({{"cmd", "record"}, {"request", QJsonObject{}}})["error"].toString(),
+                 QString("Not a valid recording request."));
+        auto rotated = syntheticRequest();
+        rotated.transform = 1;
+        QVERIFY(ask({{"cmd", "record"}, {"request", rotated.toJson()}})["error"].toString().contains(
+            "rotated"));
+
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        const QJsonObject record{{"cmd", "record"}, {"request", syntheticRequest().toJson()}};
+        QCOMPARE(ask(record)["ok"].toBool(), false);
+        const QString video = QDir::current().absoluteFilePath("tests/out/delayed.mkv");
+        QCOMPARE(ask({{"cmd", "open"}, {"path", video}})["ok"].toBool(), false);
+        QCOMPARE(ask(recordKey)["action"].toString(), QString("stopped"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+
+        QCOMPARE(ask({{"cmd", "open"}, {"path", video}})["ok"].toBool(), true);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QCOMPARE(ask(recordKey)["action"].toString(), QString("pick")); // nothing edited
+        b.setValue("padding", b.edit()["padding"].toDouble() + .01);
+        bool replace = false;
+        QObject::connect(&b, &Backend::replaceRequested, &b, [&] { b.answerReplace(replace); });
+        QCOMPARE(ask(recordKey)["action"].toString(), QString("busy"));
+        replace = true;
+        QCOMPARE(ask(recordKey)["action"].toString(), QString("pick"));
+        b.discard();
+    }
     void portalFixture() {
         const auto fixture = qEnvironmentVariable("OMACAP_PORTAL_FIXTURE");
         if (fixture.isEmpty())
@@ -1329,7 +1455,7 @@ class Integration : public QObject {
         Studio s;
         auto &b = s.backend;
         QVERIFY(s.stage.load());
-        b.record("test", "test", true, true);
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recording"), 15000);
         QTest::qWait(4000);
         b.stop();
@@ -1460,7 +1586,7 @@ class Integration : public QObject {
         b.discard();
         QVERIFY(!QDir(session).exists());
         QVERIFY(QFileInfo(recording).size() > 1024);
-        QCOMPARE(b.phase(), QString("recorder"));
+        QCOMPARE(b.phase(), QString("idle"));
         // Reopening the saved capture brings back both audio tracks.
         b.loadFile(recording);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);

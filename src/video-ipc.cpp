@@ -51,9 +51,12 @@ VideoOwnerServer::VideoOwnerServer(QObject *parent)
                     const auto json = QJsonDocument::fromJson(client->readLine().trimmed());
                     QPointer<QLocalSocket> target = client;
                     const Reply reply = [target](const QJsonObject &answer) {
-                        if (target)
-                            target->write(QJsonDocument(answer).toJson(QJsonDocument::Compact) +
-                                          '\n');
+                        if (!target)
+                            return;
+                        target->write(QJsonDocument(answer).toJson(QJsonDocument::Compact) +
+                                      '\n');
+                        // Now, so a reply sent just before quitting still arrives.
+                        target->flush();
                     };
                     if (json.isObject())
                         emit command(json.object(), reply);

@@ -8,6 +8,11 @@ QRect RecordRequest::nativeArea() const {
                      QPoint(1, 1));
 }
 
+QSize RecordRequest::nativeSize() const {
+    return {int(std::lround(monitorLogical.width() * scale)),
+            int(std::lround(monitorLogical.height() * scale))};
+}
+
 QJsonObject RecordRequest::toJson() const {
     return {{"monitor", monitor},
             {"monitorX", monitorLogical.x()},

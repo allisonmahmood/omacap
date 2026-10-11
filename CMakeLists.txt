@@ -8,6 +8,8 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 6.8 REQUIRED COMPONENTS
   Concurrent Core Gui Widgets Qml Quick QuickControls2 Multimedia OpenGL Network Test)
+# The capture overlay and the recording chrome are layer-shell surfaces.
+find_package(LayerShellQt REQUIRED)
 
 # Contracts between the capture overlay and the video process.
 add_library(omacap-ipc STATIC
@@ -28,6 +30,9 @@ add_library(omacap-video STATIC
   src/exporter.cpp src/exporter.h
   src/frames.h
   src/model.cpp src/model.h
+  src/recorder.cpp src/recorder.h
+  src/recording-chrome.cpp src/recording-chrome.h
+  src/recording-layout.cpp src/recording-layout.h
   src/theme.cpp src/theme.h
   src/video-icons.cpp src/video-icons.h
   src/video-owner.cpp src/video-owner.h
@@ -37,6 +42,7 @@ add_library(omacap-video STATIC
 target_include_directories(omacap-video PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(omacap-video PUBLIC cxx_std_23)
 target_compile_options(omacap-video PRIVATE -Wall -Wextra)
+# omasnap-core supplies the recording chrome's theme and fonts.
 target_link_libraries(omacap-video PUBLIC omacap-ipc omasnap-core
   Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickControls2
   Qt6::Multimedia Qt6::OpenGL Qt6::Network)
@@ -52,7 +58,7 @@ target_link_libraries(omacap PRIVATE omacap-video omasnap-core)
 
 if(BUILD_TESTING)
   qt_add_executable(omacap-tests tests/integration.cpp resources.qrc)
-  target_link_libraries(omacap-tests PRIVATE omacap-video Qt6::Test)
+  target_link_libraries(omacap-tests PRIVATE omacap-video Qt6::Concurrent Qt6::Test)
 endif()
 
 install(TARGETS omacap RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")

@@ -65,6 +65,12 @@ context.objects = [
                 "valve name=activity ! pipewiresink mode=provide "
                 'stream-properties="props,node.name=omacap-test,media.class=Video/Source"'
             )
+            # Stamp frames with CLOCK_MONOTONIC, as XDPH does with the compositor's time.
+            clock = Gst.SystemClock.obtain()
+            clock.set_property("clock-type", Gst.ClockType.MONOTONIC)
+            producer.use_clock(clock)
+            producer.set_start_time(Gst.CLOCK_TIME_NONE)
+            producer.set_base_time(0)
             producer.set_state(Gst.State.PLAYING)
             node = None
             for _ in range(100):
@@ -97,7 +103,7 @@ context.objects = [
                 ["--output", str(out / "pipewire-idle.mkv"), "--seconds", str(seconds)]
             )
             capture.output = Path(capture.a.output)
-            capture.portal = Portal()
+            capture.fd = Portal().OpenPipeWireRemote().take()
             events = []
             original_emit = capture.emit
 
@@ -140,7 +146,7 @@ context.objects = [
 
             linker = threading.Thread(target=link, daemon=True)
             linker.start()
-            capture.start({"streams": [(node, {"size": (640, 360)})]})
+            capture.start(node, {"size": (640, 360)})
             linker.join(timeout=10)
             assert not link_errors, link_errors
 
@@ -153,7 +159,7 @@ context.objects = [
             if not capture.finished:
                 capture.loop.run()
             assert capture.exitcode == 0, events
-            assert any(event["event"] == "ready" for event in events), events
+            assert any(event["event"] == "recording" for event in events), events
             result = json.loads(
                 subprocess.check_output(
                     [

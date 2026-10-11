@@ -18,6 +18,8 @@ struct RecordRequest {
 
     // The picked area in the monitor's native pixels, as the screen stream delivers them.
     QRect nativeArea() const;
+    // The monitor's size in native pixels.
+    QSize nativeSize() const;
     QJsonObject toJson() const;
     static std::optional<RecordRequest> fromJson(const QJsonObject &json);
 };

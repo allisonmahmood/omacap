@@ -1,7 +1,21 @@
 #!/usr/bin/python
-"""Owned recording worker. JSON events on stdout; SIGINT finalizes only this session."""
+"""OmaCap's recording worker. Records one monitor through the screen-cast portal, cropped to
+the picked area before encoding, plus the chosen microphone, desktop audio and camera.
 
-import argparse, json, os, signal, sys, threading, time
+JSON lines: events on stdout, commands on stdin. Times are CLOCK_MONOTONIC nanoseconds.
+  events    token{monitor, token}   the portal's restore token for the monitor it shared
+            streaming               every source delivers; the countdown may start
+            recording               the first clean screen frame was kept
+            stopping                nothing after the stop time will be kept
+            error{message}          finished{frames}
+  commands  start{after}   keep frames the compositor rendered after `after`, from the first one
+            stop{at}       keep nothing captured after `at` (default now), then finish
+
+Every track starts at the first kept screen frame and is saved relative to it, so the file
+holds nothing from before `start`. SIGINT and SIGTERM stop now; stdin closing does too.
+"""
+
+import argparse, json, os, signal, subprocess, sys, threading, time
 from pathlib import Path
 import dbus, dbus.mainloop.glib
 import gi
@@ -11,36 +25,78 @@ from gi.repository import GLib, Gst
 
 p = argparse.ArgumentParser()
 p.add_argument("--output", required=True)
+p.add_argument("--monitor", default="", help="Hyprland name of the monitor to record")
+p.add_argument("--size", default="", help="the monitor's native WxH, to validate the stream")
+p.add_argument("--crop", default="", help="x,y,w,h in the monitor's native pixels")
+p.add_argument("--token", default="", help="restore token from an earlier recording")
 p.add_argument("--mic", default="")
-p.add_argument("--desktop", default="")
+p.add_argument("--desktop", action="store_true")
 p.add_argument("--camera", default="")
-p.add_argument("--synthetic", action="store_true")
-p.add_argument("--seconds", type=int, default=0)
-p.add_argument("--probe", action="store_true")
+p.add_argument("--synthetic", action="store_true", help="test sources instead of devices")
+p.add_argument("--seconds", type=int, default=0, help="start at once, stop after this long")
 Gst.init(None)
 dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
 loop = GLib.MainLoop()
 bus = None
 portal = None
-capture_started = time.monotonic()
 pipeline = None
 session = None
 fd = None
 request_path = None
 finished = False
 stopping = False
-first = {}
-ready = False
+streaming = False
+started = set()
 count = 0
 exitcode = 0
 timeout_id = None
 # Reopening a saved recording finds its audio tracks by these titles. Keep them
 # single words: matroskamux stores tag values containing spaces escaped and quoted.
 TRACK_TITLES = {"mic": "Microphone", "desktop": "Desktop"}
+OFFSET_NONE = Gst.BUFFER_OFFSET_NONE
+# Videos stay at most 4K; larger areas are scaled down after cropping.
+MAX_WIDTH, MAX_HEIGHT = 3840, 2160
 
 
 def emit(event, **data):
     print(json.dumps(dict(event=event, **data)), flush=True)
+
+
+def now():
+    return time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+
+
+class Cut:
+    """Which buffers are saved. The screen opens the cut at the first fresh frame stamped after
+    `after`; other tracks keep what falls between that frame and `until`.
+
+    Screen timestamps are the compositor's own (XDPH stamps each frame when Hyprland copies
+    it), so a frame stamped after `after` was rendered after the chrome was hidden. Repeated
+    frames keep the sequence number of the frame they copy and never open the cut."""
+
+    def __init__(self):
+        self.after = None
+        self.epoch = None
+        self.until = None
+        self.newest = -1
+
+    def screen(self, pts, seq):
+        fresh = seq == OFFSET_NONE or seq > self.newest
+        if seq != OFFSET_NONE:
+            self.newest = max(self.newest, seq)
+        if self.epoch is None:
+            if self.after is None or not fresh or pts <= self.after:
+                return False
+            self.epoch = pts
+        return self.until is None or pts <= self.until
+
+    def track(self, pts):
+        return self.epoch is not None and self.epoch <= pts and (
+            self.until is None or pts <= self.until
+        )
+
+
+cut = Cut()
 
 
 def finish(error=""):
@@ -78,17 +134,22 @@ def finish(error=""):
             pass
     if fd is not None:
         os.close(fd)
-    emit("finished", frames=count, first=first)
+    # A cancelled countdown records nothing; don't leave a header-only file behind.
+    if cut.epoch is None:
+        output.unlink(missing_ok=True)
+    emit("finished", frames=count)
     loop.quit()
     guard.cancel()
     return False
 
 
-def stop(*_):
+def stop(at=None):
     global stopping
     if stopping:
         return False
     stopping = True
+    cut.until = now() if at is None else at
+    emit("stopping")
     if pipeline:
         pipeline.send_event(Gst.Event.new_eos())
         GLib.timeout_add_seconds(
@@ -100,6 +161,31 @@ def stop(*_):
     else:
         finish()
     return False
+
+
+def begin(after):
+    cut.after = after
+    return False
+
+
+def command(line):
+    try:
+        message = json.loads(line)
+    except ValueError:
+        return
+    if message.get("cmd") == "start":
+        begin(int(message["after"]))
+    elif message.get("cmd") == "stop":
+        stop(int(message["at"]) if "at" in message else None)
+
+
+def read_commands(source, _condition):
+    line = sys.stdin.readline()
+    if not line:
+        GLib.idle_add(stop)
+        return False
+    command(line)
+    return True
 
 
 signal.signal(signal.SIGINT, lambda *_: GLib.idle_add(stop))
@@ -123,11 +209,8 @@ def request(name, values, options, done, timeout=25):
             GLib.source_remove(timeout_id)
             timeout_id = None
         if code:
-            finish(
-                "Sharing was cancelled."
-                if code == 1
-                else "The desktop portal rejected recording."
-            )
+            # Closing the portal's picker is a cancel, not an error.
+            finish("" if code == 1 else "The desktop portal rejected recording.")
         else:
             done(result)
 
@@ -156,16 +239,56 @@ def request(name, values, options, done, timeout=25):
 def created(result):
     global session
     session = result["session_handle"]
-    if a.probe:
-        emit("probe", ok=True)
-        finish()
-        return
+    # Monitors only, persistent: a valid restore token skips XDPH's picker.
+    options = {
+        "types": dbus.UInt32(1),
+        "multiple": False,
+        "cursor_mode": dbus.UInt32(2),
+        "persist_mode": dbus.UInt32(2),
+    }
+    if a.token:
+        options["restore_token"] = a.token
     request(
         "SelectSources",
         [session],
-        {"types": dbus.UInt32(3), "multiple": False, "cursor_mode": dbus.UInt32(2)},
-        lambda _: request("Start", [session, ""], {}, start, 600),
+        options,
+        lambda _: request("Start", [session, ""], {}, shared, 600),
     )
+
+
+def stream_problem(props, monitor, size):
+    """Why the shared stream isn't the requested monitor, or None. XDPH ignores `types` when
+    it restores a token, and its picker can return any monitor or window."""
+    if int(props.get("source_type", 0)) != 1:
+        return "The screen-sharing picker shared a window. Choose the display to record."
+    shared = str(props.get("mapping_id", ""))
+    if shared != monitor:
+        return f"The screen-sharing picker shared {shared or 'another display'}, not {monitor}. Record again and choose {monitor}."
+    if size and "size" in props:
+        width, height = (int(v) for v in props["size"])
+        if abs(width - size[0]) > 2 or abs(height - size[1]) > 2:
+            return f"{monitor} is shared at {width}×{height}, not {size[0]}×{size[1]}. Record again."
+    return None
+
+
+def shared(result):
+    global fd
+    node, props = result["streams"][0]
+    # Always replace the stored token: the portal may issue a new one each time.
+    emit(
+        "token",
+        monitor=str(props.get("mapping_id", "")),
+        token=str(result.get("restore_token", "")),
+    )
+    size = tuple(int(v) for v in a.size.split("x")) if a.size else None
+    problem = stream_problem(props, a.monitor, size)
+    if problem:
+        finish(problem)
+        return
+    fd = portal.OpenPipeWireRemote(
+        session, dbus.Dictionary({}, signature="sv"), timeout=10
+    ).take()
+    start(node, props)
 
 
 def message(_, msg):
@@ -176,83 +299,151 @@ def message(_, msg):
         finish()
 
 
-def buffer_probe(pad, info, name):
-    global ready, count
+def screen_gate(pad, info, _):
+    global count
     buf = info.get_buffer()
-    if buf:
-        if name not in first:
-            first[name] = buf.pts / Gst.SECOND
-        if name == "screen":
-            count += 1
-        expected = 1 + bool(a.camera) + bool(a.mic) + bool(a.desktop)
-        if len(first) == expected and not ready:
-            ready = True
-            emit("ready", lead=max(first.values()) + 3)
+    first(pad, "screen", buf)
+    opening = cut.epoch is None
+    if not cut.screen(buf.pts, buf.offset):
+        return Gst.PadProbeReturn.DROP
+    if opening:
+        # Every track is saved relative to the first kept frame.
+        for gate in gates:
+            gate.get_static_pad("src").set_offset(-cut.epoch)
+        GLib.idle_add(lambda: emit("recording") and False)
+    count += 1
     return Gst.PadProbeReturn.OK
 
 
+def track_gate(pad, info, name):
+    buf = info.get_buffer()
+    first(pad, name, buf)
+    return Gst.PadProbeReturn.OK if cut.track(buf.pts) else Gst.PadProbeReturn.DROP
+
+
+def first(pad, name, buf):
+    global streaming
+    if name in started:
+        return
+    started.add(name)
+    # Screen frames must carry compositor time, or the cut means nothing.
+    if name == "screen" and abs(buf.pts - now()) > 5 * Gst.SECOND:
+        GLib.idle_add(lambda: finish("The screen stream has no usable timestamps."))
+    if len(started) == len(gates) and not streaming:
+        streaming = True
+        GLib.idle_add(ready)
+
+
+def ready():
+    emit("streaming")
+    if a.seconds:
+        begin(now())
+        GLib.timeout_add_seconds(a.seconds, stop)
+    return False
+
+
 def watchdog():
-    if not ready and time.monotonic() - capture_started > 15:
+    if not streaming and not finished:
         finish(
             "A selected audio or camera device did not become ready. Check the device and try again."
         )
-        return False
-    # Wayland sends damage, not a continuous stream. A still window is healthy;
-    # actual source loss arrives as a PipeWire error or a closed portal session.
-    return not finished
+    return False
 
 
-def start(result=None):
-    global pipeline, fd, capture_started
-    width, height = 1280, 720
+def crop_box(width, height):
+    """videocrop's left, top, right, bottom for --crop, clamped to the frame."""
+    if not a.crop:
+        return 0, 0, 0, 0
+    x, y, w, h = (int(v) for v in a.crop.split(","))
+    x, y = max(0, min(x, width - 2)), max(0, min(y, height - 2))
+    w, h = max(2, min(w, width - x)), max(2, min(h, height - y))
+    return x, y, width - x - w, height - y - h
+
+
+def encoded_size(width, height):
+    """The cropped area, scaled down to fit 4K, with even sides."""
+    scale = min(1, MAX_WIDTH / width, MAX_HEIGHT / height)
+    return max(2, int(width * scale) // 2 * 2), max(2, int(height * scale) // 2 * 2)
+
+
+def desktop_monitor():
+    result = subprocess.run(
+        ["pactl", "get-default-sink"], capture_output=True, text=True, timeout=3
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError("Could not find the desktop audio output.")
+    return result.stdout.strip() + ".monitor"
+
+
+gates = []
+
+
+def start(node=None, props=None):
+    global pipeline
     if a.synthetic:
-        source = "videotestsrc name=screen is-live=true pattern=smpte ! video/x-raw,width=1280,height=720,framerate=30/1"
+        width, height = 1280, 720
+        source = f"videotestsrc name=screen is-live=true pattern=smpte ! video/x-raw,width={width},height={height},framerate=30/1"
     else:
-        node, props = result["streams"][0]
-        width, height = props.get("size", (1920, 1080))
-        scale = min(1, 3840 / width, 2160 / height)
-        width = max(2, int(width * scale) // 2 * 2)
-        height = max(2, int(height * scale) // 2 * 2)
-        fd = portal.OpenPipeWireRemote(
-            session, dbus.Dictionary({}, signature="sv"), timeout=10
-        ).take()
+        width, height = (int(v) for v in props.get("size", (1920, 1080)))
         target = (
             f"target-object={int(props['pipewire-serial'])}"
             if "pipewire-serial" in props
             else f"path={int(node)}"
         )
-        source = f"pipewiresrc name=screen fd={fd} {target} do-timestamp=true use-bufferpool=false always-copy=true min-buffers=8 max-buffers=16 on-disconnect=error keepalive-time=100 resend-last=true"
+        # Not live, so GStreamer keeps XDPH's frame timestamps instead of restamping them on
+        # arrival; the cut depends on them.
+        source = f"pipewiresrc name=screen fd={fd} {target} do-timestamp=false stream-properties=props,stream.is-live=false use-bufferpool=false always-copy=true min-buffers=8 max-buffers=16 on-disconnect=error keepalive-time=100 resend-last=true"
+    left, top, right, bottom = crop_box(width, height)
+    out_width, out_height = encoded_size(width - left - right, height - top - bottom)
     # Element properties are assigned below; device names and output paths never enter pipeline syntax.
     enc = (
         "nvh264enc preset=p1 bitrate=12000 gop-size=60 ! h264parse"
         if not a.synthetic and Gst.ElementFactory.find("nvh264enc")
         else "videoconvert ! vp8enc deadline=1 cpu-used=6 threads=4 target-bitrate=12000000"
     )
-    desc = f'matroskamux name=mux ! filesink name=output {source} ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! videoconvert ! videoscale ! capsfilter name=screen_caps caps="video/x-raw,format=NV12,width={width},height={height},pixel-aspect-ratio=1/1" ! {enc} ! queue ! mux.video_0 '
+    desc = (
+        "matroskamux name=mux ! filesink name=output async=false "
+        f"{source} ! identity name=screen_gate ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! "
+        f"videocrop left={left} top={top} right={right} bottom={bottom} ! videoconvert ! videoscale ! "
+        f'capsfilter caps="video/x-raw,format=NV12,width={out_width},height={out_height},pixel-aspect-ratio=1/1" ! {enc} ! queue ! mux.video_0 '
+    )
     if a.camera:
         cam = (
             "videotestsrc name=camera is-live=true pattern=ball ! video/x-raw,width=640,height=480,framerate=30/1"
             if a.synthetic
             else "v4l2src name=camera do-timestamp=true ! decodebin"
         )
-        desc += f"{cam} ! queue ! videoconvert ! videoscale ! video/x-raw,format=I420,width=640,height=480 ! vp8enc deadline=1 cpu-used=8 threads=2 ! queue ! mux.video_1 "
+        desc += f"{cam} ! identity name=camera_gate ! queue ! videoconvert ! videoscale ! video/x-raw,format=I420,width=640,height=480 ! vp8enc deadline=1 cpu-used=8 threads=2 ! queue ! mux.video_1 "
     for i, name in enumerate(n for n in ["mic", "desktop"] if getattr(a, n)):
         source = (
             f"audiotestsrc name={name} is-live=true freq={440 + i * 440}"
             if a.synthetic
             else f"pulsesrc name={name} do-timestamp=true"
         )
-        desc += f"{source} ! queue ! audioconvert ! audioresample ! audio/x-raw,rate=48000 ! opusenc ! taginject name={name}_title ! queue ! mux.audio_{i} "
+        desc += f"{source} ! identity name={name}_gate ! queue ! audioconvert ! audioresample ! audio/x-raw,rate=48000 ! opusenc ! taginject name={name}_title ! queue ! mux.audio_{i} "
     try:
         pipeline = Gst.parse_launch(desc)
+        # Running time is CLOCK_MONOTONIC, the clock the compositor and OmaCap stamp with.
+        clock = Gst.SystemClock.obtain()
+        clock.set_property("clock-type", Gst.ClockType.MONOTONIC)
+        pipeline.use_clock(clock)
+        pipeline.set_start_time(Gst.CLOCK_TIME_NONE)
+        pipeline.set_base_time(0)
         pipeline.get_by_name("output").set_property("location", str(output))
+        if a.mic and not a.synthetic:
+            pipeline.get_by_name("mic").set_property("device", a.mic)
+        if a.desktop and not a.synthetic:
+            pipeline.get_by_name("desktop").set_property("device", desktop_monitor())
+        if a.camera and not a.synthetic:
+            pipeline.get_by_name("camera").set_property("device", a.camera)
         for name in ["screen", "camera", "mic", "desktop"]:
-            element = pipeline.get_by_name(name)
-            if element:
-                if not a.synthetic and name != "screen":
-                    element.set_property("device", getattr(a, name))
-                element.get_static_pad("src").add_probe(
-                    Gst.PadProbeType.BUFFER, buffer_probe, name
+            gate = pipeline.get_by_name(f"{name}_gate")
+            if gate:
+                gates.append(gate)
+                gate.get_static_pad("src").add_probe(
+                    Gst.PadProbeType.BUFFER,
+                    screen_gate if name == "screen" else track_gate,
+                    name,
                 )
         for name, title in TRACK_TITLES.items():
             element = pipeline.get_by_name(f"{name}_title")
@@ -261,11 +452,8 @@ def start(result=None):
         gstbus = pipeline.get_bus()
         gstbus.add_signal_watch()
         gstbus.connect("message", message)
-        capture_started = time.monotonic()
         pipeline.set_state(Gst.State.PLAYING)
-        GLib.timeout_add_seconds(2, watchdog)
-        if a.seconds:
-            GLib.timeout_add_seconds(a.seconds, stop)
+        GLib.timeout_add_seconds(15, watchdog)
     except Exception as e:
         finish(str(e))
 
@@ -275,6 +463,7 @@ def main():
     a = p.parse_args()
     output = Path(a.output)
     output.parent.mkdir(parents=True, exist_ok=True)
+    GLib.io_add_watch(sys.stdin, GLib.IO_IN | GLib.IO_HUP, read_commands)
     try:
         if a.synthetic:
             start()
