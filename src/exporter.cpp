@@ -134,6 +134,7 @@ int exportRecording(const QString &jobPath) {
             if (source.isNull())
                 throw std::runtime_error("Cannot read the screenshot");
             frames->put(false, source);
+            root->setProperty("sourcePixels", source.size());
             root->setProperty("screenSource", QString("image://frames/screen/still"));
             QCoreApplication::processEvents();
             context.makeCurrent(&surface);

@@ -102,6 +102,11 @@ class Backend : public QObject {
     Q_INVOKABLE int addZoom(double at);
     Q_INVOKABLE void updateZoom(int index, double a, double b, double x, double y, double amount);
     Q_INVOKABLE void deleteZoom(int index);
+    // Screenshot annotations, by id. Each call is one undo step; a drag is drawn locally
+    // and committed once on release. Returns the new id, or empty when it was invalid.
+    Q_INVOKABLE QString addAnnotation(const QVariantMap &annotation);
+    Q_INVOKABLE void updateAnnotation(const QString &id, const QVariantMap &annotation);
+    Q_INVOKABLE void deleteAnnotation(const QString &id);
     Q_INVOKABLE void chooseBackground();
     Q_INVOKABLE void chooseColor();
     Q_INVOKABLE void useWallpaper();
