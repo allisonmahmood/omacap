@@ -126,6 +126,10 @@ void configureCaptureCommandLine(QCommandLineParser &parser, bool beforeQt) {
                                   QStringLiteral("token"));
   handoffToken.setFlags(QCommandLineOption::HiddenFromHelp);
   parser.addOption(handoffToken);
+  // `omacap --record` opens the picker in record mode through this.
+  QCommandLineOption recordPicker(QStringLiteral("record-picker"));
+  recordPicker.setFlags(QCommandLineOption::HiddenFromHelp);
+  parser.addOption(recordPicker);
   QCommandLineOption pinDocument(QStringLiteral("pin-document"), QString(),
                                  QStringLiteral("path"));
   pinDocument.setFlags(QCommandLineOption::HiddenFromHelp);

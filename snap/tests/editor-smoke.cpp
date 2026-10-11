@@ -15,6 +15,7 @@
 #include "cut-mapping-smoke.hpp"
 #include "cut-smoke.hpp"
 #include "look-smoke.hpp"
+#include "record-smoke.hpp"
 #include "editor.hpp"
 #include "shortcut-guide.hpp"
 #include "selection-repaint-smoke.hpp"
@@ -12408,6 +12409,10 @@ int main(int argc, char **argv) {
   if (!runLookSmoke(application, snapshotError)) {
     qWarning().noquote() << "look smoke failed:" << snapshotError;
     return 150;
+  }
+  if (!runRecordSmoke(application, snapshotError)) {
+    qWarning().noquote() << "record smoke failed:" << snapshotError;
+    return 151;
   }
   if (!runScrollFocusSmoke(snapshotError)) {
     qWarning().noquote() << snapshotError;

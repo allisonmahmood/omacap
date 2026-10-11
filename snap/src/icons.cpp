@@ -204,6 +204,38 @@ void drawToolbarIcon(QPainter &painter, const QRectF &bounds,
     path.lineTo(14, 12);
     path.lineTo(21, 19);
     painter.drawPath(path);
+  } else if (action.startsWith(QStringLiteral("mic"))) {
+    // Lucide's mic.
+    painter.drawRoundedRect(QRectF(9, 2, 6, 12), 3, 3);
+    QPainterPath stand;
+    stand.moveTo(19, 10);
+    stand.cubicTo(19, 18, 5, 18, 5, 10);
+    painter.drawPath(stand);
+    painter.drawLine(QPointF(12, 17), QPointF(12, 22));
+  } else if (action.startsWith(QStringLiteral("camera"))) {
+    // Lucide's video.
+    painter.drawRoundedRect(QRectF(2, 6, 14, 12), 2, 2);
+    QPainterPath lens;
+    lens.moveTo(16, 10.5);
+    lens.lineTo(22, 7);
+    lens.lineTo(22, 17);
+    lens.lineTo(16, 13.5);
+    painter.drawPath(lens);
+  } else if (action.startsWith(QStringLiteral("speaker"))) {
+    // Lucide's volume-2.
+    QPainterPath cone;
+    cone.moveTo(11, 5);
+    cone.lineTo(6, 9);
+    cone.lineTo(2, 9);
+    cone.lineTo(2, 15);
+    cone.lineTo(6, 15);
+    cone.lineTo(11, 19);
+    cone.closeSubpath();
+    painter.drawPath(cone);
+    if (!action.endsWith(QStringLiteral("-off"))) {
+      painter.drawArc(QRectF(10, 8.5, 6, 7), -60 * 16, 120 * 16);
+      painter.drawArc(QRectF(10, 5, 10, 14), -60 * 16, 120 * 16);
+    }
   } else if (action == QStringLiteral("look-frame")) {
     // A card inside its padding.
     painter.drawRoundedRect(QRectF(3, 3, 18, 18), 4, 4);
@@ -334,5 +366,7 @@ void drawToolbarIcon(QPainter &painter, const QRectF &bounds,
     painter.drawLine(QPointF(6, 6), QPointF(18, 18));
     painter.drawLine(QPointF(18, 6), QPointF(6, 18));
   }
+  if (action.endsWith(QStringLiteral("-off")))
+    painter.drawLine(QPointF(3, 3), QPointF(21, 21));
   painter.restore();
 }

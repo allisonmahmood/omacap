@@ -402,6 +402,7 @@ bool parseMonitor(const QByteArray &json, MonitorInfo &monitor,
                         logicalHeight};
     monitor.pixelSize = {rawWidth, rawHeight};
     monitor.scale = scale;
+    monitor.transform = transform;
     monitor.workspaceId = object.value(QStringLiteral("activeWorkspace"))
                               .toObject()
                               .value(QStringLiteral("id"))

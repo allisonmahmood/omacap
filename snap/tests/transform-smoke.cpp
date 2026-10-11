@@ -87,6 +87,8 @@ bool runTransformSmoke(QString &error) {
     CaptureData rotatedCapture;
     if (!captureFocusedMonitor(rotatedCapture, true, error) ||
         rotatedCapture.monitor.geometry.size() != QSize(200, 300) ||
+        // Recordings need the transform to map the area onto the stream.
+        rotatedCapture.monitor.transform != transform ||
         rotatedCapture.previewSize != QSize(200, 300) ||
         rotatedCapture.windows.size() != 1) {
       if (error.isEmpty())

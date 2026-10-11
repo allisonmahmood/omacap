@@ -28,6 +28,8 @@ struct MonitorInfo {
   QRect geometry;
   QSize pixelSize;
   qreal scale = 1.0;
+  /// Hyprland's output transform, 0–7.
+  int transform = 0;
   int workspaceId = 0;
 };
 

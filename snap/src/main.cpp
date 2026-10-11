@@ -265,6 +265,14 @@ int snapMain(int argc, char **argv) {
     return 2;
   }
   const bool editingImage = clipboardInput || !filePath.isEmpty();
+  // Record mode picks an area for the video process; it captures nothing.
+  const bool recordPicker = parser.isSet(QStringLiteral("record-picker"));
+  if (recordPicker && (editingImage || requestedModes > 0 ||
+                       quickOutputMode != QuickOutputMode::None)) {
+    qCritical() << "--record-picker cannot be combined with a capture, an "
+                   "image or quick output";
+    return 2;
+  }
   if (editingImage && quickOutputMode != QuickOutputMode::None) {
     qCritical()
         << "Quick output options cannot be combined with an image input";
@@ -426,6 +434,8 @@ int snapMain(int argc, char **argv) {
   CaptureEditor editor(std::move(capture), captureMode, quickOutputMode,
                        restoredLog, nullptr, editorWindowMode && !editingImage);
   editor.setPinDocument(std::move(pinDocument));
+  if (recordPicker)
+    editor.setRecordMode(true);
   startupTimingMark("CaptureEditor constructed");
   editor.setScreen(targetScreen);
   if (windowedEditorProcess && editingImage) {

@@ -55,6 +55,8 @@ add_library(omasnap-core STATIC
   src/capture-state.hpp
   src/look.cpp
   src/look.hpp
+  src/record-picker.cpp
+  src/record-picker.hpp
   src/recent-snaps.cpp
   src/recent-snaps.hpp
   src/output-config.cpp
@@ -88,6 +90,7 @@ add_library(omasnap-core STATIC
   src/editor.cpp
   src/editor-choosers.cpp
   src/editor-look.cpp
+  src/editor-record.cpp
   src/editor.hpp
   src/main.cpp
   src/snap-main.hpp
@@ -142,6 +145,7 @@ target_link_libraries(omasnap-core PUBLIC
   Qt6::Concurrent
   Qt6::Core
   Qt6::Gui
+  Qt6::Multimedia
   Qt6::Widgets
   LayerShellQt::Interface
   PkgConfig::WaylandClient
@@ -205,6 +209,8 @@ qt_add_executable(omasnap-smoke
   tests/save-as-smoke.hpp
   tests/look-smoke.cpp
   tests/look-smoke.hpp
+  tests/record-smoke.cpp
+  tests/record-smoke.hpp
 )
 target_include_directories(omasnap-smoke PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/tests"

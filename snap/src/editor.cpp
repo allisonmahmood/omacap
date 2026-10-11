@@ -1074,6 +1074,8 @@ CaptureEditor::~CaptureEditor() {
   finishWatcher_.waitForFinished();
   pinWatcher_.waitForFinished();
   dismissFuture_.waitForFinished();
+  // A recording request is handed off after the overlay has gone.
+  recordHandoffFuture_.waitForFinished();
   // An accepted Save As owns its pixels. Finish it before application/static
   // teardown, after the editor surface and instance lock have been released.
   saveAsFuture_.waitForFinished();
@@ -3587,6 +3589,10 @@ void CaptureEditor::enterEdit(QString status) {
 }
 
 void CaptureEditor::enterSelectedCapture(QString editStatus) {
+  if (recordMode_) {
+    enterRecordSetup();
+    return;
+  }
   if (quickOutputMode_ != QuickOutputMode::None) {
     if (!picturesReady()) {
       pendingSelectedCapture_ = std::move(editStatus);
@@ -4503,8 +4509,18 @@ void CaptureEditor::keyPressEvent(QKeyEvent *event) {
     update();
     return;
   }
+  if (phase_ == Phase::Record) {
+    if (!recordKey(event))
+      QWidget::keyPressEvent(event);
+    return;
+  }
   if (dismiss) {
     handleEscape();
+    return;
+  }
+  if (phase_ == Phase::Select && !dragging_ && event->key() == Qt::Key_V &&
+      !event->modifiers()) {
+    setRecordMode(!recordMode_);
     return;
   }
   if (phase_ == Phase::Select) {
@@ -4513,7 +4529,7 @@ void CaptureEditor::keyPressEvent(QKeyEvent *event) {
       return;
     }
     if ((event->key() == Qt::Key_E || event->key() == Qt::Key_A) &&
-        !event->modifiers()) {
+        !event->modifiers() && !recordMode_) {
       if (!event->isAutoRepeat()) {
         if (quickOutputMode_ == QuickOutputMode::None) {
           quickOutputMode_ = captureOutputBeforeEdit_;
@@ -4570,7 +4586,7 @@ void CaptureEditor::keyPressEvent(QKeyEvent *event) {
       }
       return;
     }
-    if (event->key() == Qt::Key_S && !event->modifiers()) {
+    if (event->key() == Qt::Key_S && !event->modifiers() && !recordMode_) {
       setScrollMode(!scrollMode_);
       return;
     }
@@ -5340,8 +5356,24 @@ void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
     return;
   if (capturePending_)
     return;
+  if (phase_ == Phase::Record) {
+    // Only the bar, its menu and the mode switch react to hovering.
+    QRectF hot = recordBarRect();
+    for (const RecordBarItem &item : recordMenuItems())
+      hot = hot.united(item.rect.adjusted(-4, -4, 4, 4));
+    for (const QRectF &mode : modeSwitchRects())
+      hot = hot.united(mode);
+    update(hot.adjusted(-4, -4, 4, 4).toAlignedRect());
+    updatePointerCursor();
+    return;
+  }
   if (phase_ == Phase::Select) {
-    if (!dragging_)
+    QRectF modes;
+    for (const QRectF &mode : modeSwitchRects())
+      modes = modes.united(mode);
+    if (modes.adjusted(-30, -30, 30, 30).contains(cursor_))
+      update(modes.adjusted(-4, -4, 4, 4).toAlignedRect());
+    if (!dragging_ && !recordMode_)
       trackRecentsHover();
     if (smartMode_) {
       if (dragging_)
@@ -5758,8 +5790,24 @@ void CaptureEditor::mousePressEvent(QMouseEvent *event) {
     startScrollCapture(region);
     return;
   }
+  if (phase_ == Phase::Record) {
+    if (pressRecordBar(cursor_))
+      return;
+    // Anywhere else picks again.
+    phase_ = Phase::Select;
+    smartMode_ = true;
+    selection_ = {};
+  }
   if (phase_ == Phase::Select) {
-    trackRecentsHover();
+    // The mode switch takes a plain click; a drag that starts on it selects,
+    // as the top strip always has.
+    modeSwitchPress_ = -1;
+    const QVector<QRectF> modes = modeSwitchRects();
+    for (qsizetype index = 0; index < modes.size(); ++index)
+      if (modes.at(index).contains(cursor_))
+        modeSwitchPress_ = static_cast<int>(index);
+    if (!recordMode_)
+      trackRecentsHover();
     if (recentsOpen_) {
       if (const int recent = recentAt(cursor_); recent >= 0)
         reopenRecent(recent);
@@ -6121,6 +6169,13 @@ void CaptureEditor::mouseReleaseEvent(QMouseEvent *event) {
     selection_ = normalizedSelection(dragStart_, event->position());
     dragging_ = false;
     const qreal selectedArea = selection_.width() * selection_.height();
+    const int pressedMode = std::exchange(modeSwitchPress_, -1);
+    if (pressedMode >= 0 && (selectedArea < 20.0 || selection_.width() < 2.0 ||
+                             selection_.height() < 2.0)) {
+      selection_ = {};
+      setRecordMode(pressedMode == 1);
+      return;
+    }
     if (smartMode_ && (selectedArea < 20.0 || selection_.width() < 2.0 ||
                        selection_.height() < 2.0)) {
       selection_ = {};
@@ -6606,10 +6661,24 @@ void CaptureEditor::updatePointerCursor() {
     applyCursor(Qt::WaitCursor);
     return;
   }
+  if (phase_ == Phase::Record) {
+    clearHighlighterPreview();
+    bool pointing = false;
+    for (const RecordBarItem &item : recordBarItems() + recordMenuItems())
+      pointing = pointing || item.rect.contains(cursor_);
+    for (const QRectF &mode : modeSwitchRects())
+      pointing = pointing || mode.contains(cursor_);
+    applyCursor(pointing ? Qt::PointingHandCursor
+                : recordBarRect().contains(cursor_) ? Qt::ArrowCursor
+                                                    : Qt::CrossCursor);
+    return;
+  }
   if (phase_ == Phase::Select) {
     clearHighlighterPreview();
-    const bool pointing =
+    bool pointing =
         windowMode_ || (recentsOpen_ && recentAt(cursor_) >= 0);
+    for (const QRectF &mode : modeSwitchRects())
+      pointing = pointing || mode.contains(cursor_);
     applyCursor(pointing ? Qt::PointingHandCursor
                          : recentsOpen_ ? Qt::ArrowCursor : Qt::CrossCursor);
     return;
@@ -7262,6 +7331,20 @@ void CaptureEditor::selectFullscreen() {
 }
 
 QVector<QPair<QString, QString>> CaptureEditor::captureHotkeyEntries() const {
+  if (phase_ == Phase::Record)
+    return {{QStringLiteral("Enter"), QStringLiteral("Record")},
+            {QStringLiteral("M / C / D"),
+             QStringLiteral("Mic · camera · desktop audio")},
+            {QStringLiteral("Drag / Click"), QStringLiteral("Pick again")},
+            {QStringLiteral("V"), QStringLiteral("Screenshot instead")},
+            {QStringLiteral("Esc"), QStringLiteral("Close")}};
+  if (recordMode_)
+    return {{QStringLiteral("Drag"), QStringLiteral("Area")},
+            {QStringLiteral("Click"), QStringLiteral("Window / full screen")},
+            {QStringLiteral("Tab"),
+             QStringLiteral("Aspect: %1").arg(regionAspectLabel())},
+            {QStringLiteral("V"), QStringLiteral("Screenshot instead")},
+            {QStringLiteral("Esc"), QStringLiteral("Close")}};
   QVector<QPair<QString, QString>> hotkeys;
   if (smartMode_)
     hotkeys = {
@@ -7285,6 +7368,8 @@ QVector<QPair<QString, QString>> CaptureEditor::captureHotkeyEntries() const {
                   quickOutputMode_ == QuickOutputMode::None
                       ? QStringLiteral("Annotate after capture: on")
                       : QStringLiteral("Annotate after capture: off")});
+  hotkeys.insert(hotkeys.size() - 1,
+                 {QStringLiteral("V"), QStringLiteral("Record instead")});
   return hotkeys;
 }
 
@@ -7299,7 +7384,8 @@ void CaptureEditor::paintSelect(QPainter &painter) {
     StartupTimingScope timing("blit cached backdrop to overlay");
     painter.drawPixmap(rect(), dimmedBackdrop_);
   }
-  const bool exporting = phase_ == Phase::Export;
+  // An area that is settled: being exported, or picked for a recording.
+  const bool exporting = phase_ == Phase::Export || phase_ == Phase::Record;
 
   const bool smartWindow = smartMode_ && !dragging_ && hoveredWindow_ >= 0 &&
                            hoveredWindow_ < capture_.windows.size();
@@ -7361,8 +7447,11 @@ void CaptureEditor::paintSelect(QPainter &painter) {
     painter.drawLine(QPointF(cursor_.x(), 0), QPointF(cursor_.x(), height()));
     painter.drawLine(QPointF(0, cursor_.y()), QPointF(width(), cursor_.y()));
   }
-  if (!exporting)
+  if (!exporting && !recordMode_)
     paintRecents(painter);
+  if (phase_ != Phase::Export)
+    paintModeSwitch(painter);
+  paintRecordBar(painter);
   drawStatusPill(painter, rect(), status_);
   if (!exporting)
     drawMeasureBadge(painter, rect(), cursor_, measurementText());
@@ -8061,6 +8150,7 @@ void CaptureEditor::paintEvent(QPaintEvent *event) {
   switch (phase_) {
   case Phase::Select:
   case Phase::Export:
+  case Phase::Record:
     paintSelect(painter);
     break;
   case Phase::Edit:

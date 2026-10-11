@@ -5,6 +5,7 @@
 #include "cut.hpp"
 #include "overlay-chrome.hpp"
 #include "palette-config.hpp"
+#include "record-picker.hpp"
 #include "recent-snaps.hpp"
 #include "stroke-smoothing.hpp"
 
@@ -186,7 +187,8 @@ public:
   };
 
 private:
-  enum class Phase { Select, Export, Edit };
+  /// Record: an area is picked in record mode and the record bar is up.
+  enum class Phase { Select, Export, Edit, Record };
   enum class OutputMode { Copy, Save, Both, CopyAndPreview };
   enum class HighlighterMode { Snap, Normal };
 public:
@@ -458,6 +460,29 @@ public:
   [[nodiscard]] QRectF textSizePanelRectForTest() const {
     return textSizePanelRect();
   }
+  /// Record mode: the picker hands its area to the video process instead of
+  /// capturing it (`omacap --record` opens it so). V toggles it.
+  void setRecordMode(bool record);
+  [[nodiscard]] bool recordModeForTest() const { return recordMode_; }
+  [[nodiscard]] QPoint modeSwitchCenterForTest(bool record) const {
+    return modeSwitchRects().value(record ? 1 : 0).center().toPoint();
+  }
+  /// Whether an area is picked and the record bar is up. Test accessor.
+  [[nodiscard]] bool recordBarShownForTest() const { return phase_ == Phase::Record; }
+  [[nodiscard]] QRectF recordBarRectForTest() const { return recordBarRect(); }
+  [[nodiscard]] QPoint recordBarItemCenterForTest(const QString &id) const;
+  /// The request Enter would hand off now. Test accessor.
+  [[nodiscard]] RecordRequest recordRequestForTest() const { return recordRequest(); }
+  /// Replaces the video-process handoff, as the smoke suite cannot run one.
+  void setRecordHandoffForTest(std::function<QString(const RecordRequest &)> handoff) {
+    recordHandoff_ = std::move(handoff);
+  }
+  /// Blocks until the record bar's devices are listed. Test accessor.
+  void waitForRecordDevices();
+  /// The handoff Enter started; finished once the video process has it.
+  [[nodiscard]] QFuture<QString> recordHandoffForTest() const {
+    return recordHandoffFuture_;
+  }
   /// Whether the overlay is still in the select phase. Test accessor.
   [[nodiscard]] bool selectingForTest() const { return phase_ == Phase::Select; }
   /// Whether a confirmed quick capture is being exported without showing Edit.
@@ -721,6 +746,30 @@ private:
   void releaseLookSlider();
   void applyLookControl(const QString &id);
   [[nodiscard]] QString lookStatus(const CaptureLook &look) const;
+  /// The picker's Screenshot | Record switch, and which segment is where.
+  [[nodiscard]] QVector<QRectF> modeSwitchRects() const;
+  void paintModeSwitch(QPainter &painter);
+  /// A control on the record bar or in its open device menu.
+  struct RecordBarItem {
+    QRectF rect;
+    QString id;
+    QString label;
+    bool on = false;
+  };
+  [[nodiscard]] QRectF recordBarRect() const;
+  [[nodiscard]] QVector<RecordBarItem> recordBarItems() const;
+  [[nodiscard]] QVector<RecordBarItem> recordMenuItems() const;
+  void paintRecordBar(QPainter &painter);
+  /// The picked area, in logical pixels relative to the monitor.
+  [[nodiscard]] QRectF recordArea() const;
+  [[nodiscard]] RecordRequest recordRequest() const;
+  /// An area was picked in record mode: show the bar rather than capture.
+  void enterRecordSetup();
+  bool pressRecordBar(const QPointF &point);
+  bool recordKey(QKeyEvent *event);
+  /// Hands the request to the video process and leaves.
+  void startRecording();
+  void cycleRecordDevice(bool camera);
   void paintSelect(QPainter &painter);
   void refreshBackdropCache();
   void refreshComposedCapture();
@@ -1046,6 +1095,17 @@ private:
   /// The open chooser (Save As, backdrop colour or image), if any.
   QPointer<QDialog> chooser_;
   LookPopover lookPopover_ = LookPopover::None;
+  bool recordMode_ = false;
+  /// The mode switch segment a press started on, or -1.
+  int modeSwitchPress_ = -1;
+  RecordDevices recordDevices_;
+  bool recordDevicesListed_ = false;
+  RecordChoices recordChoices_;
+  /// "mic" or "camera" while that device menu is open.
+  QString recordMenu_;
+  QFutureWatcher<std::pair<RecordDevices, RecordChoices>> recordDevicesWatcher_;
+  std::function<QString(const RecordRequest &)> recordHandoff_;
+  QFuture<QString> recordHandoffFuture_;
   QPointF lookIntentOrigin_;
   /// The slider being dragged, and the look before the drag.
   QString lookSlider_;
