@@ -140,7 +140,7 @@ Item {
                     if (!pressed)
                         return;
                     const point = mapToItem(aim, mouse.x, mouse.y);
-                    const half = Math.max(Math.abs(point.x - aim.view.x - aim.view.width / 2), Math.abs(point.y - aim.view.y - aim.view.height / 2) * 16 / 9);
+                    const half = Math.max(Math.abs(point.x - aim.view.x - aim.view.width / 2), Math.abs(point.y - aim.view.y - aim.view.height / 2) * aim.frame.width / aim.frame.height);
                     aim.changeAmount(aim.frame.width / Math.max(1, 2 * half));
                 }
                 onReleased: backend.endEdit()
