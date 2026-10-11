@@ -5,7 +5,6 @@
 
 #include <QApplication>
 #include <QEvent>
-#include <QFile>
 #include <QFileInfo>
 #include <QList>
 #include <QMetaObject>
