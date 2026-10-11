@@ -178,7 +178,7 @@ Annotation Annotation::fromJson(const QJsonObject &o) {
     const auto ps = o["points"].toArray();
     for (auto v : ps) {
         const auto p = v.toArray();
-        if (p.size() == 2)
+        if (p.size() == 2 && std::isfinite(p[0].toDouble()) && std::isfinite(p[1].toDouble()))
             a.points.append(
                 {std::clamp(p[0].toDouble(), -1e5, 1e5), std::clamp(p[1].toDouble(), -1e5, 1e5)});
     }

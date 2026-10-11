@@ -86,6 +86,12 @@ ApplicationWindow {
         backend.updateZoom(selectedZoom, a, b, x, y, amount);
     }
 
+    // The buttons can be clicked mid-typing; the shortcuts are off then.
+    function output(copy, save) {
+        editor.commitText();
+        backend.outputImage(copy, save);
+    }
+
     function startCrop() {
         backend.pause();
         timeline.selection = "";
@@ -154,6 +160,9 @@ ApplicationWindow {
     onClosing: (event) => {
         if (allowClose)
             return ;
+
+        // Text still being typed counts as an unexported change.
+        editor.commitText();
 
         if (backend.phase === "exporting") {
             event.accepted = false;
@@ -337,15 +346,23 @@ ApplicationWindow {
 
             FlatButton {
                 visible: win.editing
+                objectName: "undo"
                 text: "Undo"
-                onClicked: backend.undo()
+                // Text being typed is committed first, so Undo acts on it rather than under it.
+                onClicked: {
+                    editor.commitText();
+                    backend.undo();
+                }
                 enabled: backend.phase === "editor"
             }
 
             FlatButton {
                 visible: win.editing
                 text: "Redo"
-                onClicked: backend.redo()
+                onClicked: {
+                    editor.commitText();
+                    backend.redo();
+                }
                 enabled: backend.phase === "editor"
             }
 
@@ -354,6 +371,7 @@ ApplicationWindow {
                 text: win.still ? "New capture" : "New recording"
                 enabled: backend.phase === "editor"
                 onClicked: {
+                    editor.commitText();
                     if (backend.dirty) {
                         win.closeAfterDiscard = false;
                         discardDialog.open();
@@ -368,7 +386,7 @@ ApplicationWindow {
                 objectName: "copyImage"
                 text: "Copy"
                 enabled: backend.phase === "editor"
-                onClicked: backend.outputImage(true, false)
+                onClicked: win.output(true, false)
             }
 
             FlatButton {
@@ -377,7 +395,7 @@ ApplicationWindow {
                 text: "Save"
                 primary: true
                 enabled: backend.phase === "editor"
-                onClicked: backend.outputImage(false, true)
+                onClicked: win.output(false, true)
             }
 
             FlatButton {

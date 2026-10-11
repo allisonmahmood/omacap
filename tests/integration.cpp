@@ -1397,6 +1397,9 @@ class Integration : public QObject {
         QCOMPARE(box.color, QString("#ff375f"));
         QCOMPARE(box.size, 1000.);
         QCOMPARE(box.fill, QString("outline"));
+        QCOMPARE(
+            parse({{"kind", "step"}, {"points", QJsonArray{QJsonArray{std::nan(""), 2}}}}).kind,
+            QString());
         Edit e;
         e.annotations = {box, parse({{"kind", "step"}, {"points", QJsonArray{QJsonArray{5, 6}}}})};
         QCOMPARE(Edit::fromJson(e.json()).json(), e.json());
@@ -1501,6 +1504,56 @@ class Integration : public QObject {
         QTRY_COMPARE(b.state.annotations.size(), 4);
         QCOMPARE(b.state.annotations[3].kind, QString("pen"));
         QVERIFY(b.state.annotations[3].points.size() > 5);
+
+        // A stroke stops sampling at the model's point limit rather than being rejected.
+        editor->setProperty("maxPoints", 20);
+        QTest::keyClick(win, Qt::Key_F);
+        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, at(500, 400));
+        for (int i = 1; i <= 40; i++)
+            QTest::mouseMove(win, at(500 + i * 8, 400 + (i % 2) * 20), 5);
+        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, at(820, 400), 5);
+        QTRY_COMPARE(b.state.annotations.size(), 5);
+        QCOMPARE(b.state.annotations[4].points.size(), 20);
+        editor->setProperty("maxPoints", 5000);
+
+        // Escape cancels a move for good, even if the pointer keeps going.
+        QTest::keyClick(win, Qt::Key_R);
+        drag(at(100, 250), at(250, 350));
+        QTRY_COMPARE(b.state.annotations.size(), 6);
+        const auto before = b.state.annotations[5].points;
+        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, at(175, 250));
+        QTest::mouseMove(win, at(200, 270), 20);
+        QTest::keyClick(win, Qt::Key_Escape);
+        QTest::mouseMove(win, at(260, 300), 20);
+        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, at(260, 300), 20);
+        QCOMPARE(b.state.annotations[5].points, before);
+
+        // The Undo button mid-typing commits the edit, then undoes it.
+        QTest::mouseDClick(win, Qt::LeftButton, Qt::NoModifier, at(420, 315));
+        QTRY_VERIFY(!editor->property("typing").isNull());
+        QTest::keyClick(win, '!');
+        const auto click = [&](const char *name) {
+            auto button = win->findChild<QQuickItem *>(name);
+            QVERIFY(button);
+            QTest::mouseClick(
+                win, Qt::LeftButton, Qt::NoModifier,
+                button->mapToScene({button->width() / 2, button->height() / 2}).toPoint());
+        };
+        click("undo");
+        QCOMPARE(b.state.annotations[0].text, QString("Ship it"));
+        QVERIFY(editor->property("typing").isNull());
+
+        // Save mid-typing includes the text, so nothing unexported is left behind.
+        QTest::keyClick(win, Qt::Key_T);
+        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(600, 300));
+        QTRY_VERIFY(!editor->property("typing").isNull());
+        for (char c : QByteArray("Saved"))
+            QTest::keyClick(win, c);
+        click("saveImage");
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
+        QCOMPARE(b.state.annotations.last().text, QString("Saved"));
+        QVERIFY(!b.dirty());
+        QFile::remove(b.lastExport());
         b.discard();
     }
     void annotationExport() {

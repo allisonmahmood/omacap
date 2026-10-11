@@ -29,6 +29,8 @@ Item {
     readonly property real originY: composition.markY * composition.scale
     // Sizes follow the screenshot's resolution, so marks read the same on any display.
     readonly property real unit: Math.max(1, Math.min(backend.sourceSize.width, backend.sourceSize.height) / 900)
+    // Annotation::fromJson accepts at most this many points in a stroke.
+    property int maxPoints: 5000
 
     function sizeFor(kind, index) {
         const steps = kind === "text" ? [18, 26, 38] : kind === "step" ? [28, 40, 56] : kind === "marker" ? [12, 18, 28] : [2, 4, 8];
@@ -126,15 +128,19 @@ Item {
     }
 
     // Escape finishes typing, cancels a drag, leaves a drawing tool, then clears the selection.
+    // A cancelled drag stays cancelled until the next press.
     function cancel() {
-        if (typing)
+        if (typing) {
             commitText();
-        else if (draft)
+        } else if (draft || pointer.start) {
             draft = null;
-        else if (tool !== "select")
+            pointer.start = null;
+            pointer.handle = -1;
+        } else if (tool !== "select") {
             tool = "select";
-        else
+        } else {
             selectedId = "";
+        }
     }
 
     clip: true
@@ -223,7 +229,7 @@ Item {
                 });
             } else if (d.kind === "pen" || d.kind === "marker") {
                 const last = d.points[d.points.length - 1];
-                if (Math.hypot(p[0] - last[0], p[1] - last[1]) * editor.k >= 2)
+                if (d.points.length < editor.maxPoints && Math.hypot(p[0] - last[0], p[1] - last[1]) * editor.k >= 2)
                     editor.draft = Object.assign({}, d, {
                         "points": d.points.concat([p])
                     });

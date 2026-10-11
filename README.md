@@ -123,7 +123,7 @@ A screenshot gets a tool row with Omasnap's annotation tools. Pick one, then dra
 | Pen / Marker | F / H | Freehand, and a translucent highlighter. |
 | Redact | D | An opaque black box. Nothing of the screenshot survives under it in the PNG. |
 
-Keys 1–8 choose a colour, and S, M and L the size, for the selected mark and the next one. Sizes scale with the screenshot's resolution. Marks stay fully opaque over a transparent window, follow the screenshot when you crop, and may overhang the padding. Each mark, move or style change is one undo step.
+Keys 1–8 and the colour swatches choose a colour, and the S, M and L buttons the size, for the selected mark and the next one. Sizes scale with the screenshot's resolution. Marks stay fully opaque over a transparent window, follow the screenshot when you crop, and may overhang the padding. Each mark, move or style change is one undo step.
 
 ## Before you record
 
