@@ -699,6 +699,15 @@ void drawMeasureBadge(QPainter &painter, const QRect &bounds,
   painter.drawText(pill, Qt::AlignCenter, text);
 }
 
+/// Whether a look in `ops` shows the wallpaper without knowing which.
+bool lacksWallpaper(const QVector<Operation> &ops) {
+  return std::ranges::any_of(ops, [](const Operation &op) {
+    return op.type == Operation::Type::Look &&
+           op.look.backdrop == BackgroundStyle::Wallpaper &&
+           op.look.wallpaper.isEmpty();
+  });
+}
+
 /// Every picture a log's looks refer to, loaded up front so undo never waits.
 QStringList lookPictureIds(const QVector<Operation> &ops) {
   QStringList ids;
@@ -799,6 +808,8 @@ CaptureEditor::CaptureEditor(CaptureData capture, CaptureMode mode,
     nextAnnotationId_ = std::max<quint64>(log.nextId, 1);
     nextMarker_ = std::max(log.nextMarker, 1);
     requestPictures(lookPictureIds(ops_));
+    if (lacksWallpaper(ops_))
+      adoptWallpaper();
   } else {
     requestPictures({lastLook_.image}, true);
     // An opened file or clipboard image may already be styled; it starts
@@ -3070,6 +3081,8 @@ void CaptureEditor::cycleBackground() {
     next.wallpaper = wallpaperId_;
   commitLook(next, QStringLiteral("Backdrop: %1 · B cycles")
                        .arg(backgroundStyleLabel(next.backdrop)));
+  if (next.backdrop == BackgroundStyle::Wallpaper && next.wallpaper.isEmpty())
+    adoptWallpaper();
 }
 
 void CaptureEditor::seedLook() {
@@ -3080,13 +3093,36 @@ void CaptureEditor::seedLook() {
   op.type = Operation::Type::Look;
   op.look = lastLook_;
   op.look.wallpaper = wallpaperId_;
-  seedAwaitsWallpaper_ = wallpaperId_.isEmpty() && wallpaperPending_;
+  // Waits for the wallpaper this overlay is resolving, if any.
+  lookAwaitsWallpaper_ = wallpaperId_.isEmpty() && wallpaperPending_;
   ops_.insert(ops_.cbegin(), std::move(op));
   ++opIndex_;
   if (phase_ == Phase::Select)
     look_ = ops_.constFirst().look;
   else
     replayLog();
+}
+
+void CaptureEditor::adoptWallpaper() {
+  if (!wallpaperResolved_) {
+    lookAwaitsWallpaper_ = true;
+    if (!wallpaperPending_)
+      requestPictures({}, true);
+    return;
+  }
+  lookAwaitsWallpaper_ = false;
+  if (wallpaperId_.isEmpty())
+    return; // there is none: the backdrop shows its colour
+  // Every look this document has had without one was waiting for it.
+  for (Operation &op : ops_)
+    if (op.type == Operation::Type::Look && op.look.wallpaper.isEmpty())
+      op.look.wallpaper = wallpaperId_;
+  if (phase_ == Phase::Select) {
+    look_.wallpaper = wallpaperId_;
+  } else {
+    replayLog();
+    scheduleSnapshot();
+  }
 }
 
 void CaptureEditor::requestPictures(QStringList ids, bool resolveWallpaper) {
@@ -3112,27 +3148,14 @@ void CaptureEditor::requestPictures(QStringList ids, bool resolveWallpaper) {
     pictures_.insert(loaded.pictures);
     if (resolveWallpaper) {
       wallpaperPending_ = false;
+      wallpaperResolved_ = true;
       wallpaperId_ = loaded.wallpaper;
-      if (seedAwaitsWallpaper_ && !wallpaperId_.isEmpty()) {
-        // Every look this document has had so far was waiting for it.
-        for (Operation &op : ops_)
-          if (op.type == Operation::Type::Look && op.look.wallpaper.isEmpty())
-            op.look.wallpaper = wallpaperId_;
-        if (phase_ == Phase::Select) {
-          look_.wallpaper = wallpaperId_;
-        } else {
-          replayLog();
-          scheduleSnapshot();
-        }
-      }
-      seedAwaitsWallpaper_ = false;
+      if (lookAwaitsWallpaper_)
+        adoptWallpaper();
     }
     update();
-    if (picturesReady() && pendingSelectedCapture_) {
-      QString status = std::move(*pendingSelectedCapture_);
-      pendingSelectedCapture_.reset();
-      enterSelectedCapture(std::move(status));
-    }
+    if (picturesReady() && pendingUntilPictures_)
+      std::exchange(pendingUntilPictures_, nullptr)();
   });
   watcher->setFuture(QtConcurrent::run([ids, resolveWallpaper]() mutable {
     Loaded loaded;
@@ -3156,9 +3179,23 @@ void CaptureEditor::requestPictures(QStringList ids, bool resolveWallpaper) {
 }
 
 bool CaptureEditor::picturesReady() const {
+  // A log kept now would keep a look showing the wallpaper without it. One
+  // that only carries the id along (a seeded Aurora, say) need not wait.
+  if (lookAwaitsWallpaper_ && lacksWallpaper(ops_))
+    return false;
   if (look_.backdrop == BackgroundStyle::Wallpaper && look_.wallpaper.isEmpty())
     return !wallpaperPending_;
   return !pendingPictures_.contains(look_.pictureId());
+}
+
+void CaptureEditor::whenPicturesReady(std::function<void()> action) {
+  if (picturesReady()) {
+    pendingUntilPictures_ = nullptr;
+    action();
+    return;
+  }
+  pendingUntilPictures_ = std::move(action);
+  setStatus(QStringLiteral("Loading backdrop…"));
 }
 
 void CaptureEditor::waitForPictures() {
@@ -3437,6 +3474,10 @@ void CaptureEditor::waitForExport() {
 void CaptureEditor::handOffEditor(bool toWindow) {
   if (busy_)
     return;
+  if (!picturesReady()) {
+    whenPicturesReady([this, toWindow] { handOffEditor(toWindow); });
+    return;
+  }
   endNudgeRun();
   acceptText();
   const bool snapshotsSuppressed = suppressSnapshots_;
@@ -3523,6 +3564,10 @@ void CaptureEditor::pinSnapshot() {
     handleEscape();
     return;
   }
+  if (!picturesReady()) {
+    whenPicturesReady([this] { pinSnapshot(); });
+    return;
+  }
 
   pinPending_ = true;
   setStatus(QStringLiteral("Preparing pinned capture…"));
@@ -3597,12 +3642,7 @@ void CaptureEditor::enterSelectedCapture(QString editStatus) {
     return;
   }
   if (quickOutputMode_ != QuickOutputMode::None) {
-    if (!picturesReady()) {
-      pendingSelectedCapture_ = std::move(editStatus);
-      setStatus(QStringLiteral("Loading backdrop…"));
-      return;
-    }
-    enterExport();
+    whenPicturesReady([this] { enterExport(); });
     return;
   }
   enterEdit(std::move(editStatus));
@@ -3691,6 +3731,10 @@ void CaptureEditor::cancelEditInteraction() {
 void CaptureEditor::dismissEditor(bool remember) {
   if (!pinDocument_ && (!remember || phase_ != Phase::Edit || selection_.isEmpty())) {
     close();
+    return;
+  }
+  if (!picturesReady()) {
+    whenPicturesReady([this, remember] { dismissEditor(remember); });
     return;
   }
   // Keep the completed capture even if no Copy/Save action was used. An
@@ -4435,6 +4479,7 @@ void CaptureEditor::handleToolbar(const QString &action) {
 
 void CaptureEditor::closeEvent(QCloseEvent *event) {
   cancelSaveAs();
+  pendingUntilPictures_ = nullptr;
   if (!event->spontaneous()) {
     QWidget::closeEvent(event);
     return;
@@ -6965,11 +7010,14 @@ void CaptureEditor::adoptImage(QImage image, OperationLog log, CaptureMode kind,
   opIndex_ = std::clamp(log.index, 0, static_cast<int>(ops_.size()));
   nextAnnotationId_ = std::max<quint64>(log.nextId, 1);
   nextMarker_ = std::max(log.nextMarker, 1);
-  seedAwaitsWallpaper_ = false;
-  if (ops_.isEmpty())
+  lookAwaitsWallpaper_ = false;
+  if (ops_.isEmpty()) {
     seedLook();
-  else
+  } else {
     requestPictures(lookPictureIds(ops_));
+    if (lacksWallpaper(ops_))
+      adoptWallpaper();
+  }
   redactionBaseStale_ = true;
   backdropKey_ = 0;
   scrollMode_ = false;

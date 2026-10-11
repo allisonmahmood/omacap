@@ -24,6 +24,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTemporaryDir>
+#include <QThreadPool>
 #include <QTimer>
 #include <QWheelEvent>
 #include <QtCore/qnamespace.h>
@@ -189,6 +190,76 @@ bool checkWallpaperBackdrop(const CaptureData &capture, QString &error) {
                 .arg(output.pixelColor(2, 2).name());
     return false;
   }
+  return true;
+}
+
+/// A pin taken before the wallpaper is resolved waits for it, rather than
+/// keeping a log whose look has none for good; picking Wallpaper in a
+/// document that never showed one resolves it.
+bool checkKeptLooksGetTheirWallpaper(const CaptureData &capture, QString &error) {
+  const QTemporaryDir directory;
+  const QByteArray previousTheme = qgetenv("OMACAP_THEME_ROOT");
+  const QByteArray shelf = qgetenv("OMACAP_RECENT_DIR");
+  const auto restore = qScopeGuard([&] {
+    previousTheme.isNull() ? qunsetenv("OMACAP_THEME_ROOT")
+                           : qputenv("OMACAP_THEME_ROOT", previousTheme);
+    qputenv("OMACAP_RECENT_DIR", shelf);
+    saveLastLook(CaptureLook::plain());
+  });
+  const QColor green(30, 160, 90);
+  QImage wallpaper(64, 64, QImage::Format_RGB32);
+  wallpaper.fill(green);
+  if (!directory.isValid() ||
+      !wallpaper.save(directory.filePath(QStringLiteral("background")), "PNG")) {
+    error = QStringLiteral("Could not prepare the wallpaper fixture");
+    return false;
+  }
+  qputenv("OMACAP_THEME_ROOT", directory.path().toUtf8());
+  qputenv("OMACAP_RECENT_DIR", directory.filePath(QStringLiteral("recent")).toUtf8());
+  CaptureLook look;
+  look.backdrop = BackgroundStyle::Wallpaper;
+  look.shadow = 0.0;
+  saveLastLook(look);
+  {
+    CaptureEditor editor(capture, CaptureEditor::CaptureMode::Fullscreen);
+    editor.setProcessLauncherForTest([](const QString &, const QStringList &) { return true; });
+    // No event has been processed: the wallpaper is still being stored.
+    QTest::keyClick(&editor, Qt::Key_P, Qt::ControlModifier);
+    editor.waitForPictures();
+    QThreadPool::globalInstance()->waitForDone();
+    const auto kept = listRecentSnaps(false);
+    OperationLog keptLog;
+    if (kept.isEmpty() || !loadOperationLog(kept.constFirst().logPath, keptLog, error) ||
+        keptLog.ops.isEmpty() || keptLog.ops.constFirst().look.wallpaper.isEmpty() ||
+        keptLog.ops.constFirst().look.wallpaper != editor.currentLookForTest().wallpaper) {
+      error = QStringLiteral("A pin taken before the wallpaper was resolved kept "
+                             "no wallpaper");
+      return false;
+    }
+  }
+
+  Operation off;
+  off.type = Operation::Type::Look;
+  off.look = CaptureLook::plain();
+  OperationLog reopened;
+  reopened.ops = {off};
+  reopened.index = 1;
+  reopened.previewSize = capture.previewSize;
+  CaptureEditor editor(capture, CaptureEditor::CaptureMode::File,
+                       QuickOutputMode::None, reopened);
+  editor.setSuppressSnapshots(true);
+  editor.waitForPictures();
+  QTest::keyClick(&editor, Qt::Key_B); // Off cycles round to Wallpaper
+  editor.waitForPictures();
+  if (editor.currentLookForTest().backdrop != BackgroundStyle::Wallpaper ||
+      editor.currentLookForTest().wallpaper.isEmpty() ||
+      editor.operationLog().constLast().look.wallpaper.isEmpty() ||
+      editor.renderCurrentOutput().pixelColor(2, 2) != green) {
+    error = QStringLiteral("Picking Wallpaper in a reopened document showed no "
+                           "wallpaper");
+    return false;
+  }
+  editor.close();
   return true;
 }
 
@@ -396,7 +467,8 @@ bool runRecentPersistenceSmoke(QApplication &application, QString &error) {
       !checkReplacement(capture.source, root, error) ||
       !checkBackdropPruning(capture.source, error) ||
       !checkDestruction(capture, error) ||
-      !checkWallpaperBackdrop(capture, error))
+      !checkWallpaperBackdrop(capture, error) ||
+      !checkKeptLooksGetTheirWallpaper(capture, error))
     return false;
 
   auto editorOwner = std::make_unique<CaptureEditor>(

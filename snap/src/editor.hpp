@@ -665,12 +665,20 @@ private:
   /// Starts a fresh document with the last-used look, the wallpaper it
   /// shows being the one resolved when this overlay opened.
   void seedLook();
+  /// Gives every look without a wallpaper id this overlay's wallpaper, once
+  /// it is resolved; resolves it now if nothing has asked for it yet (a
+  /// reopened document that never showed one).
+  void adoptWallpaper();
   /// Loads the pictures `ids` name, and with `resolveWallpaper` stores the
   /// current Omarchy wallpaper first, all on a worker.
   void requestPictures(QStringList ids, bool resolveWallpaper = false);
   /// Whatever the current look's backdrop shows is loaded (or known to be
-  /// missing), so an export can render it.
+  /// missing), and no look showing the wallpaper waits for its id, so an
+  /// export can render it and the log can be kept.
   [[nodiscard]] bool picturesReady() const;
+  /// Runs `action` now if picturesReady(), else once it is. A later call
+  /// replaces an action still waiting.
+  void whenPicturesReady(std::function<void()> action);
   /// The decoded picture `look`'s backdrop shows; null when it shows none or
   /// it is not loaded.
   [[nodiscard]] QImage lookPicture(const CaptureLook &look) const;
@@ -960,12 +968,14 @@ private:
   /// or when there is none.
   QString wallpaperId_;
   /// Pictures being decoded, and whether the wallpaper is still being
-  /// resolved. Exports wait only for what the look shows (picturesReady()).
+  /// resolved or has been. Exports wait only for what the look shows
+  /// (picturesReady()).
   QSet<QString> pendingPictures_;
   bool wallpaperPending_ = false;
-  /// The seeded look still waits for wallpaperId_.
-  bool seedAwaitsWallpaper_ = false;
-  std::optional<QString> pendingSelectedCapture_;
+  bool wallpaperResolved_ = false;
+  /// Some look in the log still waits for wallpaperId_ (adoptWallpaper()).
+  bool lookAwaitsWallpaper_ = false;
+  std::function<void()> pendingUntilPictures_;
   bool busy_ = false;
   bool colorPaletteOpen_ = false;
   bool customColorPickerOpen_ = false;
