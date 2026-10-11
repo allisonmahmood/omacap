@@ -35,10 +35,8 @@ class Backend : public QObject {
     Q_PROPERTY(double focusY READ focusY NOTIFY displayPositionChanged)
     Q_PROPERTY(double progress READ progress NOTIFY changed)
     Q_PROPERTY(bool dirty READ dirty NOTIFY changed)
-    Q_PROPERTY(bool recoverable READ recoverable NOTIFY changed)
     Q_PROPERTY(QString lastExport READ lastExport NOTIFY changed)
     Q_PROPERTY(QString original READ original NOTIFY changed)
-    Q_PROPERTY(QSize sourceSize READ sourceSize NOTIFY changed)
   public:
     Backend(Theme *, Frames *, QObject *p = nullptr);
     ~Backend();
@@ -61,28 +59,32 @@ class Backend : public QObject {
     double focusX() const;
     double focusY() const;
     double progress() const { return m_progress; }
-    bool dirty() const { return m_dirty; }
-    bool recoverable() const;
+    // Edits made since the last export, which closing or replacing the session would lose.
+    // The recording itself is kept either way.
+    bool dirty() const { return m_dirty && (!past.isEmpty() || recoveredEdits); }
+    // Whether an earlier session left an unfinished edit or recording behind. Static, so
+    // `omacap --record` can ask before a video process runs (once the app's name is set).
+    static bool recoverable();
     QString lastExport() const { return m_lastExport; }
     // The recording this session edits. Discarding the session keeps it.
     QString original() const { return m_original; }
-    QSize sourceSize() const { return {sourceWidth, sourceHeight}; }
     // Starts the countdown for a recording, replacing the session. Returns why it can't start
-    // (it would lose edits the user hasn't agreed to replace, or can't record the request);
-    // empty when it started.
+    // (it would lose unsaved edits, or can't record the request); empty when it started.
     QString startRecording(const RecordRequest &request, bool synthetic = false);
     // Cancels the countdown, or stops the recording.
-    Q_INVOKABLE void stop();
-    // The UI calls this once neither the card nor the editor is open. The process then exits
-    // as soon as nothing records or exports.
-    Q_INVOKABLE void uiClosed();
-    // Answers replaceRequested(): true discards the edit for the new recording or file.
-    Q_INVOKABLE void answerReplace(bool replace);
+    void stop();
+    // The UI reports whether a card or editor is open, counting one hidden for a recording.
+    // Once nothing is open and the phase is idle, exitRequested() follows.
+    void setUiOpen(bool open);
     // Calls `answer` with whether a new recording or file may replace the session. Asks the UI
-    // first (replaceRequested) when that would lose edits; false while busy.
+    // first (replaceRequested) when that would lose unsaved edits; false while busy.
     void confirmReplace(std::function<void(bool)> answer);
-    Q_INVOKABLE void importVideo();
-    Q_INVOKABLE void loadFile(QString path);
+    // Answers replaceRequested(). Yes discards the session at once, so it can be replaced.
+    Q_INVOKABLE void answerReplace(bool replace);
+    // A failure that leaves nothing loaded: back to idle, with backgroundError() when no card
+    // or editor is open to show it.
+    void fail(const QString &message);
+    void loadFile(QString path);
     Q_INVOKABLE void seek(double seconds);
     Q_INVOKABLE double toSourceTime(double t) const { return state.sourceTime(t); }
     Q_INVOKABLE double toEditedTime(double t) const { return state.editedTime(t); }
@@ -100,10 +102,11 @@ class Backend : public QObject {
     Q_INVOKABLE int addZoom(double at);
     Q_INVOKABLE void updateZoom(int index, double a, double b, double x, double y, double amount);
     Q_INVOKABLE void deleteZoom(int index);
-    Q_INVOKABLE void chooseBackground();
-    Q_INVOKABLE void chooseColor();
     Q_INVOKABLE void useWallpaper();
-    Q_INVOKABLE void exportVideo(bool gif, int width, int fps, int quality);
+    // Choosers and Export's save dialog; VideoStage hands the screen over to them.
+    void chooseBackground();
+    void chooseColor();
+    void exportVideo(bool gif, int width, int fps, int quality);
     Q_INVOKABLE void cancelExport();
     Q_INVOKABLE void revealExport();
     Q_INVOKABLE void openExport();
@@ -111,7 +114,6 @@ class Backend : public QObject {
     Q_INVOKABLE void recover();
     Q_INVOKABLE QVariant preference(QString key, QVariant fallback = QVariant()) const;
     Q_INVOKABLE void remember(QString key, QVariant value);
-    void testLoad(QString path);
     void startExport(QString path, bool gif, int width, int fps, int quality);
     QString sessionPath() const { return session; }
   signals:
@@ -126,7 +128,8 @@ class Backend : public QObject {
     void recordingFinished();
     // A new recording or file would replace unsaved edits. Ask, then call answerReplace().
     void replaceRequested();
-    // Nothing is open, recording or exporting: the process may exit.
+    // The phase is idle and no card or editor is open: the process may exit. Checked once the
+    // current call has returned, so a session on its way to another is not mistaken for none.
     void exitRequested();
     // Something failed while no card or editor is open to say so.
     void backgroundError(const QString &message);
@@ -146,8 +149,7 @@ class Backend : public QObject {
     double m_position = 0, m_aspect = 16. / 9, m_progress = 0;
     int sourceWidth = 1920, sourceHeight = 1080, screenRevision = 0, cameraRevision = 0;
     bool m_dirty = false, exportCancelled = false, hasMic = false, hasDesktop = false,
-         hasCamera = false, uiOpen = false, announceRecording = false, replaceConfirmed = false,
-         recoveredEdits = false;
+         hasCamera = false, uiOpen = false, announceRecording = false, recoveredEdits = false;
     std::function<void(bool)> pendingReplace;
     QString captureError;
     QByteArray workerBuffer;
@@ -158,7 +160,7 @@ class Backend : public QObject {
     QVideoSink screenSink, cameraSink;
     QProcess worker;
     Waveforms peaks;
-    QTimer seekTimer, displayTimer, seekTimeout;
+    QTimer seekTimer, displayTimer, seekTimeout, exitCheck;
     QElapsedTimer presentationClock;
     double presentedSource = 0, m_displayPosition = 0;
     bool seeking = false, seekInFlight = false;
@@ -172,10 +174,7 @@ class Backend : public QObject {
     double pendingSeek = 0;
     QSettings settings;
     void status(QString phase, QString message = {});
-    void fail(const QString &message);
-    void exitIfUnused();
     bool mayReplace() const;
-    bool unsavedEdits() const;
     void newSession();
     void checkpoint();
     void push();

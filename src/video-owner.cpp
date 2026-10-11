@@ -29,34 +29,45 @@ QJsonObject requestArgument(const QStringList &args) {
                : QJsonObject();
 }
 
-// Runs one command against the backend; `reply` is called exactly once.
+QJsonObject result(const QString &error) {
+    return error.isEmpty() ? QJsonObject{{"ok", true}} : QJsonObject{{"ok", false}, {"error", error}};
+}
+
+// Runs one command against the backend; `reply` is called exactly once. Anything that would
+// replace unsaved edits waits for the user's answer first.
 void handle(Backend &backend, const QJsonObject &command, const VideoOwnerServer::Reply &reply) {
     const QString cmd = command["cmd"].toString(), phase = backend.phase();
     if (cmd == "record-key") {
-        // The record hotkey stops a recording, or asks for the picker when one may start.
+        // The record hotkey stops a recording. Otherwise it starts over: the session ends, so
+        // nothing of it is under the picker, and the caller opens the picker.
         if (phase == "countdown" || phase == "recording") {
             backend.stop();
             reply({{"action", "stopped"}});
         } else {
-            backend.confirmReplace(
-                [reply](bool yes) { reply({{"action", yes ? "pick" : "busy"}}); });
+            backend.confirmReplace([&backend, reply](bool yes) {
+                if (yes)
+                    backend.discard();
+                reply({{"action", yes ? "pick" : "busy"}});
+            });
         }
     } else if (cmd == "record") {
         const auto request = RecordRequest::fromJson(command["request"].toObject());
-        const QString error =
-            request ? backend.startRecording(*request) : "Not a valid recording request.";
-        reply(error.isEmpty() ? QJsonObject{{"ok", true}}
-                              : QJsonObject{{"ok", false}, {"error", error}});
+        if (const QString problem =
+                request ? request->unsupported() : "Not a valid recording request.";
+            !problem.isEmpty())
+            return reply(result(problem));
+        backend.confirmReplace([&backend, request = *request, reply](bool yes) {
+            reply(result(yes ? backend.startRecording(request) : "OmaCap is busy."));
+        });
     } else if (cmd == "open") {
         const QString path = QFileInfo(command["path"].toString()).absoluteFilePath();
         backend.confirmReplace([&backend, path, reply](bool yes) {
             if (yes)
                 backend.loadFile(path);
-            reply(yes ? QJsonObject{{"ok", true}}
-                      : QJsonObject{{"ok", false}, {"error", "OmaCap is busy."}});
+            reply(result(yes ? "" : "OmaCap is busy."));
         });
     } else {
-        reply({{"ok", false}, {"error", "Unknown command: " + cmd}});
+        reply(result("Unknown command: " + cmd));
     }
 }
 } // namespace
@@ -91,7 +102,7 @@ void VideoOwner::handleQuitSignals() {
     sigaction(SIGTERM, &action, nullptr);
 }
 
-void VideoOwner::attach(Backend &backend) {
+bool VideoOwner::attach(Backend &backend) {
     if (!server.listen())
         qWarning("OmaCap cannot accept commands: %s", qPrintable(server.errorString()));
     connect(&server, &VideoOwnerServer::command, &backend,
@@ -101,21 +112,25 @@ void VideoOwner::attach(Backend &backend) {
     // Queued, so a reply written just before still reaches its caller.
     connect(&backend, &Backend::exitRequested, qApp, &QCoreApplication::quit,
             Qt::QueuedConnection);
+    // As Omasnap says what went wrong when nothing is open to say it.
     connect(&backend, &Backend::backgroundError, this, [](const QString &message) {
-        QProcess::startDetached("notify-send", {"--app-name=OmaCap", "OmaCap", message});
+        QProcess::startDetached("omarchy-notification-send",
+                                {"--app-name", "omacap", "-t", "4500", "OmaCap", message});
     });
     const QStringList args = QCoreApplication::arguments().mid(1);
     if (args.contains("--record-request")) {
         const auto request = RecordRequest::fromJson(requestArgument(args));
         const QString error = request ? backend.startRecording(*request)
                                       : "OmaCap was given an invalid recording request.";
-        if (!error.isEmpty()) {
-            emit backend.backgroundError(error);
-            QMetaObject::invokeMethod(qApp, &QCoreApplication::quit, Qt::QueuedConnection);
-        }
-    } else if (const QString video = videoArgument(args); !video.isEmpty()) {
-        backend.loadFile(video);
+        if (!error.isEmpty())
+            backend.fail(error);
+        return true;
     }
+    const QString video = videoArgument(args);
+    if (video.isEmpty())
+        return false;
+    backend.loadFile(video);
+    return true;
 }
 
 std::optional<int> forwardToVideoOwner(const QStringList &args) {
@@ -126,7 +141,7 @@ std::optional<int> forwardToVideoOwner(const QStringList &args) {
         command = {{"cmd", "open"}, {"path", video}};
     else
         return std::nullopt;
-    const auto reply = askVideoOwner(command);
+    const auto reply = askVideoOwner(command, answerTimeoutMs);
     if (!reply)
         return std::nullopt;
     if ((*reply)["ok"].toBool())

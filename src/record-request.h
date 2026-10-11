@@ -20,6 +20,8 @@ struct RecordRequest {
     QRect nativeArea() const;
     // The monitor's size in native pixels.
     QSize nativeSize() const;
+    // Why OmaCap can't record this yet; empty when it can.
+    QString unsupported() const;
     QJsonObject toJson() const;
     static std::optional<RecordRequest> fromJson(const QJsonObject &json);
 };

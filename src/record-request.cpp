@@ -13,6 +13,13 @@ QSize RecordRequest::nativeSize() const {
             int(std::lround(monitorLogical.height() * scale))};
 }
 
+QString RecordRequest::unsupported() const {
+    // The stream is in the panel's orientation; cropping it is not supported yet.
+    if (transform != 0)
+        return "OmaCap can't record rotated displays yet.";
+    return {};
+}
+
 QJsonObject RecordRequest::toJson() const {
     return {{"monitor", monitor},
             {"monitorX", monitorLogical.x()},

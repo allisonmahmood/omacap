@@ -5,10 +5,21 @@
 #include "video-owner.h"
 #include "video-stage.h"
 #include <QApplication>
-#include <QFileInfo>
 #include <QQmlEngine>
 #include <QQuickStyle>
-#include <QTextStream>
+
+namespace {
+// The names QSettings and QStandardPaths file the video process's settings and sessions under.
+void nameApp() {
+    QCoreApplication::setApplicationName("omacap");
+    QCoreApplication::setOrganizationName("OmaCap");
+}
+} // namespace
+
+bool videoRecoverable() {
+    nameApp();
+    return Backend::recoverable();
+}
 
 int runVideoApp(int argc, char **argv) {
     // As in Omasnap: LayerShellQt::Window::get gives only the overlay and the card a layer
@@ -17,14 +28,9 @@ int runVideoApp(int argc, char **argv) {
     qunsetenv("QT_WAYLAND_SHELL_INTEGRATION");
     qputenv("QT_QPA_PLATFORMTHEME", "generic");
     QGuiApplication::setDesktopFileName("omacap");
+    nameApp();
     QApplication app(argc, argv);
-    app.setApplicationName("omacap");
-    app.setOrganizationName("OmaCap");
     app.setApplicationVersion(QStringLiteral(OMACAP_VERSION));
-    if (app.arguments() == QStringList{app.arguments().first(), "--version"}) {
-        QTextStream(stdout) << app.applicationVersion() << Qt::endl;
-        return 0;
-    }
     if (app.arguments().contains("--export")) {
         int i = app.arguments().indexOf("--export");
         return i + 1 < argc ? exportRecording(app.arguments()[i + 1]) : 2;
@@ -33,10 +39,9 @@ int runVideoApp(int argc, char **argv) {
     QQuickStyle::setStyle("Basic");
     VideoOwner owner;
     if (!owner.acquire()) {
-        // A video opened while OmaCap is busy goes to the running video process.
-        if (argc > 1 && askVideoOwner({{"cmd", "open"},
-                                       {"path", QFileInfo(app.arguments()[1]).absoluteFilePath()}}))
-            return 0;
+        // Another video process started first: it records the request or opens the file.
+        if (const auto forwarded = forwardToVideoOwner(app.arguments().mid(1)))
+            return *forwarded;
         qWarning("OmaCap is already running.");
         return 1;
     }
@@ -45,16 +50,13 @@ int runVideoApp(int argc, char **argv) {
     auto frames = new Frames;
     engine.addImageProvider("frames", frames);
     Backend backend(&theme, frames);
-    owner.attach(backend);
     VideoStage stage(engine, backend, theme);
     if (!stage.load())
         return 1;
-    // The process lives as long as its card, editor or recording does.
+    // The backend quits the app once no card or editor is open and nothing records, prepares
+    // or exports.
     app.setQuitOnLastWindowClosed(false);
-    QObject::connect(&stage, &VideoStage::finished, &app, &QCoreApplication::quit);
-    if (argc > 1)
-        backend.testLoad(QFileInfo(app.arguments()[1]).absoluteFilePath());
-    else
+    if (!owner.attach(backend))
         stage.offerRecovery();
     return app.exec();
 }

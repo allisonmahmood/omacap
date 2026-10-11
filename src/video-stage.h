@@ -15,7 +15,8 @@ class Theme;
 // (W toggles; the choice is remembered). After a recording, a card in the corner offers Edit
 // and Export without taking the keyboard. Every surface hides while a countdown or recording
 // runs. Each surface's content is a QML item (qml/Editor.qml, qml/Card.qml) that reaches this
-// object as the `stage` context property.
+// object as the `stage` context property. The backend is told whether anything is open, and
+// decides when the process exits.
 class VideoStage : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool windowed READ windowed NOTIFY windowedChanged)
@@ -25,7 +26,8 @@ class VideoStage : public QObject {
     ~VideoStage() override;
     // Compiles the editor and card. False, with the errors logged, when the QML is broken.
     bool load();
-    // Offers an earlier session's unfinished edit on the card, when there is one.
+    // Offers an earlier session's unfinished edit on the card, when there is one. With nothing
+    // to offer, nothing is open and the process exits.
     void offerRecovery();
     bool windowed() const { return m_windowed; }
     // What the card shows: "recording", "recovery", or empty when it is closed.
@@ -38,8 +40,9 @@ class VideoStage : public QObject {
     // Switches between the overlay and a floating window, keeping the session and the
     // editor's own state.
     Q_INVOKABLE void setWindowed(bool windowed);
-    // Closes the card. A recording's session ends with it unless the editor is open; the
-    // recording itself stays in Videos.
+    // Closes the card, unless it is exporting. A recording's session ends with it unless the
+    // editor is open; the recording itself stays in Videos. A recovery card's edit stays
+    // recoverable.
     Q_INVOKABLE void closeCard();
     // Choosers, handed off as Omasnap's Save As: the overlay hides and releases the keyboard
     // while an independent floating dialog is open, and returns once it has gone.
@@ -53,14 +56,9 @@ class VideoStage : public QObject {
   signals:
     void windowedChanged();
     void cardChanged();
-    // Nothing is open and nothing is running, so the process may exit.
-    void finished();
 
   protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
-
-  private slots:
-    void noteRecordingFinished();
 
   private:
     QQmlEngine &engine;
@@ -74,15 +72,15 @@ class VideoStage : public QObject {
 
     void phaseChanged();
     void decideSession();
+    void askReplace();
     void showCard(const QString &kind);
     void dropCard();
     void closeEditor();
+    void reportUi();
     void hostEditor();
     void destroyHost(QPointer<QQuickWindow> &host);
     void showSurfaces();
     void hideSurfaces();
-    void finishIfIdle();
-    bool idle() const;
     bool recordingPhase() const;
     void handOff(const std::function<void()> &choose);
 };

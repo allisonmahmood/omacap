@@ -16,22 +16,28 @@ One `omacap` binary runs one of two apps, chosen in `src/main.cpp` before any
 | --- | --- |
 | `omacap`, `omacap --screenshot` | the capture overlay's smart capture |
 | `omacap shot.png` | the screenshot editor |
-| `omacap --record` | `record-key` to the video process; the picker in record mode (`--record-picker`) unless it stopped a recording or is busy |
+| `omacap --record` | `record-key` to the video process; the picker in record mode (`--record-picker`) unless it stopped a recording or is busy. With no video process and an unfinished edit to recover, starts one on the recovery card instead |
 | `omacap --record-request <json>` | `record` to the video process, or starts one that records the request |
 | `omacap video.mp4` | `open` to the video process, or starts one with the video |
+
+A video process that loses the race for the video lock forwards its arguments to the one
+that won, so a request or file is acted on once.
 | `omacap --export <job>` | the offscreen export worker |
 | `omacap --version` | prints the version |
 
 ## Recording, end to end
 
 1. `omacap --record` asks the video process first (`record-key`). If it is recording it
-   stops and the command exits. Otherwise the command opens the picker in record mode.
+   stops and the command exits. Otherwise the session ends (asking first when that loses
+   unsaved edits) and the command opens the picker in record mode. With no video process
+   running and an earlier session left unfinished, the command starts one on the recovery
+   card instead; pressing the record key again picks as usual.
 2. The picker hands a `RecordRequest` (`src/record-request.h`: monitor, area, devices) to
    the video process with `record`, starting one if none runs.
 3. The video process records the monitor through the portal, cropped to the area before
    encoding, so nothing outside the area is ever saved. Its recording chrome stays
    outside the area, or on another monitor, or is not shown. While the countdown or
-   recording runs, `recordingMarkerPath()` exists and every other OmaCap surface hides.
+   recording runs, `recordingMarkerPath()` exists and no other OmaCap surface shows.
 4. After stopping, the video process shows its card, then the editor on request.
 
 ## Keeping OmaCap out of its own recordings
@@ -54,9 +60,11 @@ make that hold:
   capture overlay's fade, are never written.
 - **A clean last frame.** Stopping cuts at the moment of the request; the chrome hides
   only after the worker confirms it will keep nothing later.
-- **Other windows.** The editor and card hide when the phase becomes `countdown`, at least
-  three seconds before the first kept frame. `Recorder` hides any still visible then, and
-  any shown later, before it draws.
+- **Other windows.** Starting a recording ends the session, which closes the editor and
+  card, and ends an offer to recover an earlier edit. `VideoStage` hides anything still
+  open when the phase becomes `countdown`, at least three seconds before the first kept
+  frame. As a safety net, `Recorder` hides any window still visible then, and any shown
+  later, before it draws, and logs a warning; in normal use it never fires.
 
 The portal shares a monitor only after XDPH's picker, once per monitor: its restore token
 is kept in the settings under `restoreTokens/<monitor>` and replaced after every
@@ -70,9 +78,12 @@ monitor. Rotated monitors are refused for now.
 
 | Command | `idle` | `editor` | `countdown`, `recording` | `stopping`, `preparing`, `exporting` |
 | --- | --- | --- | --- | --- |
-| `record-key` | `pick` | `pick`; with unsaved edits, asks the UI first and replies `pick` or `busy` | stops, `stopped` | `busy` |
-| `record` | starts | starts, if nothing unsaved is lost | error | error |
-| `open` | opens | opens, asking first like `record-key` | error | error |
+| `record-key` | `pick` | ends the session, `pick`; with unsaved edits asks first, and `busy` if they are kept | stops, `stopped` | `busy` |
+| `record` | starts | starts; with unsaved edits asks first, and errors if they are kept | error | error |
+| `open` | opens | opens; asks like `record` | error | error |
+
+A command that asks waits for the user's answer, so its caller waits too (up to two
+minutes, `answerTimeoutMs`).
 
 `recordingMarkerPath()` holds the video process's PID, one line, from the moment a
 recording is requested until the worker confirms the stop (or exits). The capture overlay
@@ -85,9 +96,9 @@ writes it, so a new owner removes one left behind by a crash.
 
 | Phase | Shown |
 | --- | --- |
-| `idle` | nothing; the process exits once no card or editor is open |
+| `idle` | nothing, or the recovery card; the process exits once nothing is open |
 | `countdown`, `recording`, `stopping` | only the recording chrome, never inside the recorded area |
-| `preparing` | a recording or file is being opened |
+| `preparing` | nothing new: a recording or file is being opened, and whatever was open stays (the recovery card while it recovers). A recording's card appears once it has loaded, with its first frame |
 | `editor` | a session is loaded: the card after a recording, or the editor |
 | `exporting` | export progress in whichever of card or editor is open |
 
@@ -95,12 +106,16 @@ Signals and calls between `Backend` and the UI:
 
 - `recordingFinished()` fires when a new recording is loaded, so the UI shows the card;
   opening a file goes straight to the editor.
-- `replaceRequested()` asks the UI to confirm discarding an edited session for a new
-  recording or file. The UI answers with `answerReplace(bool)`.
-- `uiClosed()` tells the backend neither card nor editor is open any more. The process
-  then exits once nothing is recording or exporting. A session shown in the editor
-  counts as open until then.
-- Failures with nothing open to show them are reported as desktop notifications.
+- `replaceRequested()` asks the UI to confirm discarding unsaved edits for a new recording
+  or file; the editor asks in its discard dialog. The UI answers with `answerReplace(bool)`;
+  yes discards the session at once. Unsaved edits (`dirty`) are changes since the last
+  export; an untouched recording has none, so replacing or closing it never asks.
+- `setUiOpen(bool)` tells the backend whether a card or editor is open, counting one hidden
+  for a recording. The backend alone ends the process: `exitRequested()` follows once that
+  settles with nothing open and the phase `idle`, so it never exits while recording,
+  preparing or exporting, or while a session passes through `idle` on its way to another.
+- Failures with nothing open to show them are reported as desktop notifications
+  (`backgroundError()`, sent with `omarchy-notification-send`).
 
 ## Video UI
 
@@ -114,11 +129,15 @@ capture. Each surface is a QML item it hosts in a window it owns:
   overlay hides and releases the keyboard while the floating dialog is open.
 - **Card** (`qml/Card.qml`): after a recording, the styled first frame in the corner of the
   focused monitor. It never takes the keyboard when it appears; hovering or clicking it
-  does. Edit opens the editor; Export uses the last export settings and writes to Videos.
-  It fades after 10 seconds without a hover, unless it is kept (pin) or exporting. Closing
-  or fading ends the session; the recording itself stays in Videos. At start-up without a
-  file, the card instead offers an earlier session's unfinished edit for recovery; that
-  card fades the same way, and the edit stays recoverable.
+  does. Edit (E) opens the editor; Export (Enter) uses the last export settings and writes
+  to Videos; P keeps it; X or Esc closes it. It fades after 10 seconds without a hover,
+  unless it is kept or exporting, and can't be closed while exporting. Closing or fading
+  ends the session; the recording itself stays in Videos.
+- **Recovery card**: a video process started without a request or file (as
+  `omacap --record` does when one is left) offers the newest earlier session's unfinished
+  edit on the same card. Recover (E or Enter) opens it in the editor. Closing or fading
+  the card, or starting a new recording, ends the offer; the edit stays recoverable until
+  it is recovered and its session ends.
 
 Opening a file goes straight to the editor. The process exits once its session has ended
 and no surface is open. The chrome is painted with Omasnap's own theme, fonts and icon code

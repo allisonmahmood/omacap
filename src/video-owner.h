@@ -18,9 +18,10 @@ class VideoOwner : public QObject {
     // Takes the video lock. False when another video process already owns it. A recording
     // marker left by a crashed owner is removed.
     bool acquire();
-    // Starts accepting commands, acts on this process's arguments (`--record-request <json>`
-    // or a video file), and quits the app once the backend has nothing left to do.
-    void attach(Backend &backend);
+    // Starts accepting commands and quits the app when the backend asks to exit, then acts on
+    // this process's arguments: records `--record-request <json>` or opens a video file.
+    // Returns false when they name neither.
+    bool attach(Backend &backend);
 
   private:
     QLockFile lock;
@@ -29,8 +30,9 @@ class VideoOwner : public QObject {
     void handleQuitSignals();
 };
 
-// Hands `--record-request <json>` or a video file to the running video process. Returns this
-// process's exit code, or nothing when no video process answered.
+// Hands `--record-request <json>` or a video file to the running video process, waiting while
+// it asks about unsaved edits. Returns this process's exit code, or nothing when no video
+// process answered.
 std::optional<int> forwardToVideoOwner(const QStringList &args);
 // The first argument naming a video file, made absolute; empty when there is none.
 QString videoArgument(const QStringList &args);

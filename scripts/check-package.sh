@@ -14,7 +14,8 @@ trap 'rm -rf -- "$test_state"' EXIT
 mkdir -p "$test_state"/{data,config,cache,runtime}
 chmod 700 "$test_state/runtime"
 # Running omacap alone opens the capture overlay, which needs Hyprland. The video editor runs
-# anywhere: a healthy one stays open on a video, while missing libraries or QML modules exit.
+# anywhere: a healthy one stays open on a video, while missing libraries or QML modules, or a
+# video it can't open, end the process.
 ffmpeg -v error -f lavfi -i testsrc=size=320x180:rate=30:duration=2 -c:v ffv1 "$test_state/demo.mkv"
 status=0
 XDG_DATA_HOME="$test_state/data" XDG_CONFIG_HOME="$test_state/config" \
@@ -24,3 +25,7 @@ XDG_DATA_HOME="$test_state/data" XDG_CONFIG_HOME="$test_state/config" \
   > "$test_state/launch.log" 2>&1 || status=$?
 cat "$test_state/launch.log"
 test "$status" -eq 124
+# A broken binding doesn't end the process, but it is logged.
+if grep -E 'qrc:/qml/.*(Error|undefined|Cannot)' "$test_state/launch.log"; then
+  exit 1
+fi
