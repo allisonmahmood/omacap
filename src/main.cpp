@@ -19,7 +19,7 @@ int main(int argc, char **argv) {
     QStringList args;
     for (int i = 1; i < argc; ++i)
         args << QString::fromLocal8Bit(argv[i]);
-    if (args.isEmpty() || args.contains("--export"))
+    if (args.isEmpty() || args == QStringList{"--version"} || args.contains("--export"))
         return runVideoApp(argc, argv);
     for (const auto &arg : args)
         if (isVideoPath(arg))

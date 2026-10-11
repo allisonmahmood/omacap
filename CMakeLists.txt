@@ -9,6 +9,15 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 6.8 REQUIRED COMPONENTS
   Concurrent Core Gui Widgets Qml Quick QuickControls2 Multimedia OpenGL Network Test)
 
+# Contracts between the capture overlay and the video process.
+add_library(omacap-ipc STATIC
+  src/record-request.cpp src/record-request.h
+  src/video-ipc.cpp src/video-ipc.h
+)
+target_include_directories(omacap-ipc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_features(omacap-ipc PUBLIC cxx_std_23)
+target_link_libraries(omacap-ipc PUBLIC Qt6::Core Qt6::Network)
+
 # Capture overlay, screenshot editor, previews and pins, derived from Omasnap.
 add_subdirectory(snap)
 
@@ -19,12 +28,13 @@ add_library(omacap-video STATIC
   src/frames.h
   src/model.cpp src/model.h
   src/theme.cpp src/theme.h
+  src/video-owner.cpp src/video-owner.h
   src/waveforms.cpp src/waveforms.h
 )
 target_include_directories(omacap-video PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(omacap-video PUBLIC cxx_std_23)
 target_compile_options(omacap-video PRIVATE -Wall -Wextra)
-target_link_libraries(omacap-video PUBLIC
+target_link_libraries(omacap-video PUBLIC omacap-ipc
   Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickControls2
   Qt6::Multimedia Qt6::OpenGL Qt6::Network)
 

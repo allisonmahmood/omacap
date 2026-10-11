@@ -133,6 +133,7 @@ target_include_directories(omasnap-core PUBLIC
 target_compile_features(omasnap-core PUBLIC cxx_std_23)
 target_compile_options(omasnap-core PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(omasnap-core PUBLIC
+  omacap-ipc
   Qt6::Concurrent
   Qt6::Core
   Qt6::Gui
