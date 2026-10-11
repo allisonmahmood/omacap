@@ -91,6 +91,20 @@ bool checkLayoutMaths(QString &error) {
     error = QStringLiteral("Growth did not keep the aspect and the corners");
     return false;
   }
+  // So does a wide one; a layer dragged far off keeps the grown canvas Auto
+  // rather than heightening it to 16:9 as well.
+  if (framedCanvas(QSizeF(30000, 500), look) !=
+      framedCanvas(QSizeF(30000, 500), automaticLook)) {
+    error = QStringLiteral("A wide stitch took a fixed aspect");
+    return false;
+  }
+  const QRectF distant(30000, 100, 80, 40);
+  if (captureLayout(wide, distant, CanvasBoundaryMode::Framed, look).canvas !=
+      captureLayout(wide, distant, CanvasBoundaryMode::Framed, automaticLook)
+          .canvas) {
+    error = QStringLiteral("A far layer widened a fixed aspect past its limit");
+    return false;
+  }
   // Overflow and Image never frame; Off frames nothing.
   const CaptureLayout overflow =
       captureLayout(wide, layer, CanvasBoundaryMode::Overflow, look);
@@ -202,6 +216,16 @@ bool checkLookPersistence(QApplication &application, QString &error) {
     error = QStringLiteral("The editor did not remember its look");
     return false;
   }
+  // A quick run of looks is remembered in order: the last one wins.
+  for (int step = 1; step <= 24; ++step) {
+    remembered.padding = step / 100.0;
+    editor.setLookForTest(remembered);
+  }
+  QThreadPool::globalInstance()->waitForDone();
+  if (loadLastLook() != remembered) {
+    error = QStringLiteral("Quick looks were remembered out of order");
+    return false;
+  }
   static_cast<void>(editor.waitForSnapshot());
   editor.close();
   CaptureEditor next(capture, CaptureEditor::CaptureMode::Smart);
@@ -284,6 +308,56 @@ bool checkCardPainting(QString &error) {
   }
   return true;
 }
+/// With zero padding the canvas is the card, yet glass still shows the
+/// backdrop through it: a spotlight magnifies that, on screen as in the
+/// export.
+bool checkSpotlightOverGlass(QApplication &application, QString &error) {
+  const CaptureData capture = solidCapture({200, 120}, 1.0, Qt::black);
+  Operation styled;
+  styled.type = Operation::Type::Look;
+  styled.look.backdrop = BackgroundStyle::Solid;
+  styled.look.color = Qt::white;
+  styled.look.padding = 0.0;
+  styled.look.shadow = 0.0;
+  styled.look.glass = Glass::Custom;
+  styled.look.opacity = 0.5;
+  Annotation spotlight;
+  spotlight.id = 1;
+  spotlight.kind = Annotation::Kind::Spotlight;
+  spotlight.start = {40, 30};
+  spotlight.end = {160, 90};
+  spotlight.magnification = 2.0;
+  Operation annotate;
+  annotate.type = Operation::Type::Annotate;
+  annotate.annotations = {spotlight};
+  OperationLog log;
+  log.ops = {styled, annotate};
+  log.index = 2;
+  log.nextId = 2;
+  log.previewSize = capture.previewSize;
+  CaptureEditor editor(capture, CaptureEditor::CaptureMode::File,
+                       QuickOutputMode::None, log);
+  editor.setSuppressSnapshots(true);
+  editor.resize(800, 600);
+  editor.show();
+  application.processEvents();
+  const QPointF center(100, 60);
+  const QColor exported = editor.renderCurrentOutput().pixelColor(center.toPoint());
+  const QImage shown = editor.grab().toImage();
+  const QColor seen = shown.pixelColor(
+      (editor.annotationPointToWidgetForTest(center) * shown.devicePixelRatio())
+          .toPoint());
+  editor.close();
+  if (std::abs(exported.red() - 128) > 3 ||
+      std::abs(seen.red() - exported.red()) > 3) {
+    error = QStringLiteral("A spotlight over glass magnified %1 in the editor "
+                           "but %2 in the export")
+                .arg(seen.name(), exported.name());
+    return false;
+  }
+  return true;
+}
+
 /// The toolbar's look popovers: hovering a look button opens its popover;
 /// a slider drag previews live and is one undo step; segments and swatches
 /// commit at once.
@@ -300,6 +374,11 @@ bool checkPopovers(QApplication &application, QString &error) {
   log.previewSize = capture.previewSize;
   CaptureEditor editor(capture, CaptureEditor::CaptureMode::File,
                        QuickOutputMode::None, log);
+  int pins = 0;
+  editor.setProcessLauncherForTest([&pins](const QString &, const QStringList &) {
+    ++pins;
+    return true;
+  });
   editor.resize(800, 600);
   editor.show();
   editor.waitForPictures();
@@ -309,6 +388,24 @@ bool checkPopovers(QApplication &application, QString &error) {
     application.processEvents();
   };
 
+  // No tooltip covers an open popover: neither its own button's nor the
+  // armed tool's, which sits beside it.
+  QTest::keyClick(&editor, Qt::Key_A);
+  for (const QString &action : {QStringLiteral("look-frame"), QStringLiteral("palette")}) {
+    hover(QStringLiteral("look-glass"));
+    hover(action);
+    if (!editor.toolbarTooltipForTest().isEmpty()) {
+      error = QStringLiteral("A tooltip covered the open %1 popover: %2")
+                  .arg(action, editor.toolbarTooltipForTest());
+      return false;
+    }
+  }
+  QTest::mouseMove(&editor, QPoint(600, 560));
+  if (editor.toolbarTooltipForTest().isEmpty()) {
+    error = QStringLiteral("The armed tool lost its tooltip");
+    return false;
+  }
+  QTest::keyClick(&editor, Qt::Key_V);
   hover(QStringLiteral("look-frame"));
   const QRectF track = editor.lookControlRectForTest(QStringLiteral("padding"));
   if (editor.lookPopoverForTest() != CaptureEditor::LookPopover::Frame ||
@@ -328,6 +425,13 @@ bool checkPopovers(QApplication &application, QString &error) {
     QTest::mouseMove(&editor, QPoint(qRound(track.left() + track.width() * along),
                                      qRound(track.center().y())));
   const qreal live = editor.currentLookForTest().padding;
+  // Pinning mid-drag would pin the live look with a log that lacks it.
+  QTest::keyClick(&editor, Qt::Key_P, Qt::ControlModifier);
+  QThreadPool::globalInstance()->waitForDone();
+  if (pins != 0) {
+    error = QStringLiteral("Pinning during a slider drag did not wait for it");
+    return false;
+  }
   QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier,
                       QPoint(qRound(track.left() + track.width() * 0.8),
                              qRound(track.center().y())));
@@ -382,6 +486,22 @@ bool checkPopovers(QApplication &application, QString &error) {
     error = QStringLiteral("The look popover stayed open or drew a layer");
     return false;
   }
+  // Esc mid-drag drops the drag's look before the editor closes.
+  const CaptureLook settled = editor.currentLookForTest();
+  hover(QStringLiteral("look-frame"));
+  const QRectF shadow = editor.lookControlRectForTest(QStringLiteral("shadow"));
+  QTest::mouseMove(&editor, QPoint(qRound(shadow.center().x()),
+                                   qRound(shadow.top()) - 30));
+  QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier,
+                    QPoint(qRound(shadow.left() + 2), qRound(shadow.center().y())));
+  QTest::mouseMove(&editor, QPoint(qRound(shadow.right() - 2),
+                                   qRound(shadow.center().y())));
+  const bool dragged = editor.currentLookForTest() != settled;
+  QTest::keyClick(&editor, Qt::Key_Escape);
+  if (!dragged || editor.currentLookForTest() != settled) {
+    error = QStringLiteral("Esc during a slider drag kept its look");
+    return false;
+  }
   editor.close();
   return true;
 }
@@ -389,5 +509,7 @@ bool checkPopovers(QApplication &application, QString &error) {
 
 bool runLookSmoke(QApplication &application, QString &error) {
   return checkLayoutMaths(error) && checkLookPersistence(application, error) &&
-         checkCardPainting(error) && checkPopovers(application, error);
+         checkCardPainting(error) &&
+         checkSpotlightOverGlass(application, error) &&
+         checkPopovers(application, error);
 }

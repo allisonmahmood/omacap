@@ -192,7 +192,7 @@ QString CaptureEditor::lookStatus(const CaptureLook &look) const {
   const QRectF frame = framedCanvas(selection_.size(), look);
   QString status =
       QStringLiteral("%1 · padding %2% · corners %3 · shadow %4%")
-          .arg(backgroundStyleLabel(look.backdrop).remove(QLatin1Char('…')))
+          .arg(backgroundStyleLabel(look.backdrop))
           .arg(qRound(look.padding * 100))
           .arg(qRound(look.corners * frame.width()))
           .arg(qRound(look.shadow * 100));
@@ -311,6 +311,8 @@ void CaptureEditor::applyLookControl(const QString &id) {
     if (next.backdrop == BackgroundStyle::Wallpaper && next.wallpaper.isEmpty())
       next.wallpaper = wallpaperId_;
     commitLook(next, next == look_ ? QString() : lookStatus(next));
+    if (next.backdrop == BackgroundStyle::Wallpaper && next.wallpaper.isEmpty())
+      adoptWallpaper();
     return;
   }
   if (id == QStringLiteral("aspect-auto"))
@@ -396,10 +398,13 @@ void CaptureEditor::paintLookPopover(QPainter &painter) {
         drawToolbarIcon(painter, swatch, QStringLiteral("background"), {},
                         theme.buttonText);
       } else {
+        // The wallpaper this document shows, else the one it would get.
         const QImage picture =
-            style == BackgroundStyle::Wallpaper ? pictures_.value(wallpaperId_)
-            : style == BackgroundStyle::Image   ? pictures_.value(look_.image)
-                                                : QImage();
+            style == BackgroundStyle::Wallpaper
+                ? pictures_.value(look_.wallpaper.isEmpty() ? wallpaperId_
+                                                            : look_.wallpaper)
+            : style == BackgroundStyle::Image ? pictures_.value(look_.image)
+                                              : QImage();
         paintCaptureBackground(painter, swatch, style, picture, look_.color);
       }
       painter.restore();

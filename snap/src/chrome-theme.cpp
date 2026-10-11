@@ -265,9 +265,20 @@ QString ChromeTheme::fileDialogStyleSheet() const {
   return sheet;
 }
 
+QString omarchyCurrentDirectory() {
+  const QString override = qEnvironmentVariable("OMACAP_THEME_ROOT");
+  if (!override.isEmpty())
+    return override;
+  const QString state = qEnvironmentVariable(
+      "XDG_STATE_HOME", QDir::home().filePath(QStringLiteral(".local/state")));
+  const QString current = QDir(state).filePath(QStringLiteral("omarchy/current"));
+  return QFileInfo::exists(current)
+             ? current
+             : QDir::home().filePath(QStringLiteral(".config/omarchy/current"));
+}
+
 QString chromeThemeDirectory() {
-  return QDir::home().filePath(
-      QStringLiteral(".local/state/omarchy/current/theme"));
+  return QDir(omarchyCurrentDirectory()).filePath(QStringLiteral("theme"));
 }
 
 ChromeTheme loadChromeTheme(const QString &directory) {

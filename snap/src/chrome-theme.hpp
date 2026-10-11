@@ -55,6 +55,11 @@ struct ChromeTheme {
 };
 // NOLINTEND(misc-non-private-member-variables-in-classes)
 
+/// Omarchy's current directory, as OmaCap's video side finds it:
+/// `$OMACAP_THEME_ROOT` (tests point it at a fixture), else
+/// `$XDG_STATE_HOME/omarchy/current`, else `~/.config/omarchy/current`.
+[[nodiscard]] QString omarchyCurrentDirectory();
+/// Its `theme/`, where the chrome's colours come from.
 [[nodiscard]] QString chromeThemeDirectory();
 // Disk reads and parsing belong on a worker, never in a paint/input handler.
 [[nodiscard]] ChromeTheme loadChromeTheme(const QString &directory);

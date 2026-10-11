@@ -30,6 +30,9 @@
 #include <QtEnvironmentVariables>
 #include <QtMath>
 
+#include <sys/wait.h>
+#include <unistd.h>
+
 bool runPinThemeRenderingSmoke(const QString &path, QString &error) {
   const QTemporaryDir runtime;
   if (!runtime.isValid()) {
@@ -387,6 +390,26 @@ bool runPinRecordingSmoke(QString &error) {
   recorder.waitForFinished();
   if (!settles(false) || !painted()) {
     error = QStringLiteral("A pin did not come back after the recorder died");
+    return false;
+  }
+  // A recorder that exited but nobody has reaped yet is gone too, though
+  // kill(pid, 0) still finds it.
+  const pid_t zombie = ::fork();
+  if (zombie == 0) {
+    ::usleep(500000);
+    ::_exit(0);
+  }
+  const auto reap = qScopeGuard([zombie] {
+    if (zombie > 0)
+      ::waitpid(zombie, nullptr, 0);
+  });
+  if (zombie < 0 || !writeMarker(zombie) || !settles(true) || painted()) {
+    error = QStringLiteral("A pin stayed on screen during a recording");
+    return false;
+  }
+  ::waitid(P_PID, static_cast<id_t>(zombie), nullptr, WEXITED | WNOWAIT);
+  if (!settles(false) || !painted() || recordingInProgress()) {
+    error = QStringLiteral("An exited, unreaped recorder kept pins hidden");
     return false;
   }
   return true;

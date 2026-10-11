@@ -2,6 +2,7 @@
  *  everything under the annotation layers. */
 #include "look.hpp"
 
+#include <QList>
 #include <QPainter>
 #include <QPainterPath>
 #include <QRadialGradient>
@@ -41,7 +42,17 @@ struct Frame {
   /// Width over height the frame was shaped to; 0 for Auto, including a
   /// fixed aspect that fell back to it.
   qreal aspect = 0.0;
+  /// The Auto frame: the card plus its padding.
+  QRectF automatic = rect;
 };
+
+/// Whether a fixed aspect may shape the canvas to `shaped` where Auto gives
+/// `automatic` (kMaximumAspectEdge).
+bool aspectFits(const QRectF &shaped, const QRectF &automatic) {
+  return shaped.width() * shaped.height() <=
+         std::max(kMaximumAspectEdge * kMaximumAspectEdge,
+                  automatic.width() * automatic.height());
+}
 
 qreal aspectRatio(CanvasAspect aspect) {
   switch (aspect) {
@@ -75,13 +86,11 @@ Frame lookFrame(const QSizeF &source, const CaptureLook &look) {
                               ratio * (1.0 / aspect - 2.0 * padding));
   const qreal width = source.width() / fill;
   const qreal height = width / aspect;
-  const qreal limit = std::max(
-      kMaximumAspectEdge, std::max(automatic.width(), automatic.height()));
-  if (std::max(width, height) > limit)
+  const QRectF shaped(-(width - source.width()) / 2.0,
+                      -(height - source.height()) / 2.0, width, height);
+  if (!aspectFits(shaped, automatic))
     return {automatic};
-  return {QRectF(-(width - source.width()) / 2.0,
-                 -(height - source.height()) / 2.0, width, height),
-          aspect};
+  return {shaped, aspect, automatic};
 }
 
 /// Grows `rect` about its center along the short axis until it is `aspect`.
@@ -134,8 +143,8 @@ void paintCardShadow(QPainter &painter, const QRectF &card, qreal strength,
 
 /// `picture` reduced by halves until it is no more than twice `needed`, so a
 /// cover-fit draw never minifies by more than 2× (bilinear sampling aliases
-/// past that). Levels are cached per thread: the editor repaints with the
-/// same level until its canvas size changes a lot.
+/// past that). The last few levels are cached per thread: every editor
+/// repaint draws the canvas and the toolbar's swatch, at different levels.
 QImage pictureLevel(const QImage &picture, const QSizeF &needed) {
   if (needed.isEmpty())
     return picture;
@@ -147,16 +156,25 @@ QImage pictureLevel(const QImage &picture, const QSizeF &needed) {
     return picture;
   const QSize size(std::max(1, picture.width() >> level),
                    std::max(1, picture.height() >> level));
-  thread_local qint64 cachedKey = 0;
-  thread_local int cachedLevel = 0;
-  thread_local QImage cached;
-  if (cachedKey != picture.cacheKey() || cachedLevel != level) {
-    cached = picture.scaled(size, Qt::IgnoreAspectRatio,
-                            Qt::SmoothTransformation);
-    cachedKey = picture.cacheKey();
-    cachedLevel = level;
+  struct Level {
+    qint64 key;
+    int level;
+    QImage image;
+  };
+  thread_local QList<Level> cached;
+  for (qsizetype index = 0; index < cached.size(); ++index) {
+    if (cached.at(index).key == picture.cacheKey() &&
+        cached.at(index).level == level) {
+      cached.move(index, 0);
+      return cached.constFirst().image;
+    }
   }
-  return cached;
+  cached.prepend({picture.cacheKey(), level,
+                  picture.scaled(size, Qt::IgnoreAspectRatio,
+                                 Qt::SmoothTransformation)});
+  if (cached.size() > 4)
+    cached.removeLast();
+  return cached.constFirst().image;
 }
 } // namespace
 
@@ -188,12 +206,18 @@ CaptureLayout captureLayout(const QSizeF &source, const QRectF &layers,
       layout.styled ? lookFrame(source, look) : Frame{layout.card};
   QRectF canvas = frame.rect;
   if (grows) {
-    canvas = canvas.united(layers.adjusted(-kFramedLayerMargin,
+    const QRectF reached = layers.adjusted(-kFramedLayerMargin,
                                            -kFramedLayerMargin,
                                            kFramedLayerMargin,
-                                           kFramedLayerMargin));
-    if (frame.aspect > 0.0)
-      canvas = widenedToAspect(canvas, frame.aspect);
+                                           kFramedLayerMargin);
+    canvas = canvas.united(reached);
+    if (frame.aspect > 0.0) {
+      // The same limit as for the card alone: a layer dragged far off would
+      // otherwise widen 16:9 around it to billions of pixels.
+      const QRectF automatic = frame.automatic.united(reached);
+      const QRectF widened = widenedToAspect(canvas, frame.aspect);
+      canvas = aspectFits(widened, automatic) ? widened : automatic;
+    }
   }
   // A bare card keeps its exact, possibly fractional, size.
   if (grows || layout.styled)

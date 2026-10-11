@@ -152,6 +152,15 @@ public:
    */
   void setSuppressSnapshots(bool suppress) { suppressSnapshots_ = suppress; }
 
+  /**
+   * While OmaCap records, nothing this editor shows may be on screen: the
+   * editor and an open chooser hide, and whatever asks to show them waits.
+   * They come back as they were when the recording ends.
+   */
+  void setConcealed(bool concealed);
+  /** Shows only while not concealed; remembers what was asked either way. */
+  void setVisible(bool visible) override;
+
 protected:
   bool eventFilter(QObject *watched, QEvent *event) override;
   void closeEvent(QCloseEvent *event) override;
@@ -490,6 +499,10 @@ public:
   /// Whether the annotation editor is visible. Test accessor.
   [[nodiscard]] bool editingForTest() const { return phase_ == Phase::Edit; }
   [[nodiscard]] bool textSizeMenuOpenForTest() const { return textSizeMenuOpen_; }
+  /// The toolbar tooltip the edit view shows now, if any. Test accessor.
+  [[nodiscard]] QString toolbarTooltipForTest() const {
+    return toolbarTooltip(toolbarButtons()).second;
+  }
 
 private:
   /// What the armed tool is currently set to, for the status line: shown on
@@ -497,6 +510,11 @@ private:
   [[nodiscard]] QString toolStatus() const;
   [[nodiscard]] QString highlighterStatus() const;
   [[nodiscard]] QString highlighterTooltip() const;
+  /// The tooltip to show under the pointer, or for the armed tool, and the
+  /// button it belongs to; none over an open popover or menu, which sits
+  /// right where it would.
+  [[nodiscard]] std::pair<QRectF, QString>
+  toolbarTooltip(const QVector<ToolbarButton> &buttons) const;
   void activateHighlighter();
   [[nodiscard]] int annotationAt(const QPointF &point) const;
   /// Whether the armed tool picks a layer up rather than working over it.
@@ -656,12 +674,20 @@ private:
   /// Starts a fresh document with the last-used look, the wallpaper it
   /// shows being the one resolved when this overlay opened.
   void seedLook();
+  /// Gives every look without a wallpaper id this overlay's wallpaper, once
+  /// it is resolved; resolves it now if nothing has asked for it yet (a
+  /// reopened document that never showed one).
+  void adoptWallpaper();
   /// Loads the pictures `ids` name, and with `resolveWallpaper` stores the
   /// current Omarchy wallpaper first, all on a worker.
   void requestPictures(QStringList ids, bool resolveWallpaper = false);
   /// Whatever the current look's backdrop shows is loaded (or known to be
-  /// missing), so an export can render it.
+  /// missing), and no look showing the wallpaper waits for its id, so an
+  /// export can render it and the log can be kept.
   [[nodiscard]] bool picturesReady() const;
+  /// Runs `action` now if picturesReady(), else once it is. A later call
+  /// replaces an action still waiting.
+  void whenPicturesReady(std::function<void()> action);
   /// The decoded picture `look`'s backdrop shows; null when it shows none or
   /// it is not loaded.
   [[nodiscard]] QImage lookPicture(const CaptureLook &look) const;
@@ -942,20 +968,23 @@ private:
   CaptureLook look_ = CaptureLook::plain();
   CanvasBoundaryMode canvasBoundaryMode_ = CanvasBoundaryMode::Framed;
   /// The look fresh documents start with: the last one used, remembered
-  /// across runs (capture-state.hpp).
+  /// across runs (capture-state.hpp), and the chain of writes doing so.
   CaptureLook lastLook_;
+  QFuture<void> lookSaves_ = QtFuture::makeReadyVoidFuture();
   /// Decoded backdrop pictures by asset id.
   QHash<QString, QImage> pictures_;
   /// The Omarchy wallpaper as this overlay found it; empty until resolved,
   /// or when there is none.
   QString wallpaperId_;
   /// Pictures being decoded, and whether the wallpaper is still being
-  /// resolved. Exports wait only for what the look shows (picturesReady()).
+  /// resolved or has been. Exports wait only for what the look shows
+  /// (picturesReady()).
   QSet<QString> pendingPictures_;
   bool wallpaperPending_ = false;
-  /// The seeded look still waits for wallpaperId_.
-  bool seedAwaitsWallpaper_ = false;
-  std::optional<QString> pendingSelectedCapture_;
+  bool wallpaperResolved_ = false;
+  /// Some look in the log still waits for wallpaperId_ (adoptWallpaper()).
+  bool lookAwaitsWallpaper_ = false;
+  std::function<void()> pendingUntilPictures_;
   bool busy_ = false;
   bool colorPaletteOpen_ = false;
   bool customColorPickerOpen_ = false;
@@ -1094,6 +1123,9 @@ private:
   quint64 saveAsRequest_ = 0;
   /// The open chooser (Save As, backdrop colour or image), if any.
   QPointer<QDialog> chooser_;
+  /// setConcealed(), and whether the editor was last asked to show.
+  bool concealed_ = false;
+  bool shown_ = false;
   LookPopover lookPopover_ = LookPopover::None;
   bool recordMode_ = false;
   /// The mode switch segment a press started on, or -1.

@@ -2,6 +2,7 @@
 #include "backdrop-assets.hpp"
 
 #include "capture.hpp"
+#include "chrome-theme.hpp"
 
 #include <QBuffer>
 #include <QCryptographicHash>
@@ -23,22 +24,10 @@ QString assetsDirectory() {
   return ensurePrivateDirectory(root) ? root : QString();
 }
 
-/// Omarchy's current theme directory, as OmaCap's video side finds it.
-QString omarchyCurrent() {
-  const QString override = qEnvironmentVariable("OMACAP_THEME_ROOT");
-  if (!override.isEmpty())
-    return override;
-  const QString state = qEnvironmentVariable(
-      "XDG_STATE_HOME", QDir::home().filePath(QStringLiteral(".local/state")));
-  const QString current = QDir(state).filePath(QStringLiteral("omarchy/current"));
-  return QFileInfo::exists(current)
-             ? current
-             : QDir::home().filePath(QStringLiteral(".config/omarchy/current"));
-}
 } // namespace
 
 QString currentWallpaperPath() {
-  return QFileInfo(QDir(omarchyCurrent()).filePath(QStringLiteral("background")))
+  return QFileInfo(QDir(omarchyCurrentDirectory()).filePath(QStringLiteral("background")))
       .canonicalFilePath();
 }
 

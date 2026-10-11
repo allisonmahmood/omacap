@@ -9,6 +9,7 @@
 
 #include <cerrno>
 #include <csignal>
+#include <poll.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -24,8 +25,21 @@ qint64 markerPid() {
   return ok && pid > 0 ? pid : 0;
 }
 
+/// Whether `pid` is still running. A pidfd says so even for a process that
+/// has exited but not been reaped yet, where kill(pid, 0) still succeeds.
 bool alive(qint64 pid) {
-  return pid > 0 && (::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM);
+  if (pid <= 0)
+    return false;
+  const int fd = static_cast<int>(::syscall(SYS_pidfd_open, pid, 0));
+  if (fd < 0) {
+    if (errno == ESRCH)
+      return false;
+    return ::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
+  }
+  pollfd exited{fd, POLLIN, 0};
+  const bool running = ::poll(&exited, 1, 0) == 0;
+  ::close(fd);
+  return running;
 }
 } // namespace
 
@@ -71,7 +85,8 @@ void RecordingWatcher::watchRecorder(qint64 pid) {
   if (pid <= 0)
     return;
   // Readable once the process exits: a crashed recorder never removes its
-  // marker, and nothing else would tell us.
+  // marker, and nothing else would tell us. alive() then sees it exited, so
+  // refresh() retires this notifier rather than spinning on it.
   const int fd = static_cast<int>(::syscall(SYS_pidfd_open, pid, 0));
   if (fd < 0)
     return;

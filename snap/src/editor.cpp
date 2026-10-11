@@ -56,6 +56,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <ranges>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -699,6 +700,15 @@ void drawMeasureBadge(QPainter &painter, const QRect &bounds,
   painter.drawText(pill, Qt::AlignCenter, text);
 }
 
+/// Whether a look in `ops` shows the wallpaper without knowing which.
+bool lacksWallpaper(const QVector<Operation> &ops) {
+  return std::ranges::any_of(ops, [](const Operation &op) {
+    return op.type == Operation::Type::Look &&
+           op.look.backdrop == BackgroundStyle::Wallpaper &&
+           op.look.wallpaper.isEmpty();
+  });
+}
+
 /// Every picture a log's looks refer to, loaded up front so undo never waits.
 QStringList lookPictureIds(const QVector<Operation> &ops) {
   QStringList ids;
@@ -799,6 +809,8 @@ CaptureEditor::CaptureEditor(CaptureData capture, CaptureMode mode,
     nextAnnotationId_ = std::max<quint64>(log.nextId, 1);
     nextMarker_ = std::max(log.nextMarker, 1);
     requestPictures(lookPictureIds(ops_));
+    if (lacksWallpaper(ops_))
+      adoptWallpaper();
   } else {
     requestPictures({lastLook_.image}, true);
     // An opened file or clipboard image may already be styled; it starts
@@ -1076,6 +1088,7 @@ CaptureEditor::~CaptureEditor() {
   dismissFuture_.waitForFinished();
   // A recording request is handed off after the overlay has gone.
   recordHandoffFuture_.waitForFinished();
+  lookSaves_.waitForFinished();
   // An accepted Save As owns its pixels. Finish it before application/static
   // teardown, after the editor surface and instance lock have been released.
   saveAsFuture_.waitForFinished();
@@ -2652,7 +2665,7 @@ CaptureEditor::toolbarButtons(QVector<qreal> *groupDividers,
   // Style: the look (backdrop, frame, glass), then annotation color.
   add(36, QStringLiteral("look-backdrop"), {},
       QStringLiteral("Backdrop · %1 · B cycles")
-          .arg(backgroundStyleLabel(look_.backdrop).remove(QLatin1Char('…'))));
+          .arg(backgroundStyleLabel(look_.backdrop)));
   add(36, QStringLiteral("look-frame"), {},
       QStringLiteral("Padding, corners, shadow, canvas · Shift+B shadow"));
   add(36, QStringLiteral("look-glass"), {},
@@ -3001,10 +3014,12 @@ void CaptureEditor::commitLook(const CaptureLook &look, const QString &status) {
   op.look = look;
   lastLook_ = look;
   lastLook_.wallpaper.clear();
+  // One write at a time, in order, so the file ends up with the last look.
   if (remembersLooks())
-    static_cast<void>(QtConcurrent::run([remembered = lastLook_] {
-      saveLastLook(remembered);
-    }));
+    lookSaves_ = lookSaves_.then(QtFuture::Launch::Async,
+                                 [remembered = lastLook_] {
+                                   saveLastLook(remembered);
+                                 });
   commitOp(std::move(op));
 }
 
@@ -3067,6 +3082,8 @@ void CaptureEditor::cycleBackground() {
     next.wallpaper = wallpaperId_;
   commitLook(next, QStringLiteral("Backdrop: %1 · B cycles")
                        .arg(backgroundStyleLabel(next.backdrop)));
+  if (next.backdrop == BackgroundStyle::Wallpaper && next.wallpaper.isEmpty())
+    adoptWallpaper();
 }
 
 void CaptureEditor::seedLook() {
@@ -3077,13 +3094,36 @@ void CaptureEditor::seedLook() {
   op.type = Operation::Type::Look;
   op.look = lastLook_;
   op.look.wallpaper = wallpaperId_;
-  seedAwaitsWallpaper_ = wallpaperId_.isEmpty() && wallpaperPending_;
+  // Waits for the wallpaper this overlay is resolving, if any.
+  lookAwaitsWallpaper_ = wallpaperId_.isEmpty() && wallpaperPending_;
   ops_.insert(ops_.cbegin(), std::move(op));
   ++opIndex_;
   if (phase_ == Phase::Select)
     look_ = ops_.constFirst().look;
   else
     replayLog();
+}
+
+void CaptureEditor::adoptWallpaper() {
+  if (!wallpaperResolved_) {
+    lookAwaitsWallpaper_ = true;
+    if (!wallpaperPending_)
+      requestPictures({}, true);
+    return;
+  }
+  lookAwaitsWallpaper_ = false;
+  if (wallpaperId_.isEmpty())
+    return; // there is none: the backdrop shows its colour
+  // Every look this document has had without one was waiting for it.
+  for (Operation &op : ops_)
+    if (op.type == Operation::Type::Look && op.look.wallpaper.isEmpty())
+      op.look.wallpaper = wallpaperId_;
+  if (phase_ == Phase::Select) {
+    look_.wallpaper = wallpaperId_;
+  } else {
+    replayLog();
+    scheduleSnapshot();
+  }
 }
 
 void CaptureEditor::requestPictures(QStringList ids, bool resolveWallpaper) {
@@ -3109,27 +3149,14 @@ void CaptureEditor::requestPictures(QStringList ids, bool resolveWallpaper) {
     pictures_.insert(loaded.pictures);
     if (resolveWallpaper) {
       wallpaperPending_ = false;
+      wallpaperResolved_ = true;
       wallpaperId_ = loaded.wallpaper;
-      if (seedAwaitsWallpaper_ && !wallpaperId_.isEmpty()) {
-        // Every look this document has had so far was waiting for it.
-        for (Operation &op : ops_)
-          if (op.type == Operation::Type::Look && op.look.wallpaper.isEmpty())
-            op.look.wallpaper = wallpaperId_;
-        if (phase_ == Phase::Select) {
-          look_.wallpaper = wallpaperId_;
-        } else {
-          replayLog();
-          scheduleSnapshot();
-        }
-      }
-      seedAwaitsWallpaper_ = false;
+      if (lookAwaitsWallpaper_)
+        adoptWallpaper();
     }
     update();
-    if (picturesReady() && pendingSelectedCapture_) {
-      QString status = std::move(*pendingSelectedCapture_);
-      pendingSelectedCapture_.reset();
-      enterSelectedCapture(std::move(status));
-    }
+    if (picturesReady() && pendingUntilPictures_)
+      std::exchange(pendingUntilPictures_, nullptr)();
   });
   watcher->setFuture(QtConcurrent::run([ids, resolveWallpaper]() mutable {
     Loaded loaded;
@@ -3153,9 +3180,23 @@ void CaptureEditor::requestPictures(QStringList ids, bool resolveWallpaper) {
 }
 
 bool CaptureEditor::picturesReady() const {
+  // A log kept now would keep a look showing the wallpaper without it. One
+  // that only carries the id along (a seeded Aurora, say) need not wait.
+  if (lookAwaitsWallpaper_ && lacksWallpaper(ops_))
+    return false;
   if (look_.backdrop == BackgroundStyle::Wallpaper && look_.wallpaper.isEmpty())
     return !wallpaperPending_;
   return !pendingPictures_.contains(look_.pictureId());
+}
+
+void CaptureEditor::whenPicturesReady(std::function<void()> action) {
+  if (picturesReady()) {
+    pendingUntilPictures_ = nullptr;
+    action();
+    return;
+  }
+  pendingUntilPictures_ = std::move(action);
+  setStatus(QStringLiteral("Loading backdrop…"));
 }
 
 void CaptureEditor::waitForPictures() {
@@ -3432,8 +3473,12 @@ void CaptureEditor::waitForExport() {
 }
 
 void CaptureEditor::handOffEditor(bool toWindow) {
-  if (busy_)
+  if (busy_ || !lookSlider_.isEmpty())
     return;
+  if (!picturesReady()) {
+    whenPicturesReady([this, toWindow] { handOffEditor(toWindow); });
+    return;
+  }
   endNudgeRun();
   acceptText();
   const bool snapshotsSuppressed = suppressSnapshots_;
@@ -3513,11 +3558,17 @@ void CaptureEditor::waitForReopen() {
 }
 
 void CaptureEditor::pinSnapshot() {
-  if (busy_ || pinPending_ || selection_.isEmpty())
+  // A slider drag's look is not in the log yet; the pin would disagree with
+  // its own document.
+  if (busy_ || pinPending_ || !lookSlider_.isEmpty() || selection_.isEmpty())
     return;
 
   if (pinDocument_) {
     handleEscape();
+    return;
+  }
+  if (!picturesReady()) {
+    whenPicturesReady([this] { pinSnapshot(); });
     return;
   }
 
@@ -3594,12 +3645,7 @@ void CaptureEditor::enterSelectedCapture(QString editStatus) {
     return;
   }
   if (quickOutputMode_ != QuickOutputMode::None) {
-    if (!picturesReady()) {
-      pendingSelectedCapture_ = std::move(editStatus);
-      setStatus(QStringLiteral("Loading backdrop…"));
-      return;
-    }
-    enterExport();
+    whenPicturesReady([this] { enterExport(); });
     return;
   }
   enterEdit(std::move(editStatus));
@@ -3663,6 +3709,12 @@ void CaptureEditor::cancelEditInteraction() {
     cutDragActive_ = false;
     refreshComposedCapture();
   }
+  if (!lookSlider_.isEmpty()) {
+    // The drag's live look never entered the log.
+    lookSlider_.clear();
+    look_ = lookBeforeSlider_;
+    refreshCanvasRect();
+  }
   if (dragStartStateValid_) {
     replayLog();
     scheduleSnapshot();
@@ -3688,6 +3740,10 @@ void CaptureEditor::cancelEditInteraction() {
 void CaptureEditor::dismissEditor(bool remember) {
   if (!pinDocument_ && (!remember || phase_ != Phase::Edit || selection_.isEmpty())) {
     close();
+    return;
+  }
+  if (!picturesReady()) {
+    whenPicturesReady([this, remember] { dismissEditor(remember); });
     return;
   }
   // Keep the completed capture even if no Copy/Save action was used. An
@@ -4432,6 +4488,7 @@ void CaptureEditor::handleToolbar(const QString &action) {
 
 void CaptureEditor::closeEvent(QCloseEvent *event) {
   cancelSaveAs();
+  pendingUntilPictures_ = nullptr;
   if (!event->spontaneous()) {
     QWidget::closeEvent(event);
     return;
@@ -6962,11 +7019,14 @@ void CaptureEditor::adoptImage(QImage image, OperationLog log, CaptureMode kind,
   opIndex_ = std::clamp(log.index, 0, static_cast<int>(ops_.size()));
   nextAnnotationId_ = std::max<quint64>(log.nextId, 1);
   nextMarker_ = std::max(log.nextMarker, 1);
-  seedAwaitsWallpaper_ = false;
-  if (ops_.isEmpty())
+  lookAwaitsWallpaper_ = false;
+  if (ops_.isEmpty()) {
     seedLook();
-  else
+  } else {
     requestPictures(lookPictureIds(ops_));
+    if (lacksWallpaper(ops_))
+      adoptWallpaper();
+  }
   redactionBaseStale_ = true;
   backdropKey_ = 0;
   scrollMode_ = false;
@@ -7630,10 +7690,12 @@ void CaptureEditor::paintEdit(QPainter &painter) {
     // Spotlights sample the complete composed canvas. Build that source only
     // when one is present; a dragged preview may temporarily make it larger
     // than the settled canvas, so its opening stays live beyond the old edge.
+    // The screenshot alone is that canvas only while nothing frames it: with
+    // zero padding, glass or corners still show the backdrop through it.
     const QRectF spotlightCanvas = canvas.rect;
-    const bool spotlightGrown = spotlightCanvas !=
-                                QRectF(QPointF(), selection_.size());
-    if (spotlightGrown) {
+    const bool composed = matLayout.styled ||
+                          spotlightCanvas != QRectF(QPointF(), selection_.size());
+    if (composed) {
       const qreal pixelScale = editScale() * devicePixelRatioF();
       const QSize canvasPixels(
           std::max(1, qCeil(spotlightCanvas.width() * pixelScale)),
@@ -7946,7 +8008,6 @@ void CaptureEditor::paintEdit(QPainter &painter) {
       painter.drawLine(QPointF(dividerX, barY + 6),
                        QPointF(dividerX, barY + barHeight - 6));
   }
-  const ToolbarButton *hoveredButton = nullptr;
   for (const ToolbarButton &button : buttons) {
     const bool selected =
         button.action == currentTool ||
@@ -7969,8 +8030,6 @@ void CaptureEditor::paintEdit(QPainter &painter) {
         (!usingCustomColor_ &&
          button.action == QStringLiteral("color-%1").arg(colorIndex_));
     const bool hovered = button.rect.contains(cursor_);
-    if (hovered)
-      hoveredButton = &button;
     const ChromeTheme &theme = chromeTheme();
     painter.setPen(QPen((selected ? theme.buttonSelectedBorder
                         : hovered ? theme.buttonHoverBorder : theme.buttonBorder)
@@ -8068,64 +8127,86 @@ void CaptureEditor::paintEdit(QPainter &painter) {
     drawAnchoredHotkeyLegend(painter, rect(), editorHotkeyEntries(),
                              legendAnchor);
   }
-  // A look button's open popover is titled already; its tooltip would
-  // cover that title.
-  if (hoveredButton && lookPopover_ != LookPopover::None &&
-      hoveredButton->action.startsWith(QStringLiteral("look-")))
-    hoveredButton = nullptr;
-  if (hoveredButton) {
-    drawInstantTooltip(painter, rect(), hoveredButton->rect,
-                       hoveredButton->tooltip);
-  } else if (tool_ == Tool::Arrow || tool_ == Tool::Line ||
-             tool_ == Tool::Freehand || tool_ == Tool::Highlighter ||
-             tool_ == Tool::Marker || tool_ == Tool::Redact ||
-             tool_ == Tool::Rectangle || tool_ == Tool::Ellipse ||
-             tool_ == Tool::Text) {
-    const QString selectedAction = toolAction(tool_);
-    for (const ToolbarButton &button : buttons) {
-      if (button.action == selectedAction ||
-          (tool_ == Tool::Arrow &&
-           button.action.startsWith(QStringLiteral("tool-arrow-")))) {
-        QString tooltip;
-        if (tool_ == Tool::Text) {
-          tooltip = QStringLiteral(
-                        "%1 · S  M  L · current %2 · Scroll wheel · %3 · T "
-                        "again cycles style · Shift+T cycles font")
-                        .arg(annotationTextFontName(textFont_))
-                        .arg(QString::fromLatin1(kTextSizeNames.at(
-                            static_cast<std::size_t>(textSizeIndex_))))
-                        .arg(textBackgroundName(textBackground_));
-        } else if (tool_ == Tool::Redact) {
-          tooltip = QStringLiteral("Redact · %1 · D toggles style")
-                        .arg(redactionStyleName(redactionStyle_));
-        } else if (tool_ == Tool::Highlighter) {
-          tooltip = highlighterTooltip();
-        } else if (tool_ == Tool::Rectangle) {
-          tooltip = QStringLiteral("Rectangle · %1 · Size %2 · Scroll wheel · "
-                                   "Alt+Wheel %3")
-                        .arg(fillName(fillShapes_))
-                        .arg(qRound(annotationSize_))
-                        .arg(cornerName(cornerRadius_));
-        } else if (tool_ == Tool::Ellipse) {
-          tooltip = QStringLiteral("Ellipse · %1 · Size %2 · Scroll wheel")
-                        .arg(fillName(fillShapes_))
-                        .arg(qRound(annotationSize_));
-        } else if (tool_ == Tool::Freehand) {
-          tooltip = QStringLiteral("Size %1 · Scroll wheel · Smoothing %2/%3 "
-                                   "· Alt+Wheel")
-                        .arg(qRound(annotationSize_))
-                        .arg(freehandSmoothingLevel_)
-                        .arg(stroke::maximumSmoothingLevel);
-        } else {
-          tooltip = QStringLiteral("Size %1 · Scroll wheel")
-                        .arg(qRound(annotationSize_));
-        }
-        drawInstantTooltip(painter, rect(), button.rect, tooltip);
-        break;
-      }
-    }
-  }
+  if (const auto [anchor, tooltip] = toolbarTooltip(buttons); !tooltip.isEmpty())
+    drawInstantTooltip(painter, rect(), anchor, tooltip);
   drawMeasureBadge(painter, rect(), cursor_, measurementText());
+}
+
+std::pair<QRectF, QString>
+CaptureEditor::toolbarTooltip(const QVector<ToolbarButton> &buttons) const {
+  // Popovers and menus open under their button, where its tooltip would go.
+  const auto opens = [this](const QString &action) {
+    return (action == QStringLiteral("look-backdrop") &&
+            lookPopover_ == LookPopover::Backdrop) ||
+           (action == QStringLiteral("look-frame") &&
+            lookPopover_ == LookPopover::Frame) ||
+           (action == QStringLiteral("look-glass") &&
+            lookPopover_ == LookPopover::Glass) ||
+           (action == QStringLiteral("palette") && colorPaletteOpen_) ||
+           (action == QStringLiteral("custom-color") && customColorPickerOpen_) ||
+           ((action == QStringLiteral("tool-rectangle") ||
+             action == QStringLiteral("tool-ellipse")) &&
+            shapeMenuOpen_) ||
+           (action == QStringLiteral("tool-text") && textSizeMenuOpen_);
+  };
+  // The last button under the pointer is the one painted on top.
+  for (const ToolbarButton &button : std::views::reverse(buttons))
+    if (button.rect.contains(cursor_))
+      return opens(button.action) ? std::pair<QRectF, QString>{}
+                                  : std::pair{button.rect, button.tooltip};
+  const bool popoverOpen = lookPopover_ != LookPopover::None ||
+                           colorPaletteOpen_ || customColorPickerOpen_ ||
+                           shapeMenuOpen_ || textSizeMenuOpen_;
+  if (popoverOpen ||
+      !(tool_ == Tool::Arrow || tool_ == Tool::Line ||
+        tool_ == Tool::Freehand || tool_ == Tool::Highlighter ||
+        tool_ == Tool::Marker || tool_ == Tool::Redact ||
+        tool_ == Tool::Rectangle || tool_ == Tool::Ellipse ||
+        tool_ == Tool::Text))
+    return {};
+  const QString selectedAction = toolAction(tool_);
+  for (const ToolbarButton &button : buttons) {
+    if (button.action != selectedAction &&
+        !(tool_ == Tool::Arrow &&
+          button.action.startsWith(QStringLiteral("tool-arrow-"))))
+      continue;
+    QString tooltip;
+    if (tool_ == Tool::Text) {
+      tooltip = QStringLiteral(
+                    "%1 · S  M  L · current %2 · Scroll wheel · %3 · T "
+                    "again cycles style · Shift+T cycles font")
+                    .arg(annotationTextFontName(textFont_))
+                    .arg(QString::fromLatin1(kTextSizeNames.at(
+                        static_cast<std::size_t>(textSizeIndex_))))
+                    .arg(textBackgroundName(textBackground_));
+    } else if (tool_ == Tool::Redact) {
+      tooltip = QStringLiteral("Redact · %1 · D toggles style")
+                    .arg(redactionStyleName(redactionStyle_));
+    } else if (tool_ == Tool::Highlighter) {
+      tooltip = highlighterTooltip();
+    } else if (tool_ == Tool::Rectangle) {
+      tooltip = QStringLiteral("Rectangle · %1 · Size %2 · Scroll wheel · "
+                               "Alt+Wheel %3")
+                    .arg(fillName(fillShapes_))
+                    .arg(qRound(annotationSize_))
+                    .arg(cornerName(cornerRadius_));
+    } else if (tool_ == Tool::Ellipse) {
+      tooltip = QStringLiteral("Ellipse · %1 · Size %2 · Scroll wheel")
+                    .arg(fillName(fillShapes_))
+                    .arg(qRound(annotationSize_));
+    } else if (tool_ == Tool::Freehand) {
+      tooltip = QStringLiteral("Size %1 · Scroll wheel · Smoothing %2/%3 "
+                               "· Alt+Wheel")
+                    .arg(qRound(annotationSize_))
+                    .arg(freehandSmoothingLevel_)
+                    .arg(stroke::maximumSmoothingLevel);
+    } else {
+      tooltip = QStringLiteral("Size %1 · Scroll wheel")
+                    .arg(qRound(annotationSize_));
+    }
+    return {button.rect, tooltip};
+  }
+  return {};
 }
 
 void CaptureEditor::paintEvent(QPaintEvent *event) {
