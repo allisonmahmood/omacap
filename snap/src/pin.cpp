@@ -5,6 +5,7 @@
 #include <QSaveFile>
 #include <QDateTime>
 #include "pin.hpp"
+#include "recording-state.hpp"
 #include "chrome-theme.hpp"
 #include "card-stack.hpp"
 #include "capture.hpp"
@@ -588,6 +589,7 @@ struct PinPreview {
 
 class PinWindow final : public QWidget {
   friend bool runPinRevealSmoke(QString &error);
+  friend bool runPinRecordingSmoke(QString &error);
 public:
   explicit PinWindow(QImage image, QString path, const QSize &frame,
                       PinLifetime lifetime = PinLifetime::Persistent)
@@ -611,6 +613,13 @@ public:
     connect(&expiry_, &PinExpiry::expired, this, [this] {
       expired_ = true;
       close();
+    });
+    // Out of sight, and out of reach, while OmaCap records: the card paints
+    // nothing and takes no input, and a preview's countdown waits.
+    connect(&recording_, &RecordingWatcher::recordingChanged, this, [this] {
+      updateCardMask();
+      updateExpiryPause();
+      update();
     });
     dragWatchTimer_.setInterval(80);
     connect(&dragWatchTimer_, &QTimer::timeout, this,
@@ -850,6 +859,11 @@ protected:
       painted_ = true;
     }
     QPainter painter(this);
+    if (recording_.recording()) {
+      painter.setCompositionMode(QPainter::CompositionMode_Source);
+      painter.fillRect(rect(), Qt::transparent);
+      return;
+    }
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
@@ -1560,7 +1574,8 @@ private:
   void updateExpiryPause() {
     expiry_.setPaused(closing_ || hovered_ || stackInteracting_ || actionPending_ ||
                       fileDragActive_ || dragWatchTimer_.isActive() ||
-                      finishRequested_ || snapPending_);
+                      finishRequested_ || snapPending_ ||
+                      recording_.recording());
   }
 
   void toggleKept() {
@@ -1578,6 +1593,11 @@ private:
 
   void updateCardMask() {
     if (QWindow *handle = windowHandle()) {
+      // An empty region would mean no mask at all: keep one corner pixel.
+      if (recording_.recording()) {
+        handle->setMask(QRegion(0, 0, 1, 1));
+        return;
+      }
       const QPainterPath card = pinCardTransform(size(), tilt_).map(cardPath());
       handle->setMask(QRegion(card.toFillPolygon().toPolygon()));
     }
@@ -1664,6 +1684,7 @@ private:
   PinExpiry expiry_;
   qreal opacity_ = 1.0;
   bool expired_ = false;
+  RecordingWatcher recording_;
   bool stackInteracting_ = false;
   bool fileDragActive_ = false;
   qreal tilt_ = 0.0;

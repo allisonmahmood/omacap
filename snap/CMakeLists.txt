@@ -57,6 +57,8 @@ add_library(omasnap-core STATIC
   src/look.hpp
   src/record-picker.cpp
   src/record-picker.hpp
+  src/recording-state.cpp
+  src/recording-state.hpp
   src/recent-snaps.cpp
   src/recent-snaps.hpp
   src/output-config.cpp

@@ -12,6 +12,7 @@
 #include "pin.hpp"
 #include "pin-file.hpp"
 #include "recent-snaps.hpp"
+#include "recording-state.hpp"
 #include "startup-timing.hpp"
 
 #include <LayerShellQt/Window>
@@ -227,6 +228,12 @@ int snapMain(int argc, char **argv) {
     qCritical() << "Only one capture target may be specified";
     return 2;
   }
+  // Pins and previews hide themselves during a recording; nothing else of
+  // the screenshot side may appear in one.
+  if (recordingInProgress()) {
+    qCritical() << "OmaCap is recording; stop the recording first";
+    return 1;
+  }
   if (!positional.isEmpty()) {
     const QString localTarget = resolveLocalImagePath(positional.first());
     if (filePath.isEmpty() && !localTarget.isEmpty()) {
@@ -433,6 +440,16 @@ int snapMain(int argc, char **argv) {
   const QSize editingPreview = capture.previewSize;
   CaptureEditor editor(std::move(capture), captureMode, quickOutputMode,
                        restoredLog, nullptr, editorWindowMode && !editingImage);
+  // A recording that starts while the editor is open (from the video side)
+  // must not show it; it comes back when the recording ends.
+  RecordingWatcher recording;
+  QObject::connect(&recording, &RecordingWatcher::recordingChanged, &editor,
+                   [&editor](bool active) {
+                     if (active)
+                       editor.hide();
+                     else
+                       editor.show();
+                   });
   editor.setPinDocument(std::move(pinDocument));
   if (recordPicker)
     editor.setRecordMode(true);
