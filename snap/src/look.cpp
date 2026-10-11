@@ -2,6 +2,7 @@
  *  everything under the annotation layers. */
 #include "look.hpp"
 
+#include <QList>
 #include <QPainter>
 #include <QPainterPath>
 #include <QRadialGradient>
@@ -142,8 +143,8 @@ void paintCardShadow(QPainter &painter, const QRectF &card, qreal strength,
 
 /// `picture` reduced by halves until it is no more than twice `needed`, so a
 /// cover-fit draw never minifies by more than 2× (bilinear sampling aliases
-/// past that). Levels are cached per thread: the editor repaints with the
-/// same level until its canvas size changes a lot.
+/// past that). The last few levels are cached per thread: every editor
+/// repaint draws the canvas and the toolbar's swatch, at different levels.
 QImage pictureLevel(const QImage &picture, const QSizeF &needed) {
   if (needed.isEmpty())
     return picture;
@@ -155,16 +156,25 @@ QImage pictureLevel(const QImage &picture, const QSizeF &needed) {
     return picture;
   const QSize size(std::max(1, picture.width() >> level),
                    std::max(1, picture.height() >> level));
-  thread_local qint64 cachedKey = 0;
-  thread_local int cachedLevel = 0;
-  thread_local QImage cached;
-  if (cachedKey != picture.cacheKey() || cachedLevel != level) {
-    cached = picture.scaled(size, Qt::IgnoreAspectRatio,
-                            Qt::SmoothTransformation);
-    cachedKey = picture.cacheKey();
-    cachedLevel = level;
+  struct Level {
+    qint64 key;
+    int level;
+    QImage image;
+  };
+  thread_local QList<Level> cached;
+  for (qsizetype index = 0; index < cached.size(); ++index) {
+    if (cached.at(index).key == picture.cacheKey() &&
+        cached.at(index).level == level) {
+      cached.move(index, 0);
+      return cached.constFirst().image;
+    }
   }
-  return cached;
+  cached.prepend({picture.cacheKey(), level,
+                  picture.scaled(size, Qt::IgnoreAspectRatio,
+                                 Qt::SmoothTransformation)});
+  if (cached.size() > 4)
+    cached.removeLast();
+  return cached.constFirst().image;
 }
 } // namespace
 
