@@ -1,6 +1,7 @@
 #pragma once
 #include <QJsonObject>
 #include <QRectF>
+#include <QSize>
 #include <QUuid>
 #include <QVector>
 struct Span {
@@ -23,7 +24,12 @@ struct Edit {
     double windowOpacity = .96;
     bool camera = true, mic = true, desktop = true;
     QString background, color = "#182638";
+    // Screenshot canvas: "auto" fits the cropped shot plus padding; the others are fixed
+    // ratios. Videos always use 16:9.
+    QString canvas = "auto";
     double length() const;
+    double canvasAspect(double sourceAspect) const;
+    QSize stillSize(QSize source) const;
     double sourceTime(double edited) const;
     double editedTime(double source) const;
     double zoomAt(double source, double &x, double &y) const;

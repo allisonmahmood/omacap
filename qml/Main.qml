@@ -12,6 +12,9 @@ ApplicationWindow {
     property bool allowClose: false
     property bool closeAfterDiscard: false
     property bool editing: backend.phase === "editor" || backend.phase === "exporting"
+    // A screenshot session: no timeline, camera or audio, and Copy/Save instead of Export.
+    property bool still: backend.kind === "image"
+    property bool outputReady: still && backend.phase === "editor" && !cropping && !discardDialog.opened
 
     function time(t) {
         return Math.floor(t / 60).toString().padStart(2, "0") + ":" + (t % 60).toFixed(1).padStart(4, "0");
@@ -86,7 +89,7 @@ ApplicationWindow {
 
     Shortcut {
         sequence: "Space"
-        enabled: backend.phase === "editor" && !win.cropping && !exportDialog.opened && !discardDialog.opened && !focusPicker.pressed
+        enabled: !win.still && backend.phase === "editor" && !win.cropping && !exportDialog.opened && !discardDialog.opened && !focusPicker.pressed
         onActivated: backend.togglePlay()
     }
 
@@ -104,14 +107,32 @@ ApplicationWindow {
 
     Shortcut {
         sequence: "Left"
-        enabled: backend.phase === "editor" && !win.cropping && !focusPicker.pressed && !exportDialog.opened && !discardDialog.opened
+        enabled: !win.still && backend.phase === "editor" && !win.cropping && !focusPicker.pressed && !exportDialog.opened && !discardDialog.opened
         onActivated: backend.seek(backend.position - 1 / 30)
     }
 
     Shortcut {
         sequence: "Right"
-        enabled: backend.phase === "editor" && !win.cropping && !focusPicker.pressed && !exportDialog.opened && !discardDialog.opened
+        enabled: !win.still && backend.phase === "editor" && !win.cropping && !focusPicker.pressed && !exportDialog.opened && !discardDialog.opened
         onActivated: backend.seek(backend.position + 1 / 30)
+    }
+
+    Shortcut {
+        sequences: [StandardKey.Copy]
+        enabled: win.outputReady
+        onActivated: backend.outputImage(true, false)
+    }
+
+    Shortcut {
+        sequences: [StandardKey.Save]
+        enabled: win.outputReady
+        onActivated: backend.outputImage(false, true)
+    }
+
+    Shortcut {
+        sequences: ["Return", "Enter"]
+        enabled: win.outputReady
+        onActivated: backend.outputImage(true, true)
     }
 
     Shortcut {
@@ -171,7 +192,7 @@ ApplicationWindow {
 
             FlatButton {
                 visible: win.editing
-                text: "New recording"
+                text: win.still ? "New capture" : "New recording"
                 enabled: backend.phase === "editor"
                 onClicked: {
                     if (backend.dirty) {
@@ -184,7 +205,24 @@ ApplicationWindow {
             }
 
             FlatButton {
-                visible: win.editing
+                visible: win.editing && win.still
+                objectName: "copyImage"
+                text: "Copy"
+                enabled: backend.phase === "editor"
+                onClicked: backend.outputImage(true, false)
+            }
+
+            FlatButton {
+                visible: win.editing && win.still
+                objectName: "saveImage"
+                text: "Save"
+                primary: true
+                enabled: backend.phase === "editor"
+                onClicked: backend.outputImage(false, true)
+            }
+
+            FlatButton {
+                visible: win.editing && !win.still
                 text: "Export"
                 primary: true
                 enabled: backend.phase === "editor" && backend.duration > 0 && !focusPicker.pressed
@@ -277,7 +315,7 @@ ApplicationWindow {
 
                 RowLayout {
                     FlatButton {
-                        text: "Open existing video"
+                        text: "Open image or video"
                         onClicked: backend.importVideo()
                     }
 
@@ -342,7 +380,7 @@ ApplicationWindow {
                 RowLayout {
                     FlatButton {
                         text: "Crop"
-                        enabled: backend.duration > 0
+                        enabled: win.still || backend.duration > 0
                         onClicked: {
                             backend.pause();
                             timeline.selection = "";
@@ -357,7 +395,7 @@ ApplicationWindow {
                     }
 
                     Label {
-                        text: "16:9 · styled preview"
+                        text: (win.still ? (backend.edit.canvas === "auto" ? "Auto" : backend.edit.canvas) : "16:9") + " · styled preview"
                         color: theme.colors.dark_foreground
                         Layout.fillWidth: true
                         horizontalAlignment: Text.AlignRight
@@ -374,8 +412,10 @@ ApplicationWindow {
                     Item {
                         id: fit
 
-                        width: Math.min(parent.width, parent.height * 16 / 9)
-                        height: width * 9 / 16
+                        property real aspect: win.still ? backend.canvasAspect : 16 / 9
+
+                        width: Math.min(parent.width, parent.height * aspect)
+                        height: width / aspect
                         anchors.centerIn: parent
 
                         MouseArea {
@@ -389,12 +429,13 @@ ApplicationWindow {
                             id: composition
 
                             objectName: "composition"
-                            width: 1920
-                            height: 1080
-                            scale: fit.width / 1920
+                            // At most 1920 px on its longer side, however tall the shot.
+                            width: fit.aspect >= 1 ? 1920 : 1920 * fit.aspect
+                            height: width / fit.aspect
+                            scale: fit.width / width
                             transformOrigin: Item.TopLeft
                             edit: backend.edit
-                            screenSource: backend.duration > 0 ? backend.screenSource : ""
+                            screenSource: win.still || backend.duration > 0 ? backend.screenSource : ""
                             cameraSource: backend.duration > 0 ? backend.cameraSource : ""
                             sourceAspect: backend.aspect
                             zoom: backend.zoom
@@ -404,7 +445,7 @@ ApplicationWindow {
 
                         Label {
                             anchors.centerIn: parent
-                            visible: backend.duration === 0
+                            visible: !win.still && backend.duration === 0
                             text: "No clips left. Undo to restore them."
                             padding: 16
 
@@ -675,108 +716,145 @@ ApplicationWindow {
                         }
 
                         Label {
+                            visible: !win.still
                             text: "Recorded window only"
                             color: theme.colors.dark_foreground
                         }
 
                         Label {
-                            text: "CAMERA"
-                            font.bold: true
-                        }
-
-                        CheckBox {
-                            text: "Show camera"
-                            checked: backend.edit.camera ?? true
-                            enabled: backend.cameraSource !== ""
-                            onToggled: backend.setValue("camera", checked)
-                        }
-
-                        Setting {
-                            Layout.fillWidth: true
-                            label: "Size"
-                            fieldName: "cameraSize"
-                            from: 0.08
-                            to: 0.4
-                            current: backend.edit.cameraSize || 0.18
-                            suffix: "%"
+                            visible: win.still
+                            text: "Canvas"
                         }
 
                         RowLayout {
-                            FlatButton {
-                                text: "Rectangle"
-                                primary: backend.edit.cameraShape === "rectangle"
-                                onClicked: backend.setValue("cameraShape", "rectangle")
+                            visible: win.still
+                            spacing: 0
+
+                            Repeater {
+                                model: ["Auto", "16:9", "4:3", "1:1"]
+
+                                FlatButton {
+                                    required property string modelData
+                                    objectName: "canvas" + modelData
+                                    text: modelData
+                                    primary: (backend.edit.canvas ?? "auto") === modelData.toLowerCase()
+                                    onClicked: backend.setValue("canvas", modelData.toLowerCase())
+                                }
                             }
-
-                            FlatButton {
-                                text: "Circle"
-                                primary: backend.edit.cameraShape === "circle"
-                                onClicked: backend.setValue("cameraShape", "circle")
-                            }
-
-                        }
-
-                        Setting {
-                            Layout.fillWidth: true
-                            label: "Camera corners"
-                            fieldName: "cameraCorners"
-                            to: 0.5
-                            current: backend.edit.cameraCorners ?? 0.12
-                            suffix: "%"
-                            enabled: backend.edit.cameraShape !== "circle"
-                        }
-
-                        Setting {
-                            Layout.fillWidth: true
-                            label: "Camera shadow"
-                            fieldName: "cameraShadow"
-                            current: backend.edit.cameraShadow ?? 0.45
-                            suffix: "%"
                         }
 
                         Label {
-                            text: "Drag the camera in the preview."
+                            visible: win.still
+                            text: "Auto fits the shot plus padding."
                             wrapMode: Text.Wrap
                             Layout.fillWidth: true
                             color: theme.colors.dark_foreground
                         }
 
-                        RowLayout {
-                            Repeater {
-                                model: ["↖", "↗", "↙", "↘"]
+                        ColumnLayout {
+                            visible: !win.still
+                            Layout.fillWidth: true
+                            spacing: 10
+
+                            Label {
+                                text: "CAMERA"
+                                font.bold: true
+                            }
+
+                            CheckBox {
+                                text: "Show camera"
+                                checked: backend.edit.camera ?? true
+                                enabled: backend.cameraSource !== ""
+                                onToggled: backend.setValue("camera", checked)
+                            }
+
+                            Setting {
+                                Layout.fillWidth: true
+                                label: "Size"
+                                fieldName: "cameraSize"
+                                from: 0.08
+                                to: 0.4
+                                current: backend.edit.cameraSize || 0.18
+                                suffix: "%"
+                            }
+
+                            RowLayout {
+                                FlatButton {
+                                    text: "Rectangle"
+                                    primary: backend.edit.cameraShape === "rectangle"
+                                    onClicked: backend.setValue("cameraShape", "rectangle")
+                                }
 
                                 FlatButton {
-                                    required property int index
-                                    required property string modelData
-
-                                    text: modelData
-                                    onClicked: {
-                                        backend.beginEdit();
-                                        backend.setValue("cameraX", index % 2 === 0 ? 0.03 : 0.97 - backend.edit.cameraSize);
-                                        backend.setValue("cameraY", index < 2 ? 0.04 : 0.96 - composition.cameraH / 1080);
-                                        backend.endEdit();
-                                    }
+                                    text: "Circle"
+                                    primary: backend.edit.cameraShape === "circle"
+                                    onClicked: backend.setValue("cameraShape", "circle")
                                 }
 
                             }
 
-                        }
+                            Setting {
+                                Layout.fillWidth: true
+                                label: "Camera corners"
+                                fieldName: "cameraCorners"
+                                to: 0.5
+                                current: backend.edit.cameraCorners ?? 0.12
+                                suffix: "%"
+                                enabled: backend.edit.cameraShape !== "circle"
+                            }
 
-                        Label {
-                            text: "AUDIO"
-                            font.bold: true
-                        }
+                            Setting {
+                                Layout.fillWidth: true
+                                label: "Camera shadow"
+                                fieldName: "cameraShadow"
+                                current: backend.edit.cameraShadow ?? 0.45
+                                suffix: "%"
+                            }
 
-                        CheckBox {
-                            text: "Microphone / source audio"
-                            checked: backend.edit.mic ?? true
-                            onToggled: backend.setValue("mic", checked)
-                        }
+                            Label {
+                                text: "Drag the camera in the preview."
+                                wrapMode: Text.Wrap
+                                Layout.fillWidth: true
+                                color: theme.colors.dark_foreground
+                            }
 
-                        CheckBox {
-                            text: "Desktop audio"
-                            checked: backend.edit.desktop ?? true
-                            onToggled: backend.setValue("desktop", checked)
+                            RowLayout {
+                                Repeater {
+                                    model: ["↖", "↗", "↙", "↘"]
+
+                                    FlatButton {
+                                        required property int index
+                                        required property string modelData
+
+                                        text: modelData
+                                        onClicked: {
+                                            backend.beginEdit();
+                                            backend.setValue("cameraX", index % 2 === 0 ? 0.03 : 0.97 - backend.edit.cameraSize);
+                                            backend.setValue("cameraY", index < 2 ? 0.04 : 0.96 - composition.cameraH / 1080);
+                                            backend.endEdit();
+                                        }
+                                    }
+
+                                }
+
+                            }
+
+                            Label {
+                                text: "AUDIO"
+                                font.bold: true
+                            }
+
+                            CheckBox {
+                                text: "Microphone / source audio"
+                                checked: backend.edit.mic ?? true
+                                onToggled: backend.setValue("mic", checked)
+                            }
+
+                            CheckBox {
+                                text: "Desktop audio"
+                                checked: backend.edit.desktop ?? true
+                                onToggled: backend.setValue("desktop", checked)
+                            }
                         }
 
                     }
@@ -790,13 +868,13 @@ ApplicationWindow {
         Timeline {
             id: timeline
 
-            visible: win.editing
+            visible: win.editing && !win.still
             enabled: backend.phase === "editor"
             Layout.fillWidth: true
         }
 
         RowLayout {
-            visible: backend.phase === "exporting"
+            visible: backend.phase === "exporting" && !win.still
             Layout.fillWidth: true
 
             Label {
@@ -817,10 +895,18 @@ ApplicationWindow {
 
         RowLayout {
             Layout.fillWidth: true
-            visible: backend.message !== "" || backend.lastExport !== ""
+            visible: backend.message !== "" || backend.lastExport !== "" || (win.still && win.editing)
+
+            Label {
+                objectName: "stillSize"
+                visible: win.still && win.editing
+                text: "Source " + backend.sourceSize.width + "×" + backend.sourceSize.height + " · PNG " + backend.stillSize.width + "×" + backend.stillSize.height
+                color: theme.colors.dark_foreground
+            }
 
             Label {
                 text: backend.message
+                horizontalAlignment: win.still ? Text.AlignRight : Text.AlignLeft
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
                 color: theme.colors.dark_foreground
@@ -851,7 +937,7 @@ ApplicationWindow {
         width: 420
 
         contentItem: Label {
-            text: "This session has unexported changes. " + (backend.original ? "The recording stays at " + backend.original + "." : "Discard removes its temporary media.")
+            text: "This session has unexported changes. " + (backend.original ? (win.still ? "The image" : "The recording") + " stays at " + backend.original + "." : "Discard removes its temporary media.")
             wrapMode: Text.Wrap
         }
 

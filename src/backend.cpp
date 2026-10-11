@@ -50,6 +50,13 @@ QString exportedMessage(const QString &path) {
                    "makes a smaller file.";
     return message;
 }
+// Saved screenshots go where Omarchy's do.
+QString screenshotDirectory() {
+    const QString configured = qEnvironmentVariable("OMARCHY_SCREENSHOT_DIR");
+    return configured.isEmpty()
+               ? QStandardPaths::writableLocation(QStandardPaths::PicturesLocation) + "/Screenshots"
+               : configured;
+}
 } // namespace
 Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames(f) {
     recoveryRoot =
@@ -155,6 +162,10 @@ Backend::Backend(Theme *t, Frames *f, QObject *p) : QObject(p), theme(t), frames
             [this](int code, QProcess::ExitStatus) {
                 parseWorker();
                 countdownTimer.stop();
+                if (m_phase == "exporting" && m_kind == "image") {
+                    finishStill(code);
+                    return;
+                }
                 if (m_phase == "exporting") {
                     if (exportCancelled) {
                         QFile::remove(partialExport);
@@ -250,6 +261,7 @@ void Backend::newSession() {
     screenRevision = cameraRevision = 0;
     m_position = 0;
     m_dirty = true;
+    m_kind = "video";
     m_lastExport.clear();
     m_original.clear();
     snapshotWallpaper();
@@ -287,6 +299,8 @@ void Backend::checkpoint() {
                                            {"screenStart", screenStart},
                                            {"cameraStart", cameraStart},
                                            {"sourceWidth", sourceWidth},
+                                           {"sourceHeight", sourceHeight},
+                                           {"kind", m_kind},
                                            {"dirty", m_dirty},
                                            {"lastExport", m_lastExport},
                                            {"original", m_original}});
@@ -381,9 +395,10 @@ void Backend::stop() {
 }
 void Backend::importVideo() {
     QString path = QFileDialog::getOpenFileName(
-        nullptr, "Open a recording",
+        nullptr, "Open an image or recording",
         QStandardPaths::writableLocation(QStandardPaths::MoviesLocation),
-        "Videos (*.mp4 *.mkv *.mov *.webm *.avi);;All files (*)");
+        "Images and videos (*.png *.jpg *.jpeg *.webp *.bmp *.mp4 *.mkv *.mov *.webm *.avi);;All "
+        "files (*)");
     if (!path.isEmpty())
         loadFile(path);
 }
@@ -394,7 +409,40 @@ void Backend::loadFile(QString path) {
     captureError.clear();
     lead = 0;
     m_original = path;
-    prepare(path, false);
+    // Animations Qt counts frames in, like OmaCap's own GIF exports, open on the timeline.
+    // Qt reads an APNG as one frame, so it opens as a still; the video path can't open it.
+    QImageReader probe(path);
+    if (probe.canRead() && probe.imageCount() <= 1)
+        openImage(path);
+    else
+        prepare(path, false);
+}
+// Screenshots are edited from a copy in the session, so recovery never depends on the
+// original staying where it was.
+void Backend::openImage(const QString &path) {
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    const QImage image = reader.read();
+    if (image.isNull() || !image.save(session + "/source.png")) {
+        QDir(session).removeRecursively();
+        session.clear();
+        m_original.clear();
+        status("recorder", "The image could not be opened.");
+        return;
+    }
+    m_kind = "image";
+    showImage(image);
+}
+void Backend::showImage(const QImage &image) {
+    sourceWidth = image.width();
+    sourceHeight = image.height();
+    m_aspect = double(sourceWidth) / sourceHeight;
+    frames->put(false, image);
+    ++screenRevision;
+    status("editor");
+    emit frameChanged();
+    emit editChanged();
+    checkpoint();
 }
 void Backend::testLoad(QString path) {
     loadFile(path);
@@ -468,7 +516,8 @@ void Backend::prepare(QString path, bool captured) {
                 return;
             }
             sourceWidth = video["width"].toInt();
-            m_aspect = double(sourceWidth) / std::max(1, video["height"].toInt());
+            sourceHeight = std::max(1, video["height"].toInt());
+            m_aspect = double(sourceWidth) / sourceHeight;
             double origin = o["format"].toObject()["start_time"].toString().toDouble();
             const double recordingEnd = dur;
             screenStart = std::max(0., video["start_time"].toString().toDouble() - origin);
@@ -842,7 +891,7 @@ void Backend::edited() {
     QVariantMap look;
     auto current = state.json().toVariantMap();
     for (auto key : QStringList{"padding", "corners", "shadow", "cameraSize", "cameraX", "cameraY",
-                                "cameraShape", "cameraCorners", "cameraShadow"})
+                                "cameraShape", "cameraCorners", "cameraShadow", "canvas"})
         look[key] = current[key];
     settings.setValue("appearance", look);
     m_dirty = true;
@@ -861,10 +910,10 @@ void Backend::setValue(QString k, QVariant v) {
     if (m_phase != "editor")
         return;
     static const QStringList allowed{
-        "padding",      "corners",     "shadow",        "cameraSize",   "cameraX",
-        "cameraY",      "camera",      "mic",           "desktop",      "crop",
-        "color",        "cameraShape", "cameraCorners", "cameraShadow", "windowTransparency",
-        "windowOpacity"};
+        "padding",       "corners",     "shadow",        "cameraSize",   "cameraX",
+        "cameraY",       "camera",      "mic",           "desktop",      "crop",
+        "color",         "cameraShape", "cameraCorners", "cameraShadow", "windowTransparency",
+        "windowOpacity", "canvas"};
     if (!allowed.contains(k))
         return;
     auto o = state.json();
@@ -1069,18 +1118,35 @@ void Backend::startExport(QString path, bool gif, int w, int fps, int q) {
     pendingExport = path;
     partialExport = QFileInfo(path).absolutePath() + "/.omacap-" +
                     QUuid::createUuid().toString(QUuid::WithoutBraces) + (gif ? ".gif" : ".mp4");
-    QString job = session + "/export.json";
-    writeJson(job, {{"session", session},
-                    {"edit", state.json()},
-                    {"aspect", m_aspect},
-                    {"screenStart", screenStart},
-                    {"cameraStart", cameraStart},
-                    {"sourceWidth", sourceWidth},
-                    {"output", partialExport},
-                    {"width", w},
-                    {"fps", fps},
-                    {"crf", q},
-                    {"gif", gif}});
+    runExporter({{"edit", state.json()},
+                 {"screenStart", screenStart},
+                 {"cameraStart", cameraStart},
+                 {"width", w},
+                 {"fps", fps},
+                 {"crf", q},
+                 {"gif", gif}});
+}
+void Backend::outputImage(bool copy, bool save) {
+    if (m_phase != "editor" || m_kind != "image" || !(copy || save) ||
+        worker.state() != QProcess::NotRunning)
+        return;
+    ++workerRun;
+    exportedEdit = state.json();
+    copyStill = copy;
+    saveStill = save;
+    partialExport = session + "/styled.png";
+    QFile::remove(partialExport);
+    runExporter({{"edit", state.json()}, {"still", true}, {"sourceHeight", sourceHeight}});
+}
+// Starts the offscreen export worker on a job. Every job renders this session's edit.
+void Backend::runExporter(const QJsonObject &job) {
+    auto complete = job;
+    complete["session"] = session;
+    complete["aspect"] = m_aspect;
+    complete["sourceWidth"] = sourceWidth;
+    complete["output"] = partialExport;
+    const QString path = session + "/export.json";
+    writeJson(path, complete);
     captureError.clear();
     workerBuffer.clear();
     exportCancelled = false;
@@ -1091,7 +1157,74 @@ void Backend::startExport(QString path, bool gif, int w, int fps, int q) {
     env.insert("QSG_RHI_BACKEND", "opengl");
     env.insert("QT_QUICK_BACKEND", "rhi");
     worker.setProcessEnvironment(env);
-    worker.start(QCoreApplication::applicationFilePath(), {"--export", job});
+    worker.start(QCoreApplication::applicationFilePath(), {"--export", path});
+}
+void Backend::finishStill(int code) {
+    if (code != 0 || QFileInfo(partialExport).size() == 0) {
+        status("editor", captureError.isEmpty()
+                             ? "Rendering failed. " +
+                                   QString::fromUtf8(worker.readAllStandardError()).right(1500)
+                             : captureError);
+        return;
+    }
+    // Save and Copy are independent: either can fail without stopping the other.
+    QString saved, saveError;
+    if (saveStill) {
+        const QString dir = screenshotDirectory();
+        QDir().mkpath(dir);
+        const QString name =
+            dir + "/omacap-" + QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss");
+        saved = name + ".png";
+        for (int i = 2; QFile::exists(saved); ++i)
+            saved = name + QString("-%1.png").arg(i);
+        if (QFile::copy(partialExport, saved))
+            m_lastExport = saved;
+        else {
+            saved.clear();
+            saveError = "Could not save the screenshot in " + dir + ".";
+        }
+    }
+    const auto report = [this, saved, saveError](bool copied) {
+        const QString file = QFileInfo(saved).fileName();
+        QStringList parts;
+        if (copied && !saved.isEmpty())
+            parts << "Copied and saved " + file + ".";
+        else if (copied)
+            parts << "Copied to the clipboard.";
+        else if (!saved.isEmpty())
+            parts << "Saved " + file + ".";
+        if (!saveError.isEmpty())
+            parts << saveError;
+        if (copyStill && !copied)
+            parts << "Could not copy to the clipboard.";
+        if (copied || !saved.isEmpty())
+            m_dirty = state.json() != exportedEdit;
+        checkpoint();
+        status("editor", parts.join(' '));
+    };
+    if (!copyStill) {
+        report(false);
+        return;
+    }
+    // wl-copy serves the clipboard from its own background process, so the image stays
+    // available after OmaCap closes. A stalled one is killed rather than holding the editor.
+    auto copy = new QProcess(this);
+    copy->setStandardInputFile(partialExport);
+    copy->setStandardOutputFile(QProcess::nullDevice());
+    copy->setStandardErrorFile(QProcess::nullDevice());
+    connect(copy, &QProcess::errorOccurred, this, [copy, report](QProcess::ProcessError e) {
+        if (e != QProcess::FailedToStart)
+            return;
+        copy->deleteLater();
+        report(false);
+    });
+    connect(copy, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+            [copy, report](int code, QProcess::ExitStatus exit) {
+                copy->deleteLater();
+                report(exit == QProcess::NormalExit && code == 0);
+            });
+    QTimer::singleShot(5000, copy, [copy] { copy->kill(); });
+    copy->start("wl-copy", {"--type", "image/png"});
 }
 void Backend::cancelExport() {
     if (m_phase == "exporting") {
@@ -1135,6 +1268,7 @@ void Backend::discard() {
     m_original.clear();
     state = Edit();
     m_dirty = false;
+    m_kind = "video";
     screenRevision = cameraRevision = 0;
     status("recorder");
     emit editChanged();
@@ -1170,16 +1304,25 @@ void Backend::recover() {
             prepare(recording, true);
             return;
         }
+        const bool image = o["kind"] == "image";
+        const QImage source = image ? QImage(d.filePath() + "/source.png") : QImage();
+        if (image && source.isNull())
+            continue;
         session = d.filePath();
         state = Edit::fromJson(o["edit"].toObject());
         m_aspect = o["aspect"].toDouble(16. / 9);
         screenStart = o["screenStart"].toDouble();
         cameraStart = o["cameraStart"].toDouble();
         sourceWidth = o["sourceWidth"].toInt(1920);
+        sourceHeight = o["sourceHeight"].toInt(1080);
         m_dirty = o["dirty"].toBool(true);
         m_lastExport = o["lastExport"].toString();
         m_original = o["original"].toString();
-        ready();
+        m_kind = image ? "image" : "video";
+        if (image)
+            showImage(source);
+        else
+            ready();
         return;
     }
 }

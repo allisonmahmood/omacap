@@ -8,6 +8,30 @@ double Edit::length() const {
         n += s.end - s.start;
     return n;
 }
+// Composition pads every side by padding × canvas width and fits the cropped frame
+// inside. An auto canvas is exactly that frame plus its padding.
+double Edit::canvasAspect(double sourceAspect) const {
+    if (canvas == "16:9")
+        return 16. / 9;
+    if (canvas == "4:3")
+        return 4. / 3;
+    if (canvas == "1:1")
+        return 1;
+    const double ratio = sourceAspect * crop.width() / crop.height();
+    return 1 / ((1 - 2 * padding) / ratio + 2 * padding);
+}
+// A styled screenshot keeps the cropped shot at its source resolution. The canvas grows
+// around it, capped at 8192 px on its longer side.
+QSize Edit::stillSize(QSize source) const {
+    const double aspect = canvasAspect(double(source.width()) / std::max(1, source.height()));
+    const double ratio =
+        source.width() * crop.width() / std::max(1., source.height() * crop.height());
+    // The share of the canvas width the frame fills, from Composition's fit.
+    const double fill = std::min(1 - 2 * padding, ratio * (1 / aspect - 2 * padding));
+    const double w = source.width() * crop.width() / fill, h = w / aspect;
+    const double scale = std::min(1., 8192 / std::max(w, h));
+    return {std::max(1, int(std::lround(w * scale))), std::max(1, int(std::lround(h * scale)))};
+}
 double Edit::sourceTime(double t) const {
     t = std::max(0., t);
     for (auto s : spans) {
@@ -168,7 +192,8 @@ QJsonObject Edit::json() const {
             {"mic", mic},
             {"desktop", desktop},
             {"background", background},
-            {"color", color}};
+            {"color", color},
+            {"canvas", canvas}};
 }
 Edit Edit::fromJson(const QJsonObject &o) {
     Edit e;
@@ -225,5 +250,8 @@ Edit Edit::fromJson(const QJsonObject &o) {
     e.desktop = o["desktop"].toBool(true);
     e.background = o["background"].toString();
     e.color = o["color"].toString(e.color);
+    const auto canvas = o["canvas"].toString();
+    if (canvas == "16:9" || canvas == "4:3" || canvas == "1:1")
+        e.canvas = canvas;
     return e;
 }

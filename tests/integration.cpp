@@ -5,6 +5,7 @@
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QPainter>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickItem>
@@ -1037,6 +1038,220 @@ class Integration : public QObject {
             exported.save("tests/out/export-" + name + ".png");
             QVERIFY2(error < 5, qPrintable(QString::number(error)));
         }
+        b.discard();
+    }
+    void stillSize() {
+        Edit e;
+        e.padding = .1;
+        // An auto canvas is the shot plus equal padding on every side.
+        QCOMPARE(e.stillSize({1000, 500}), QSize(1250, 750));
+        e.canvas = "1:1";
+        QCOMPARE(e.stillSize({1000, 500}), QSize(1250, 1250));
+        // A tall shot on a wide canvas keeps its source height.
+        e.canvas = "16:9";
+        const auto tall = e.stillSize({500, 1000});
+        QVERIFY(std::abs(tall.height() - 2 * e.padding * tall.width() - 1000) <= 1);
+        e.canvas = "auto";
+        e.crop = {.25, 0, .5, 1};
+        QCOMPARE(e.stillSize({1000, 500}), QSize(625, 625));
+        e.crop = {0, 0, 1, 1};
+        QCOMPARE(e.stillSize({8000, 4000}), QSize(8192, 4915));
+        QCOMPARE(Edit::fromJson({{"canvas", "21:9"}}).canvas, QString("auto"));
+        QCOMPARE(Edit::fromJson(e.json()).json(), e.json());
+    }
+    void screenshotEditor() {
+        QTemporaryDir dir;
+        QImage shot(900, 600, QImage::Format_RGB32);
+        shot.fill(QColor("#202830"));
+        QPainter(&shot).fillRect(360, 240, 180, 120, QColor("#e04040"));
+        const QString source = dir.path() + "/shot.png";
+        QVERIFY(shot.save(source));
+        // A stand-in wl-copy records what Copy sends, leaving the real clipboard alone.
+        const QString clipboard = dir.path() + "/clipboard.png", slow = dir.path() + "/slow";
+        QFile fake(dir.path() + "/wl-copy");
+        QVERIFY(fake.open(QIODevice::WriteOnly));
+        fake.write(QString("#!/bin/sh\n[ -e '%2' ] && sleep 1\n"
+                           "[ \"$*\" = \"--type image/png\" ] && cat > '%1'\n")
+                       .arg(clipboard, slow)
+                       .toUtf8());
+        fake.close();
+        fake.setPermissions(fake.permissions() | QFileDevice::ExeOwner);
+        const auto path = qgetenv("PATH");
+        qputenv("PATH", dir.path().toUtf8() + ":" + path);
+        auto restorePath = qScopeGuard([&] { qputenv("PATH", path); });
+
+        Theme theme;
+        QQmlApplicationEngine engine;
+        auto frames = new Frames;
+        engine.addImageProvider("frames", frames);
+        Backend b(&theme, frames);
+        // Opening the image first starts the window in the editor, as `omacap shot.png` does.
+        b.loadFile(source);
+        QCOMPARE(b.phase(), QString("editor"));
+        QCOMPARE(b.kind(), QString("image"));
+        QCOMPARE(b.sourceSize(), QSize(900, 600));
+        QVERIFY(QFile::exists(b.sessionPath() + "/source.png"));
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &b);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
+        auto cleanup = qScopeGuard([&] { delete win; });
+        QVERIFY(QTest::qWaitForWindowExposed(win));
+        b.setValue("crop", QVariantList{.1, .1, .8, .8});
+        b.setValue("padding", .08);
+        b.setValue("windowTransparency", "light");
+        auto composition = win->findChild<QQuickItem *>("composition");
+        QVERIFY(composition);
+        for (const QString canvas : {"auto", "1:1"}) {
+            b.setValue("canvas", canvas);
+            QCOMPARE(b.state.canvas, canvas);
+            const QSize size = b.stillSize();
+            QTRY_COMPARE(composition->height(), 1920 / b.canvasAspect());
+            QTest::qWait(100);
+            auto grab = composition->grabToImage(
+                QSize(qRound(composition->width()), qRound(composition->height())));
+            QVERIFY(grab);
+            QSignalSpy ready(grab.data(), &QQuickItemGrabResult::ready);
+            QVERIFY(ready.wait(5000));
+            const auto preview = grab->image();
+            b.outputImage(true, true);
+            QCOMPARE(b.phase(), QString("exporting"));
+            QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
+            QVERIFY2(b.message().startsWith("Copied and saved omacap-"), qPrintable(b.message()));
+            QVERIFY(!b.dirty());
+            QCOMPARE(QFileInfo(b.lastExport()).absolutePath(),
+                     QStandardPaths::writableLocation(QStandardPaths::PicturesLocation) +
+                         "/Screenshots");
+            const QImage saved(b.lastExport());
+            QCOMPARE(saved.size(), size);
+            QCOMPARE(QImage(clipboard), saved);
+            QCOMPARE(saved.pixelColor(2, 2), QColor("#223344"));
+            const QColor red = saved.pixelColor(size.width() / 2, size.height() / 2);
+            QVERIFY2(red.red() > 200 && red.green() < 80, qPrintable(red.name()));
+            const auto exported =
+                saved.scaled(preview.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            double error = 0;
+            for (int y = 0; y < preview.height(); y += 4)
+                for (int x = 0; x < preview.width(); x += 4) {
+                    const auto p = preview.pixelColor(x, y), e = exported.pixelColor(x, y);
+                    error += std::abs(p.red() - e.red()) + std::abs(p.green() - e.green()) +
+                             std::abs(p.blue() - e.blue());
+                }
+            error /= preview.width() * preview.height() * 3. / 16;
+            qInfo() << "STILL_PREVIEW_EXPORT" << canvas << "mean_channel_error=" << error;
+            QVERIFY2(error < 5, qPrintable(QString::number(error)));
+            QFile::remove(b.lastExport());
+            if (canvas == "auto") {
+                QTest::qWait(100);
+                win->grabWindow().save("tests/out/preview-screenshot-editor.png");
+            }
+        }
+        // Save and Copy are independent: an unusable screenshot folder still copies.
+        qputenv("OMARCHY_SCREENSHOT_DIR", (source + "/folder").toUtf8());
+        auto restoreFolder = qScopeGuard([] { qunsetenv("OMARCHY_SCREENSHOT_DIR"); });
+        QFile::remove(clipboard);
+        b.setValue("padding", .1);
+        b.outputImage(true, true);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
+        QVERIFY2(b.message().startsWith("Copied to the clipboard. Could not save"),
+                 qPrintable(b.message()));
+        QVERIFY(QFile::exists(clipboard));
+        QVERIFY(!b.dirty());
+        // A slow clipboard doesn't hold up the editor while it finishes.
+        QVERIFY(QFile(slow).open(QIODevice::WriteOnly));
+        QElapsedTimer beat;
+        qint64 longest = 0;
+        QTimer heartbeat;
+        heartbeat.setInterval(10);
+        connect(&heartbeat, &QTimer::timeout, [&] { longest = std::max(longest, beat.restart()); });
+        beat.start();
+        heartbeat.start();
+        b.outputImage(true, false);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
+        heartbeat.stop();
+        QCOMPARE(b.message(), QString("Copied to the clipboard."));
+        QVERIFY2(longest < 500, qPrintable(QString::number(longest)));
+        b.setValue("padding", .12);
+        QVERIFY(b.dirty());
+        b.discard();
+        QCOMPARE(b.kind(), QString("video"));
+        QVERIFY(QFile::exists(source));
+    }
+    void tallScreenshot() {
+        QTemporaryDir dir;
+        QImage shot(160, 4000, QImage::Format_RGB32);
+        shot.fill(QColor("#336699"));
+        QVERIFY(shot.save(dir.path() + "/tall.png"));
+        Theme theme;
+        QQmlApplicationEngine engine;
+        auto frames = new Frames;
+        engine.addImageProvider("frames", frames);
+        Backend b(&theme, frames);
+        b.loadFile(dir.path() + "/tall.png");
+        QCOMPARE(b.kind(), QString("image"));
+        // Earlier tests leave a remembered canvas; a tall shot needs auto.
+        b.setValue("canvas", "auto");
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &b);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
+        auto cleanup = qScopeGuard([&] { delete win; });
+        QVERIFY(QTest::qWaitForWindowExposed(win));
+        // The preview stays within 1920 px however tall the shot, and renders.
+        auto composition = win->findChild<QQuickItem *>("composition");
+        QVERIFY(composition);
+        QTRY_COMPARE(composition->height(), 1920.);
+        QVERIFY(composition->width() < 100);
+        QTest::qWait(200);
+        b.outputImage(false, true);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
+        QVERIFY(b.stillSize().height() > 4000);
+        QCOMPARE(QImage(b.lastExport()).size(), b.stillSize());
+        QFile::remove(b.lastExport());
+        b.discard();
+    }
+    void animatedImageOpensAsVideo() {
+        QTemporaryDir dir;
+        const QString gif = dir.path() + "/loop.gif";
+        QProcess ffmpeg;
+        ffmpeg.start("ffmpeg", {"-v", "error", "-f", "lavfi", "-i", "testsrc=size=160x90:rate=5",
+                                "-t", "1", gif});
+        QVERIFY(ffmpeg.waitForFinished(15000) && ffmpeg.exitCode() == 0);
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        b.loadFile(gif);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QCOMPARE(b.kind(), QString("video"));
+        QVERIFY(b.duration() > .5);
+        b.discard();
+    }
+    void screenshotRecovery() {
+        QTemporaryDir dir;
+        QImage shot(640, 400, QImage::Format_RGB32);
+        shot.fill(QColor("#336699"));
+        QVERIFY(shot.save(dir.path() + "/shot.png"));
+        Theme t;
+        Frames f;
+        {
+            Backend b(&t, &f);
+            b.loadFile(dir.path() + "/shot.png");
+            QCOMPARE(b.kind(), QString("image"));
+            b.setValue("canvas", "4:3");
+        }
+        // The original can move; the session keeps its own copy.
+        QVERIFY(QFile::remove(dir.path() + "/shot.png"));
+        Backend b(&t, &f);
+        QVERIFY(b.recoverable());
+        b.recover();
+        QCOMPARE(b.phase(), QString("editor"));
+        QCOMPARE(b.kind(), QString("image"));
+        QCOMPARE(b.state.canvas, QString("4:3"));
+        QCOMPARE(b.sourceSize(), QSize(640, 400));
+        QVERIFY(!b.screenSource().isEmpty());
+        QVERIFY(b.dirty());
         b.discard();
     }
     void theme() {

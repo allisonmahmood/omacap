@@ -31,7 +31,7 @@ sudo pacman -U ./omacap-*.pkg.tar.zst
 
 Keep only the package version you want to install in that directory. Pacman installs its dependencies. Release binaries target current Omarchy stable on x86_64. Update Omarchy through its normal update menu before installing a new OmaCap release.
 
-Open **OmaCap** from your application launcher, or run `omacap`. Already have a recording? Open it with `omacap /path/to/video.mp4`.
+Open **OmaCap** from your application launcher, or run `omacap`. Already have a recording or a screenshot? Open it with `omacap /path/to/video.mp4` or `omacap /path/to/shot.png`.
 
 For updates, download and install the newer package using the same steps. GitHub releases do not update through Omarchy or `yay`; you can subscribe with **Watch > Custom > Releases** on this repository. AUR distribution is not available yet. Uninstall with `sudo pacman -R omacap`.
 
@@ -86,8 +86,16 @@ Click **Export**, choose MP4 or GIF, set the output size and frame rate, and pic
 | Clear zoom selection or leave crop/cut mode | Escape |
 | Undo | Ctrl+Z |
 | Redo | Ctrl+Shift+Z |
+| Copy / save a screenshot | Ctrl+C / Ctrl+S |
+| Copy and save a screenshot | Enter |
 
 There is no saved-project format. An interrupted edit has a recovery checkpoint. Export leaves the editor open so you can export again. Closing or discarding clears the edit; recordings, imported originals and exported files are kept.
+
+## Style a screenshot
+
+Open a PNG, JPEG or WebP with `omacap shot.png`, or click **Open image or video** in the start window. The screenshot gets the same crop, background, padding, corners, shadow and window transparency as a recording, with no timeline. Choose a **Canvas**: **Auto** fits the shot plus its padding, and **16:9**, **4:3** and **1:1** suit posts.
+
+The styled shot keeps the screenshot's own resolution. The status bar shows its size. **Copy** puts a PNG on the clipboard, which stays there after OmaCap closes. **Save** writes `omacap-<date>_<time>.png` to the folder Omarchy saves screenshots in: `$OMARCHY_SCREENSHOT_DIR` if it is set, or `~/Pictures/Screenshots`. OmaCap edits its own copy, so the original image is never changed.
 
 ## Before you record
 

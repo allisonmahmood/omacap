@@ -38,6 +38,10 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList cameras READ cameras CONSTANT)
     Q_PROPERTY(QString lastExport READ lastExport NOTIFY changed)
     Q_PROPERTY(QString original READ original NOTIFY changed)
+    Q_PROPERTY(QString kind READ kind NOTIFY changed)
+    Q_PROPERTY(double canvasAspect READ canvasAspect NOTIFY editChanged)
+    Q_PROPERTY(QSize sourceSize READ sourceSize NOTIFY changed)
+    Q_PROPERTY(QSize stillSize READ stillSize NOTIFY editChanged)
   public:
     Backend(Theme *, Frames *, QObject *p = nullptr);
     ~Backend();
@@ -68,6 +72,14 @@ class Backend : public QObject {
     QString lastExport() const { return m_lastExport; }
     // The recording this session edits. Discarding the session keeps it.
     QString original() const { return m_original; }
+    // "video" edits a recording on the timeline; "image" edits a single screenshot.
+    QString kind() const { return m_kind; }
+    double canvasAspect() const {
+        return m_kind == "image" ? state.canvasAspect(m_aspect) : 16. / 9;
+    }
+    QSize sourceSize() const { return {sourceWidth, sourceHeight}; }
+    // The pixel size Copy and Save render a screenshot at.
+    QSize stillSize() const { return state.stillSize(sourceSize()); }
     Q_INVOKABLE void record(QString mic, QString camera, bool desktop, bool synthetic = false);
     Q_INVOKABLE void stop();
     Q_INVOKABLE void importVideo();
@@ -93,6 +105,8 @@ class Backend : public QObject {
     Q_INVOKABLE void chooseColor();
     Q_INVOKABLE void useWallpaper();
     Q_INVOKABLE void exportVideo(bool gif, int width, int fps, int quality);
+    // Renders the styled screenshot once, then copies it, saves it, or both.
+    Q_INVOKABLE void outputImage(bool copy, bool save);
     Q_INVOKABLE void cancelExport();
     Q_INVOKABLE void revealExport();
     Q_INVOKABLE void openExport();
@@ -123,11 +137,12 @@ class Backend : public QObject {
     double screenStart = 0, cameraStart = 0;
     friend class Integration;
     QString m_phase = "recorder", m_message, session, recoveryRoot, m_lastExport, pendingExport,
-            partialExport, m_original;
+            partialExport, m_original, m_kind = "video";
     double m_position = 0, m_aspect = 16. / 9, m_progress = 0, lead = 0;
-    int sourceWidth = 1920, m_countdown = 0, screenRevision = 0, cameraRevision = 0;
+    int sourceWidth = 1920, sourceHeight = 1080, m_countdown = 0, screenRevision = 0,
+        cameraRevision = 0;
     bool m_dirty = false, exportCancelled = false, hasMic = false, hasDesktop = false,
-         hasCamera = false;
+         hasCamera = false, copyStill = false, saveStill = false;
     QString captureError;
     QByteArray workerBuffer;
     QMediaPlayer screen, camera, mic, desktop;
@@ -155,6 +170,10 @@ class Backend : public QObject {
     void push();
     void edited();
     void prepare(QString path, bool capture);
+    void openImage(const QString &path);
+    void showImage(const QImage &image);
+    void runExporter(const QJsonObject &job);
+    void finishStill(int code);
     void ready();
     void openPlayers();
     qint64 screenSeekEnd = 0;
