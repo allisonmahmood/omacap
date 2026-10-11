@@ -56,6 +56,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <ranges>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -8007,7 +8008,6 @@ void CaptureEditor::paintEdit(QPainter &painter) {
       painter.drawLine(QPointF(dividerX, barY + 6),
                        QPointF(dividerX, barY + barHeight - 6));
   }
-  const ToolbarButton *hoveredButton = nullptr;
   for (const ToolbarButton &button : buttons) {
     const bool selected =
         button.action == currentTool ||
@@ -8030,8 +8030,6 @@ void CaptureEditor::paintEdit(QPainter &painter) {
         (!usingCustomColor_ &&
          button.action == QStringLiteral("color-%1").arg(colorIndex_));
     const bool hovered = button.rect.contains(cursor_);
-    if (hovered)
-      hoveredButton = &button;
     const ChromeTheme &theme = chromeTheme();
     painter.setPen(QPen((selected ? theme.buttonSelectedBorder
                         : hovered ? theme.buttonHoverBorder : theme.buttonBorder)
@@ -8129,64 +8127,86 @@ void CaptureEditor::paintEdit(QPainter &painter) {
     drawAnchoredHotkeyLegend(painter, rect(), editorHotkeyEntries(),
                              legendAnchor);
   }
-  // A look button's open popover is titled already; its tooltip would
-  // cover that title.
-  if (hoveredButton && lookPopover_ != LookPopover::None &&
-      hoveredButton->action.startsWith(QStringLiteral("look-")))
-    hoveredButton = nullptr;
-  if (hoveredButton) {
-    drawInstantTooltip(painter, rect(), hoveredButton->rect,
-                       hoveredButton->tooltip);
-  } else if (tool_ == Tool::Arrow || tool_ == Tool::Line ||
-             tool_ == Tool::Freehand || tool_ == Tool::Highlighter ||
-             tool_ == Tool::Marker || tool_ == Tool::Redact ||
-             tool_ == Tool::Rectangle || tool_ == Tool::Ellipse ||
-             tool_ == Tool::Text) {
-    const QString selectedAction = toolAction(tool_);
-    for (const ToolbarButton &button : buttons) {
-      if (button.action == selectedAction ||
-          (tool_ == Tool::Arrow &&
-           button.action.startsWith(QStringLiteral("tool-arrow-")))) {
-        QString tooltip;
-        if (tool_ == Tool::Text) {
-          tooltip = QStringLiteral(
-                        "%1 · S  M  L · current %2 · Scroll wheel · %3 · T "
-                        "again cycles style · Shift+T cycles font")
-                        .arg(annotationTextFontName(textFont_))
-                        .arg(QString::fromLatin1(kTextSizeNames.at(
-                            static_cast<std::size_t>(textSizeIndex_))))
-                        .arg(textBackgroundName(textBackground_));
-        } else if (tool_ == Tool::Redact) {
-          tooltip = QStringLiteral("Redact · %1 · D toggles style")
-                        .arg(redactionStyleName(redactionStyle_));
-        } else if (tool_ == Tool::Highlighter) {
-          tooltip = highlighterTooltip();
-        } else if (tool_ == Tool::Rectangle) {
-          tooltip = QStringLiteral("Rectangle · %1 · Size %2 · Scroll wheel · "
-                                   "Alt+Wheel %3")
-                        .arg(fillName(fillShapes_))
-                        .arg(qRound(annotationSize_))
-                        .arg(cornerName(cornerRadius_));
-        } else if (tool_ == Tool::Ellipse) {
-          tooltip = QStringLiteral("Ellipse · %1 · Size %2 · Scroll wheel")
-                        .arg(fillName(fillShapes_))
-                        .arg(qRound(annotationSize_));
-        } else if (tool_ == Tool::Freehand) {
-          tooltip = QStringLiteral("Size %1 · Scroll wheel · Smoothing %2/%3 "
-                                   "· Alt+Wheel")
-                        .arg(qRound(annotationSize_))
-                        .arg(freehandSmoothingLevel_)
-                        .arg(stroke::maximumSmoothingLevel);
-        } else {
-          tooltip = QStringLiteral("Size %1 · Scroll wheel")
-                        .arg(qRound(annotationSize_));
-        }
-        drawInstantTooltip(painter, rect(), button.rect, tooltip);
-        break;
-      }
-    }
-  }
+  if (const auto [anchor, tooltip] = toolbarTooltip(buttons); !tooltip.isEmpty())
+    drawInstantTooltip(painter, rect(), anchor, tooltip);
   drawMeasureBadge(painter, rect(), cursor_, measurementText());
+}
+
+std::pair<QRectF, QString>
+CaptureEditor::toolbarTooltip(const QVector<ToolbarButton> &buttons) const {
+  // Popovers and menus open under their button, where its tooltip would go.
+  const auto opens = [this](const QString &action) {
+    return (action == QStringLiteral("look-backdrop") &&
+            lookPopover_ == LookPopover::Backdrop) ||
+           (action == QStringLiteral("look-frame") &&
+            lookPopover_ == LookPopover::Frame) ||
+           (action == QStringLiteral("look-glass") &&
+            lookPopover_ == LookPopover::Glass) ||
+           (action == QStringLiteral("palette") && colorPaletteOpen_) ||
+           (action == QStringLiteral("custom-color") && customColorPickerOpen_) ||
+           ((action == QStringLiteral("tool-rectangle") ||
+             action == QStringLiteral("tool-ellipse")) &&
+            shapeMenuOpen_) ||
+           (action == QStringLiteral("tool-text") && textSizeMenuOpen_);
+  };
+  // The last button under the pointer is the one painted on top.
+  for (const ToolbarButton &button : std::views::reverse(buttons))
+    if (button.rect.contains(cursor_))
+      return opens(button.action) ? std::pair<QRectF, QString>{}
+                                  : std::pair{button.rect, button.tooltip};
+  const bool popoverOpen = lookPopover_ != LookPopover::None ||
+                           colorPaletteOpen_ || customColorPickerOpen_ ||
+                           shapeMenuOpen_ || textSizeMenuOpen_;
+  if (popoverOpen ||
+      !(tool_ == Tool::Arrow || tool_ == Tool::Line ||
+        tool_ == Tool::Freehand || tool_ == Tool::Highlighter ||
+        tool_ == Tool::Marker || tool_ == Tool::Redact ||
+        tool_ == Tool::Rectangle || tool_ == Tool::Ellipse ||
+        tool_ == Tool::Text))
+    return {};
+  const QString selectedAction = toolAction(tool_);
+  for (const ToolbarButton &button : buttons) {
+    if (button.action != selectedAction &&
+        !(tool_ == Tool::Arrow &&
+          button.action.startsWith(QStringLiteral("tool-arrow-"))))
+      continue;
+    QString tooltip;
+    if (tool_ == Tool::Text) {
+      tooltip = QStringLiteral(
+                    "%1 · S  M  L · current %2 · Scroll wheel · %3 · T "
+                    "again cycles style · Shift+T cycles font")
+                    .arg(annotationTextFontName(textFont_))
+                    .arg(QString::fromLatin1(kTextSizeNames.at(
+                        static_cast<std::size_t>(textSizeIndex_))))
+                    .arg(textBackgroundName(textBackground_));
+    } else if (tool_ == Tool::Redact) {
+      tooltip = QStringLiteral("Redact · %1 · D toggles style")
+                    .arg(redactionStyleName(redactionStyle_));
+    } else if (tool_ == Tool::Highlighter) {
+      tooltip = highlighterTooltip();
+    } else if (tool_ == Tool::Rectangle) {
+      tooltip = QStringLiteral("Rectangle · %1 · Size %2 · Scroll wheel · "
+                               "Alt+Wheel %3")
+                    .arg(fillName(fillShapes_))
+                    .arg(qRound(annotationSize_))
+                    .arg(cornerName(cornerRadius_));
+    } else if (tool_ == Tool::Ellipse) {
+      tooltip = QStringLiteral("Ellipse · %1 · Size %2 · Scroll wheel")
+                    .arg(fillName(fillShapes_))
+                    .arg(qRound(annotationSize_));
+    } else if (tool_ == Tool::Freehand) {
+      tooltip = QStringLiteral("Size %1 · Scroll wheel · Smoothing %2/%3 "
+                               "· Alt+Wheel")
+                    .arg(qRound(annotationSize_))
+                    .arg(freehandSmoothingLevel_)
+                    .arg(stroke::maximumSmoothingLevel);
+    } else {
+      tooltip = QStringLiteral("Size %1 · Scroll wheel")
+                    .arg(qRound(annotationSize_));
+    }
+    return {button.rect, tooltip};
+  }
+  return {};
 }
 
 void CaptureEditor::paintEvent(QPaintEvent *event) {

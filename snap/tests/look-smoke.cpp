@@ -388,6 +388,24 @@ bool checkPopovers(QApplication &application, QString &error) {
     application.processEvents();
   };
 
+  // No tooltip covers an open popover: neither its own button's nor the
+  // armed tool's, which sits beside it.
+  QTest::keyClick(&editor, Qt::Key_A);
+  for (const QString &action : {QStringLiteral("look-frame"), QStringLiteral("palette")}) {
+    hover(QStringLiteral("look-glass"));
+    hover(action);
+    if (!editor.toolbarTooltipForTest().isEmpty()) {
+      error = QStringLiteral("A tooltip covered the open %1 popover: %2")
+                  .arg(action, editor.toolbarTooltipForTest());
+      return false;
+    }
+  }
+  QTest::mouseMove(&editor, QPoint(600, 560));
+  if (editor.toolbarTooltipForTest().isEmpty()) {
+    error = QStringLiteral("The armed tool lost its tooltip");
+    return false;
+  }
+  QTest::keyClick(&editor, Qt::Key_V);
   hover(QStringLiteral("look-frame"));
   const QRectF track = editor.lookControlRectForTest(QStringLiteral("padding"));
   if (editor.lookPopoverForTest() != CaptureEditor::LookPopover::Frame ||

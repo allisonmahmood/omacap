@@ -499,6 +499,10 @@ public:
   /// Whether the annotation editor is visible. Test accessor.
   [[nodiscard]] bool editingForTest() const { return phase_ == Phase::Edit; }
   [[nodiscard]] bool textSizeMenuOpenForTest() const { return textSizeMenuOpen_; }
+  /// The toolbar tooltip the edit view shows now, if any. Test accessor.
+  [[nodiscard]] QString toolbarTooltipForTest() const {
+    return toolbarTooltip(toolbarButtons()).second;
+  }
 
 private:
   /// What the armed tool is currently set to, for the status line: shown on
@@ -506,6 +510,11 @@ private:
   [[nodiscard]] QString toolStatus() const;
   [[nodiscard]] QString highlighterStatus() const;
   [[nodiscard]] QString highlighterTooltip() const;
+  /// The tooltip to show under the pointer, or for the armed tool, and the
+  /// button it belongs to; none over an open popover or menu, which sits
+  /// right where it would.
+  [[nodiscard]] std::pair<QRectF, QString>
+  toolbarTooltip(const QVector<ToolbarButton> &buttons) const;
   void activateHighlighter();
   [[nodiscard]] int annotationAt(const QPointF &point) const;
   /// Whether the armed tool picks a layer up rather than working over it.
