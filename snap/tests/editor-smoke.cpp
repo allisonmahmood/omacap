@@ -6366,7 +6366,7 @@ bool runNotificationArgvCheck(QString &error) {
     return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll())
                                           : QString();
   };
-  QFile ids(omacapRuntimeDir() + QStringLiteral("/notifications"));
+  QFile ids(notificationIdsPath());
   const auto idsText = [&] {
     QFile file(ids.fileName());
     return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();

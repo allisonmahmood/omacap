@@ -2409,19 +2409,25 @@ void sendCaptureNotification(const QString &message, const QString &imagePath) {
     return;
   }
   // One sent just before a recording could still be up once it starts: the
-  // recorder closes every notification listed in OmaCap's notifications
-  // file then. A detached shell waits for the id and appends it, one line in
-  // one O_APPEND write, so neither this thread nor this process's exit waits.
+  // recorder reads OmaCap's notifications file then and waits them out. A
+  // detached shell holds the file's lock (as sendNotification() does) while
+  // it checks the marker again, sends, and appends the id, so a recording
+  // either sees the id or starts before the notification is sent at all.
+  // Neither this thread nor this process's exit waits for it.
   static constexpr auto keepId = R"sh(
-ids=$1; shift
+ids=$1 marker=$2; shift 2
+exec 9>>"$ids" && flock 9 || exit
+if [ -f "$marker" ]; then
+  while read -r pid; do kill -0 "$pid" 2>/dev/null && exit; done < "$marker"
+fi
 id=$("$@") || exit
 case $id in '' | *[!0-9]*) exit ;; esac
-printf '%s\n' "$id" >> "$ids")sh";
+printf '%s\n' "$id" >&9)sh";
   QProcess::startDetached(
       QStringLiteral("sh"),
       QStringList{QStringLiteral("-c"), QString::fromLatin1(keepId),
-                  QStringLiteral("sh"),
-                  omacapRuntimeDir() + QStringLiteral("/notifications"),
+                  QStringLiteral("sh"), notificationIdsPath(),
+                  recordingMarkerPath(),
                   QStringLiteral("omarchy-notification-send")} +
           captureNotificationArguments(message, imagePath));
 }
