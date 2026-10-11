@@ -19,11 +19,13 @@ One `omacap` binary runs one of two apps, chosen in `src/main.cpp` before any
 | `omacap --record` | `record-key` to the video process; the picker in record mode (`--record-picker`) unless it stopped a recording or is busy. With no video process and an unfinished edit to recover, starts one on the recovery card instead |
 | `omacap --record-request <json>` | `record` to the video process, or starts one that records the request |
 | `omacap video.mp4` | `open` to the video process, or starts one with the video |
-
-A video process that loses the race for the video lock forwards its arguments to the one
-that won, so a request or file is acted on once.
 | `omacap --export <job>` | the offscreen export worker |
 | `omacap --version` | prints the version |
+
+A video process that loses the race for the video lock forwards its arguments to the one
+that won, so a request or file is acted on once. A video process exits 1 when the last thing
+it was asked to do failed, such as an invalid `--record-request` or a file that won't open,
+and 0 otherwise.
 
 ## Recording, end to end
 
@@ -111,11 +113,14 @@ Signals and calls between `Backend` and the UI:
   yes discards the session at once. Unsaved edits (`dirty`) are changes since the last
   export; an untouched recording has none, so replacing or closing it never asks.
 - `setUiOpen(bool)` tells the backend whether a card or editor is open, counting one hidden
-  for a recording. The backend alone ends the process: `exitRequested()` follows once that
-  settles with nothing open and the phase `idle`, so it never exits while recording,
+  for a recording. The backend alone ends the process: `exitRequested(code)` follows once
+  that settles with nothing open and the phase `idle`, so it never exits while recording,
   preparing or exporting, or while a session passes through `idle` on its way to another.
-- Failures with nothing open to show them are reported as desktop notifications
-  (`backgroundError()`, sent with `omarchy-notification-send`).
+  `code` is 1 when the last session failed (`fail()`), else 0.
+- A failure ends the session. One that never loaded anything, such as a file that won't
+  open, is removed; one holding a recording or an edit stays recoverable. Failures with
+  nothing open to show them are reported as desktop notifications (`backgroundError()`,
+  sent with `omarchy-notification-send`).
 
 ## Video UI
 
@@ -135,9 +140,10 @@ capture. Each surface is a QML item it hosts in a window it owns:
   ends the session; the recording itself stays in Videos.
 - **Recovery card**: a video process started without a request or file (as
   `omacap --record` does when one is left) offers the newest earlier session's unfinished
-  edit on the same card. Recover (E or Enter) opens it in the editor. Closing or fading
-  the card, or starting a new recording, ends the offer; the edit stays recoverable until
-  it is recovered and its session ends.
+  edit on the same card. Recover (E or Enter) opens it in the editor. Discard (D or Delete)
+  deletes it; a recording it edits stays in Videos. Not now (X or Esc), fading, or starting
+  a new recording ends the offer; the edit stays recoverable until it is recovered and its
+  session ends, or is discarded.
 
 Opening a file goes straight to the editor. The process exits once its session has ended
 and no surface is open. The chrome is painted with Omasnap's own theme, fonts and icon code

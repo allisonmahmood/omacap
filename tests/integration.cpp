@@ -1390,6 +1390,36 @@ class Integration : public QObject {
         b.discard();
         QFile::remove(recording);
     }
+    // A file that can't be opened leaves no session behind, and the process exits 1.
+    void failedOpen() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        QSignalSpy exits(&b, &Backend::exitRequested);
+        QSignalSpy errors(&b, &Backend::backgroundError);
+        const QDir scratch(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) +
+                           "/scratch");
+        const QStringList sessions = scratch.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        QTemporaryDir dir;
+        QFile broken(dir.filePath("broken.mp4"));
+        QVERIFY(broken.open(QIODevice::WriteOnly));
+        broken.write("not a video");
+        broken.close();
+        b.loadFile(broken.fileName());
+        QVERIFY(QDir(b.sessionPath()).exists());
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+        QCOMPARE(errors.count(), 1);
+        QVERIFY(b.sessionPath().isEmpty());
+        QCOMPARE(scratch.entryList(QDir::Dirs | QDir::NoDotAndDotDot), sessions);
+        QTRY_COMPARE(exits.count(), 1);
+        QCOMPARE(exits[0][0].toInt(), 1);
+        // A session that ends as asked exits 0.
+        b.loadFile(QDir::current().absoluteFilePath("tests/out/delayed.mkv"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        b.discard();
+        QTRY_COMPARE(exits.count(), 2);
+        QCOMPARE(exits[1][0].toInt(), 0);
+    }
     // How the video owner answers `omacap --record`, the capture overlay and opened files.
     void ownerCommands() {
         Theme t;
@@ -1571,6 +1601,27 @@ class Integration : public QObject {
         b.discard();
         QTRY_COMPARE(exits.count(), 5);
         QVERIFY(!QDir(saved).exists());
+
+        // D discards the offered edit and closes the card; its recording stays.
+        const QString video = QDir::current().absoluteFilePath("tests/out/delayed.mkv");
+        {
+            Backend crashed(&s.theme, s.frames);
+            crashed.loadFile(video);
+            QTRY_COMPARE_WITH_TIMEOUT(crashed.phase(), QString("editor"), 10000);
+            crashed.setValue("padding", .123);
+            saved = crashed.sessionPath();
+        }
+        s.stage.offerRecovery();
+        QCOMPARE(s.stage.card(), QString("recovery"));
+        auto cardWindow = s.stage.cardWindow();
+        cardWindow->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(cardWindow));
+        QTest::keyClick(cardWindow, Qt::Key_D);
+        QVERIFY(s.stage.card().isEmpty());
+        QVERIFY(!QDir(saved).exists());
+        QVERIFY(!Backend::recoverable());
+        QVERIFY(QFile::exists(video));
+        QTRY_COMPARE(exits.count(), 6);
     }
     void portalFixture() {
         const auto fixture = qEnvironmentVariable("OMACAP_PORTAL_FIXTURE");
@@ -1617,7 +1668,13 @@ class Integration : public QObject {
         QSignalSpy waveformChanges(&b, &Backend::waveformsChanged);
         QString frozen = b.edit()["background"].toString();
         QVERIFY(!frozen.isEmpty());
-        QVERIFY(QFile::exists(frozen));
+        // The session's own copy of the wallpaper, byte for byte: nothing re-encodes it.
+        const auto bytes = [](const QString &path) {
+            QFile file(path);
+            return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+        };
+        QCOMPARE(QFileInfo(frozen).absolutePath(), b.sessionPath());
+        QCOMPARE(bytes(frozen), bytes(themeRoot.path() + "/background"));
         b.setValue("crop", QVariantList{.1, .05, .8, .9});
         b.setValue("padding", .08);
         int z = b.addZoom(.2);

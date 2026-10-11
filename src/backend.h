@@ -81,8 +81,9 @@ class Backend : public QObject {
     void confirmReplace(std::function<void(bool)> answer);
     // Answers replaceRequested(). Yes discards the session at once, so it can be replaced.
     Q_INVOKABLE void answerReplace(bool replace);
-    // A failure that leaves nothing loaded: back to idle, with backgroundError() when no card
-    // or editor is open to show it.
+    // A failure that leaves nothing loaded: the session ends, and backgroundError() follows
+    // when no card or editor is open to show it. A session that never loaded anything is
+    // removed; one holding a recording or an edit stays recoverable.
     void fail(const QString &message);
     void loadFile(QString path);
     Q_INVOKABLE void seek(double seconds);
@@ -110,8 +111,13 @@ class Backend : public QObject {
     Q_INVOKABLE void cancelExport();
     Q_INVOKABLE void revealExport();
     Q_INVOKABLE void openExport();
+    // Ends the session and removes it. The recording it edits stays.
     Q_INVOKABLE void discard();
+    // Opens the edit or capture recoverable() found, the newest, while idle.
     Q_INVOKABLE void recover();
+    // Removes what recover() would open, while idle: the recovery card's Discard. A recording
+    // saved in Videos stays.
+    Q_INVOKABLE void discardRecovery();
     Q_INVOKABLE QVariant preference(QString key, QVariant fallback = QVariant()) const;
     Q_INVOKABLE void remember(QString key, QVariant value);
     void startExport(QString path, bool gif, int width, int fps, int quality);
@@ -128,9 +134,10 @@ class Backend : public QObject {
     void recordingFinished();
     // A new recording or file would replace unsaved edits. Ask, then call answerReplace().
     void replaceRequested();
-    // The phase is idle and no card or editor is open: the process may exit. Checked once the
-    // current call has returned, so a session on its way to another is not mistaken for none.
-    void exitRequested();
+    // The phase is idle and no card or editor is open: the process may exit, with `code` 1
+    // when the last session failed (fail()), else 0. Checked once the current call has
+    // returned, so a session on its way to another is not mistaken for none.
+    void exitRequested(int code);
     // Something failed while no card or editor is open to say so.
     void backgroundError(const QString &message);
 
@@ -149,7 +156,8 @@ class Backend : public QObject {
     double m_position = 0, m_aspect = 16. / 9, m_progress = 0;
     int sourceWidth = 1920, sourceHeight = 1080, screenRevision = 0, cameraRevision = 0;
     bool m_dirty = false, exportCancelled = false, hasMic = false, hasDesktop = false,
-         hasCamera = false, uiOpen = false, announceRecording = false, recoveredEdits = false;
+         hasCamera = false, uiOpen = false, announceRecording = false, recoveredEdits = false,
+         failed = false;
     std::function<void(bool)> pendingReplace;
     QString captureError;
     QByteArray workerBuffer;
@@ -176,6 +184,8 @@ class Backend : public QObject {
     void status(QString phase, QString message = {});
     bool mayReplace() const;
     void newSession();
+    // Ends the session, as discard() does, removing its folder only when `remove`.
+    void endSession(bool remove);
     void checkpoint();
     void push();
     void edited();
@@ -184,7 +194,9 @@ class Backend : public QObject {
     void ready();
     void openPlayers();
     qint64 screenSeekEnd = 0;
-    void snapshotWallpaper();
+    // Copies the Omarchy wallpaper into the session and calls `done` with the copy, so the
+    // edit keeps its background when the wallpaper changes. At once for formats Qt reads.
+    void snapshotWallpaper(const std::function<void(const QString &)> &done);
     void syncPlayers(bool force = false);
     void parseWorker();
 

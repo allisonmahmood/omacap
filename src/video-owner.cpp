@@ -109,9 +109,9 @@ bool VideoOwner::attach(Backend &backend) {
             [&backend](const QJsonObject &command, const VideoOwnerServer::Reply &reply) {
                 handle(backend, command, reply);
             });
-    // Queued, so a reply written just before still reaches its caller.
-    connect(&backend, &Backend::exitRequested, qApp, &QCoreApplication::quit,
-            Qt::QueuedConnection);
+    // Queued, so a reply written just before still reaches its caller. A failed startup,
+    // such as an invalid request, exits 1.
+    connect(&backend, &Backend::exitRequested, qApp, &QCoreApplication::exit, Qt::QueuedConnection);
     // As Omasnap says what went wrong when nothing is open to say it.
     connect(&backend, &Backend::backgroundError, this, [](const QString &message) {
         QProcess::startDetached("omarchy-notification-send",

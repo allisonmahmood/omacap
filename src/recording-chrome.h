@@ -43,7 +43,7 @@ class RecordingChrome : public QObject {
     RecordingLayout layout;
     QString hint;
     int seconds = 0;
-    bool cleared = false;
+    bool cleared = false, stopHovered = false;
     std::unique_ptr<ChromeThemeWatcher> theme;
     std::vector<std::unique_ptr<ChromeSurface>> surfaces;
     ChromeSurface *countdown = nullptr, *hud = nullptr;
