@@ -184,6 +184,8 @@ FocusScope {
 
     // The length, the export's progress, or the exported size.
     Rectangle {
+        id: lengthBadge
+
         visible: !card.recovery
         x: 7
         y: parent.height - height - 7
@@ -220,14 +222,17 @@ FocusScope {
         onDoubleClicked: card.edit()
     }
 
+    // Between the buttons along the top and the length, at the buttons' height.
     Column {
-        anchors.centerIn: parent
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: (corner.y + corner.height + lengthBadge.y - height) / 2
         visible: card.hovered && !card.recovery
-        spacing: 6
+        spacing: 4
 
         ChromeChip {
             objectName: "cardEdit"
             anchors.horizontalCenter: parent.horizontalCenter
+            height: 24
             solid: true
             icon: "edit"
             text: "Edit"
@@ -238,6 +243,7 @@ FocusScope {
         ChromeChip {
             objectName: "cardExport"
             anchors.horizontalCenter: parent.horizontalCenter
+            height: 24
             solid: true
             icon: card.exporting ? "close" : "export"
             text: card.exporting ? "Cancel export" : "Export"
@@ -274,6 +280,8 @@ FocusScope {
     }
 
     Row {
+        id: corner
+
         x: parent.width - width - 6
         y: 6
         visible: card.hovered || card.recovery
