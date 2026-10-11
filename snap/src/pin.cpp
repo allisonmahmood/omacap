@@ -1409,7 +1409,12 @@ protected:
 
   // The six-dot control starts a file drag. Its optional PNG and thumbnail
   // payloads are prepared on a worker so pointer input never encodes images.
+  // None starts while OmaCap records: the thumbnail is a window of its own,
+  // which concealment would only cancel once it showed. A press queued
+  // before the card stopped taking input could still get here.
   void beginFileDrag() {
+    if (recording_.recording())
+      return;
     fileDragActive_ = true;
     updateExpiryPause();
     dragFree_.reset();
@@ -1424,11 +1429,13 @@ protected:
     mime->setText(urls.constFirst().toLocalFile());
     if (!dragPng_.isEmpty())
       mime->setData(QStringLiteral("image/png"), dragPng_);
-    QDrag drag(this);
-    drag.setMimeData(mime);
+    // On the heap: Qt deletes it once the drag ends, from inside the drag's
+    // own event loop when a recording cancels it.
+    auto *drag = new QDrag(this);
+    drag->setMimeData(mime);
     if (!dragPreview_.isNull())
-      drag.setPixmap(QPixmap::fromImage(dragPreview_));
-    drag.exec(Qt::CopyAction | Qt::MoveAction);
+      drag->setPixmap(QPixmap::fromImage(dragPreview_));
+    drag->exec(Qt::CopyAction | Qt::MoveAction);
     fileDragActive_ = false;
     endStackDrag();
   }

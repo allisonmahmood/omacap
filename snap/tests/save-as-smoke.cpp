@@ -29,6 +29,7 @@
 #include <QTimer>
 #include <QProcess>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QWindow>
 #include <QElapsedTimer>
 #include <QFile>
@@ -442,8 +443,23 @@ bool runSaveAsSmoke(QString &error) {
             if (window->windowType() == Qt::ToolTip)
               tip = window;
           }
+          // Motion queued before a window went off screen starts no drag
+          // there: a held button moving over it reaches nothing.
+          struct MoveProbe final : QObject {
+            int moves = 0;
+            bool eventFilter(QObject *, QEvent *event) override {
+              moves += event->type() == QEvent::MouseMove ? 1 : 0;
+              return false;
+            }
+          } probe;
+          later.installEventFilter(&probe);
+          QMouseEvent motion(QEvent::MouseMove, QPointF(4, 4), QPointF(4, 4),
+                             Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+          QApplication::sendEvent(&later, &motion);
           if (onScreen(&later) || onScreen(tip))
             failure = QStringLiteral("A window showed during a recording");
+          else if (probe.moves != 0)
+            failure = QStringLiteral("A window off screen took pointer motion");
           else if (tip && !waitUntil([&] { return !tip->isVisible(); }))
             failure = QStringLiteral("A tooltip stayed open during a recording");
           else if (!setRecording(false))

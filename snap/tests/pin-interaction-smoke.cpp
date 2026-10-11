@@ -11,6 +11,7 @@
 
 #include <QByteArray>
 #include <QDeadlineTimer>
+#include <QDrag>
 #include <QProcess>
 #include <QHelpEvent>
 #include <QImage>
@@ -384,6 +385,15 @@ bool runPinRecordingSmoke(QString &error) {
     recorder.kill();
     recorder.waitForFinished();
     error = QStringLiteral("A pin stayed on screen during a recording");
+    return false;
+  }
+  // A press that reaches the drag handle now starts no drag: its thumbnail
+  // would be a window of its own. Qt deletes a drag only later.
+  pin.beginFileDrag();
+  if (pin.findChild<QDrag *>()) {
+    recorder.kill();
+    recorder.waitForFinished();
+    error = QStringLiteral("A pin started a file drag during a recording");
     return false;
   }
   // The recorder dies without removing its marker.

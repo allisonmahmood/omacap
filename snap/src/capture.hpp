@@ -434,6 +434,8 @@ bool removeEditorHandoff(const QString &path, const QString &token);
 [[nodiscard]] QStringList
 captureNotificationArguments(const QString &message,
                              const QString &imagePath = {});
-/** Notifies the desktop; while OmaCap records, logs the message instead. */
+/** Notifies the desktop and appends the notification's id to OmaCap's
+ *  notifications file, so a recording that starts soon after can close it;
+ *  while OmaCap records, logs the message instead. Never waits for either. */
 void sendCaptureNotification(const QString &message,
                              const QString &imagePath = {});
