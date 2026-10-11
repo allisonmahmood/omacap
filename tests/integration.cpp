@@ -1543,6 +1543,29 @@ class Integration : public QObject {
         QVERIFY(!b.dirty());
         b.discard();
     }
+    // A video process that loses the race to one still starting hands its file over once that
+    // one listens, instead of giving up.
+    void forwardWhileStarting() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        VideoOwner owner;
+        QVERIFY(owner.acquire());
+        QProcess loser;
+        loser.setProcessChannelMode(QProcess::ForwardedChannels);
+        loser.start(QCoreApplication::applicationDirPath() + "/omacap",
+                    {QDir::current().absoluteFilePath("tests/out/delayed.mkv")});
+        QVERIFY(loser.waitForStarted());
+        QTest::qWait(1500); // it found the lock taken and nobody listening
+        QCOMPARE(loser.state(), QProcess::Running);
+        owner.attach(b);
+        QObject::disconnect(&b, &Backend::exitRequested, nullptr, nullptr);
+        QObject::disconnect(&b, &Backend::backgroundError, nullptr, nullptr);
+        QTRY_COMPARE_WITH_TIMEOUT(loser.state(), QProcess::NotRunning, 10000);
+        QCOMPARE(loser.exitCode(), 0);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        b.discard();
+    }
     // The editor asks before a command replaces unexported edits; Esc keeps them.
     void replaceWhileEditing() {
         Studio s;

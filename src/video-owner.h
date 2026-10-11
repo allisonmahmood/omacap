@@ -28,6 +28,8 @@ class VideoOwner : public QObject {
     VideoOwnerServer server;
     std::unique_ptr<QSocketNotifier> quitting;
     Backend *backend = nullptr;
+    // Exiting: commands get no reply, so their callers start a video process of their own.
+    bool closing = false;
     // Errors to show once the capture has ended.
     QStringList pending;
     void handleQuitSignals();

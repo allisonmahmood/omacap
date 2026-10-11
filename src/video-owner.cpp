@@ -143,6 +143,8 @@ bool VideoOwner::attach(Backend &backend) {
         qWarning("OmaCap cannot accept commands: %s", qPrintable(server.errorString()));
     connect(&server, &VideoOwnerServer::command, &backend,
             [this, &backend](const QJsonObject &command, const VideoOwnerServer::Reply &reply) {
+                if (closing)
+                    return;
                 const QString cmd = command["cmd"].toString();
                 if ((cmd == "record" || cmd == "open") && capturing()) {
                     const QString what =
@@ -156,9 +158,15 @@ bool VideoOwner::attach(Backend &backend) {
                 }
                 handle(backend, command, reply);
             });
-    // Queued, so a reply written just before still reaches its caller. A failed startup,
-    // such as an invalid request, exits 1.
-    connect(&backend, &Backend::exitRequested, qApp, &QCoreApplication::exit, Qt::QueuedConnection);
+    // The backend asks from its exit check, which has just found nothing open and nothing
+    // running, so the exit is decided there and then. A command that still arrives gets no
+    // reply: its caller starts a video process of its own. A failed startup, such as an
+    // invalid request, exits 1.
+    connect(&backend, &Backend::exitRequested, this, [this](int code) {
+        closing = true;
+        server.close();
+        QCoreApplication::exit(code);
+    });
     connect(&backend, &Backend::backgroundError, this, &VideoOwner::notify);
     connect(&backend, &Backend::changed, this, [this] {
         if (!capturing())

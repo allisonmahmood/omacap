@@ -25,7 +25,8 @@ class QLocalServer;
 // A command that would replace unsaved edits asks the user first, so its reply can wait for
 // them (answerTimeoutMs). A refusal while a capture runs also carries "deferred":true: the
 // video process tells the user itself once the capture has ended, and the caller must not
-// show it (a notification now would be recorded).
+// show it (a notification now would be recorded). A video process that is exiting closes a
+// command's connection without a reply; the caller then starts a video process of its own.
 
 // Per-session runtime directory for OmaCap's sockets, locks and markers (0700).
 // $OMACAP_RUNTIME_DIR overrides it, so tests never meet a running OmaCap.
@@ -58,6 +59,8 @@ class VideoOwnerServer : public QObject {
     explicit VideoOwnerServer(QObject *parent = nullptr);
     // Call only while holding the video lock: it removes a stale socket first.
     bool listen();
+    // Stops accepting connections and removes the socket.
+    void close();
     QString errorString() const;
   signals:
     void command(const QJsonObject &command, const VideoOwnerServer::Reply &reply);

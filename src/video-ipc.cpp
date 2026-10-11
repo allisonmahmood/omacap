@@ -106,4 +106,6 @@ bool VideoOwnerServer::listen() {
     return server->listen(videoOwnerSocketPath());
 }
 
+void VideoOwnerServer::close() { server->close(); }
+
 QString VideoOwnerServer::errorString() const { return server->errorString(); }
