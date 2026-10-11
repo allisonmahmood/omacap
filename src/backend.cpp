@@ -409,7 +409,8 @@ void Backend::loadFile(QString path) {
     captureError.clear();
     lead = 0;
     m_original = path;
-    // Animated images, like OmaCap's own GIF exports, open on the timeline.
+    // Animations Qt counts frames in, like OmaCap's own GIF exports, open on the timeline.
+    // Qt reads an APNG as one frame, so it opens as a still; the video path can't open it.
     QImageReader probe(path);
     if (probe.canRead() && probe.imageCount() <= 1)
         openImage(path);
