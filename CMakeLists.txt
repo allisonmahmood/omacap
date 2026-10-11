@@ -55,7 +55,7 @@ target_link_libraries(omacap PRIVATE omacap-video omasnap-core)
 
 if(BUILD_TESTING)
   qt_add_executable(omacap-tests tests/integration.cpp resources.qrc)
-  target_link_libraries(omacap-tests PRIVATE omacap-video Qt6::Test)
+  target_link_libraries(omacap-tests PRIVATE omacap-video Qt6::Concurrent Qt6::Test)
 endif()
 
 install(TARGETS omacap RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")

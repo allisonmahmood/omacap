@@ -15,8 +15,12 @@ class QLocalServer;
 //   {"cmd":"record-key"}  The record hotkey was pressed. Replies {"action":"stopped"} when
 //                         it stopped a countdown or recording, {"action":"pick"} when the
 //                         caller should open the picker, or {"action":"busy"} to do nothing.
-//   {"cmd":"record","request":{...RecordRequest}}  Replies {"ok":true} or {"ok":false,"error":…}.
-//   {"cmd":"open","path":"/abs/video.mp4"}         Replies {"ok":true} or {"ok":false,"error":…}.
+//                         An edited session is only replaced once the user agrees, so the
+//                         reply can wait for them.
+//   {"cmd":"record","request":{...RecordRequest}}  Starts the countdown. Replies {"ok":true}
+//                         or {"ok":false,"error":…}, e.g. while recording or exporting.
+//   {"cmd":"open","path":"/abs/video.mp4"}         Opens the video in the editor, asking first
+//                         when that would replace an edit. Replies like `record`.
 
 // Per-session runtime directory for OmaCap's sockets, locks and markers (0700).
 // $OMACAP_RUNTIME_DIR overrides it, so tests never meet a running OmaCap.

@@ -2,6 +2,8 @@
 #include "../src/exporter.h"
 #include "../src/recording-layout.h"
 #include "../src/video-ipc.h"
+#include "../src/video-owner.h"
+#include <QtConcurrent>
 #include <QApplication>
 #include <QDir>
 #include <QFile>
@@ -1278,7 +1280,7 @@ class Integration : public QObject {
         QVERIFY(b.duration() > .5 && b.duration() < 2.5);
 
         // An edited session is only replaced once the UI agrees.
-        b.setValue("padding", .1);
+        b.setValue("padding", b.edit()["padding"].toDouble() + .01);
         QSignalSpy asked(&b, &Backend::replaceRequested);
         std::optional<bool> answer;
         b.confirmReplace([&](bool yes) { answer = yes; });
@@ -1298,6 +1300,54 @@ class Integration : public QObject {
         b.stop();
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
         QFile::remove(first);
+    }
+    // How the video owner answers `omacap --record`, the capture overlay and opened files.
+    void ownerCommands() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        QFile stale(recordingMarkerPath());
+        QVERIFY(stale.open(QIODevice::WriteOnly));
+        stale.close();
+        VideoOwner owner;
+        QVERIFY(owner.acquire());
+        QVERIFY(!QFile::exists(recordingMarkerPath())); // left by a crashed owner
+        owner.attach(b);
+        // Keep the test process running and the desktop free of notifications.
+        QObject::disconnect(&b, &Backend::exitRequested, nullptr, nullptr);
+        QObject::disconnect(&b, &Backend::backgroundError, nullptr, nullptr);
+        const auto ask = [](const QJsonObject &command) {
+            auto reply = QtConcurrent::run([command] { return askVideoOwner(command); });
+            QTest::qWaitFor([&] { return reply.isFinished(); }, 5000);
+            return reply.isFinished() ? reply.result().value_or(QJsonObject()) : QJsonObject();
+        };
+        const QJsonObject recordKey{{"cmd", "record-key"}};
+        QCOMPARE(ask(recordKey)["action"].toString(), QString("pick"));
+        QCOMPARE(ask({{"cmd", "record"}, {"request", QJsonObject{}}})["error"].toString(),
+                 QString("Not a valid recording request."));
+        auto rotated = syntheticRequest();
+        rotated.transform = 1;
+        QVERIFY(ask({{"cmd", "record"}, {"request", rotated.toJson()}})["error"].toString().contains(
+            "rotated"));
+
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        const QJsonObject record{{"cmd", "record"}, {"request", syntheticRequest().toJson()}};
+        QCOMPARE(ask(record)["ok"].toBool(), false);
+        const QString video = QDir::current().absoluteFilePath("tests/out/delayed.mkv");
+        QCOMPARE(ask({{"cmd", "open"}, {"path", video}})["ok"].toBool(), false);
+        QCOMPARE(ask(recordKey)["action"].toString(), QString("stopped"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+
+        QCOMPARE(ask({{"cmd", "open"}, {"path", video}})["ok"].toBool(), true);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QCOMPARE(ask(recordKey)["action"].toString(), QString("pick")); // nothing edited
+        b.setValue("padding", b.edit()["padding"].toDouble() + .01);
+        bool replace = false;
+        QObject::connect(&b, &Backend::replaceRequested, &b, [&] { b.answerReplace(replace); });
+        QCOMPARE(ask(recordKey)["action"].toString(), QString("busy"));
+        replace = true;
+        QCOMPARE(ask(recordKey)["action"].toString(), QString("pick"));
+        b.discard();
     }
     void portalFixture() {
         const auto fixture = qEnvironmentVariable("OMACAP_PORTAL_FIXTURE");

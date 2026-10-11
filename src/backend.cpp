@@ -242,7 +242,7 @@ void Backend::uiClosed() {
     exitIfUnused();
 }
 void Backend::confirmReplace(std::function<void(bool)> answer) {
-    if (m_phase == "idle" || (m_phase == "editor" && !m_dirty))
+    if (m_phase == "idle" || (m_phase == "editor" && !unsavedEdits()))
         return answer(true);
     if (m_phase != "editor" || pendingReplace)
         return answer(false);
@@ -256,7 +256,11 @@ void Backend::answerReplace(bool replace) {
 }
 // A new recording or file may replace the session only when no edits would be lost.
 bool Backend::mayReplace() const {
-    return m_phase == "idle" || (m_phase == "editor" && (!m_dirty || replaceConfirmed));
+    return m_phase == "idle" || (m_phase == "editor" && (!unsavedEdits() || replaceConfirmed));
+}
+// Edits made since the last export. The recording itself is kept either way.
+bool Backend::unsavedEdits() const {
+    return m_dirty && (!past.isEmpty() || recoveredEdits);
 }
 QVariant Backend::preference(QString k, QVariant f) const {
     return settings.value(k, f);
@@ -274,6 +278,7 @@ void Backend::newSession() {
     screenRevision = cameraRevision = 0;
     m_position = 0;
     m_dirty = true;
+    recoveredEdits = false;
     m_lastExport.clear();
     m_original.clear();
     snapshotWallpaper();
@@ -1176,6 +1181,7 @@ void Backend::recover() {
         sourceWidth = o["sourceWidth"].toInt(1920);
         sourceHeight = o["sourceHeight"].toInt(1080);
         m_dirty = o["dirty"].toBool(true);
+        recoveredEdits = true;
         m_lastExport = o["lastExport"].toString();
         m_original = o["original"].toString();
         ready();

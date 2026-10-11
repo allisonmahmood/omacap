@@ -10,6 +10,18 @@ One `omacap` binary runs one of two apps, chosen in `src/main.cpp` before any
   after a recording, the video editor and exports. It holds the video lock and listens
   on the video socket (`src/video-owner.*`, `src/video-ipc.*`).
 
+## Command line
+
+| Command | Runs |
+| --- | --- |
+| `omacap`, `omacap --screenshot` | the capture overlay's smart capture |
+| `omacap shot.png` | the screenshot editor |
+| `omacap --record` | `record-key` to the video process; the picker in record mode (`--record-picker`) unless it stopped a recording or is busy |
+| `omacap --record-request <json>` | `record` to the video process, or starts one that records the request |
+| `omacap video.mp4` | `open` to the video process, or starts one with the video |
+| `omacap --export <job>` | the offscreen export worker |
+| `omacap --version` | prints the version |
+
 ## Recording, end to end
 
 1. `omacap --record` asks the video process first (`record-key`). If it is recording it
@@ -51,6 +63,21 @@ recording. XDPH may still share something else, so the worker checks the stream 
 `mapping_id`, source type and size) and fails clearly when it isn't the requested
 monitor. Rotated monitors are refused for now.
 
+## Video process commands
+
+`src/video-ipc.h` defines the socket protocol; `src/video-owner.cpp` answers by phase:
+
+| Command | `idle` | `editor` | `countdown`, `recording` | `stopping`, `preparing`, `exporting` |
+| --- | --- | --- | --- | --- |
+| `record-key` | `pick` | `pick`; with unsaved edits, asks the UI first and replies `pick` or `busy` | stops, `stopped` | `busy` |
+| `record` | starts | starts, if nothing unsaved is lost | error | error |
+| `open` | opens | opens, asking first like `record-key` | error | error |
+
+`recordingMarkerPath()` holds the video process's PID, one line, from the moment a
+recording is requested until the worker confirms the stop (or exits). The capture overlay
+hides previews and pins while it exists with a live PID. Only the video lock's holder
+writes it, so a new owner removes one left behind by a crash.
+
 ## Video process phases
 
 `Backend::phase()` is the contract between recording and the editor UI:
@@ -72,3 +99,4 @@ Signals and calls between `Backend` and the UI:
 - `uiClosed()` tells the backend neither card nor editor is open any more. The process
   then exits once nothing is recording or exporting. A session shown in the editor
   counts as open until then.
+- Failures with nothing open to show them are reported as desktop notifications.
