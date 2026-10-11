@@ -1601,6 +1601,27 @@ class Integration : public QObject {
         b.discard();
         QTRY_COMPARE(exits.count(), 5);
         QVERIFY(!QDir(saved).exists());
+
+        // D discards the offered edit and closes the card; its recording stays.
+        const QString video = QDir::current().absoluteFilePath("tests/out/delayed.mkv");
+        {
+            Backend crashed(&s.theme, s.frames);
+            crashed.loadFile(video);
+            QTRY_COMPARE_WITH_TIMEOUT(crashed.phase(), QString("editor"), 10000);
+            crashed.setValue("padding", .123);
+            saved = crashed.sessionPath();
+        }
+        s.stage.offerRecovery();
+        QCOMPARE(s.stage.card(), QString("recovery"));
+        auto cardWindow = s.stage.cardWindow();
+        cardWindow->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(cardWindow));
+        QTest::keyClick(cardWindow, Qt::Key_D);
+        QVERIFY(s.stage.card().isEmpty());
+        QVERIFY(!QDir(saved).exists());
+        QVERIFY(!Backend::recoverable());
+        QVERIFY(QFile::exists(video));
+        QTRY_COMPARE(exits.count(), 6);
     }
     void portalFixture() {
         const auto fixture = qEnvironmentVariable("OMACAP_PORTAL_FIXTURE");

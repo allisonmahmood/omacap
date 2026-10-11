@@ -113,7 +113,11 @@ class Backend : public QObject {
     Q_INVOKABLE void openExport();
     // Ends the session and removes it. The recording it edits stays.
     Q_INVOKABLE void discard();
+    // Opens the edit or capture recoverable() found, the newest, while idle.
     Q_INVOKABLE void recover();
+    // Removes what recover() would open, while idle: the recovery card's Discard. A recording
+    // saved in Videos stays.
+    Q_INVOKABLE void discardRecovery();
     Q_INVOKABLE QVariant preference(QString key, QVariant fallback = QVariant()) const;
     Q_INVOKABLE void remember(QString key, QVariant value);
     void startExport(QString path, bool gif, int width, int fps, int quality);

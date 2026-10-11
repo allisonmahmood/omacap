@@ -9,7 +9,8 @@ import "exports.js" as Exports
 // with the last settings, E edits, P keeps, X or Esc closes. It fades after ten seconds unless
 // it is hovered, kept or exporting, and can't close while exporting. Closing it ends the
 // session; the recording stays in Videos. The same card offers an earlier session's unfinished
-// edit for recovery: E or Enter recovers it.
+// edit for recovery: E or Enter recovers it, D or Delete discards it, X or Esc leaves it for
+// later.
 FocusScope {
     id: card
 
@@ -25,6 +26,14 @@ FocusScope {
             backend.recover();
         else
             stage.openEditor();
+    }
+
+    // Deletes the offered edit and closes the card. Its recording stays in Videos.
+    function discard() {
+        if (!recovery || backend.phase !== "idle")
+            return;
+        backend.discardRecovery();
+        stage.closeCard();
     }
 
     function exportNow() {
@@ -56,6 +65,8 @@ FocusScope {
             exportNow();
         else if (event.key === Qt.Key_P && !recovery)
             keep();
+        else if ((event.key === Qt.Key_D || event.key === Qt.Key_Delete) && recovery)
+            discard();
         else if (event.key === Qt.Key_X || event.key === Qt.Key_Escape)
             stage.closeCard();
         else
@@ -216,24 +227,21 @@ FocusScope {
 
     Column {
         anchors.centerIn: parent
-        visible: card.hovered || card.recovery
-        anchors.verticalCenterOffset: card.recovery ? 22 : 0
+        visible: card.hovered && !card.recovery
         spacing: 6
 
         ChromeChip {
             objectName: "cardEdit"
             anchors.horizontalCenter: parent.horizontalCenter
-            solid: !card.recovery
-            accent: card.recovery
-            icon: card.recovery ? "" : "edit"
-            text: card.recovery ? "Recover" : "Edit"
+            solid: true
+            icon: "edit"
+            text: "Edit"
             key: "E"
             onClicked: card.edit()
         }
 
         ChromeChip {
             objectName: "cardExport"
-            visible: !card.recovery
             anchors.horizontalCenter: parent.horizontalCenter
             solid: true
             icon: card.exporting ? "close" : "export"
@@ -241,6 +249,31 @@ FocusScope {
             key: card.exporting ? "" : "Enter"
             enabled: backend.duration > 0
             onClicked: card.exporting ? backend.cancelExport() : card.exportNow()
+        }
+
+    }
+
+    Row {
+        visible: card.recovery
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: parent.height - height - 12
+        spacing: 6
+
+        ChromeChip {
+            objectName: "cardRecover"
+            accent: true
+            text: "Recover"
+            key: "E"
+            enabled: backend.phase === "idle"
+            onClicked: card.edit()
+        }
+
+        ChromeChip {
+            objectName: "cardDiscard"
+            text: "Discard"
+            key: "D"
+            enabled: backend.phase === "idle"
+            onClicked: card.discard()
         }
 
     }
@@ -279,7 +312,7 @@ FocusScope {
             height: 24
             radius: 6
             icon: "close"
-            tooltip: "Close · X"
+            tooltip: card.recovery ? "Not now · X" : "Close · X"
             onClicked: stage.closeCard()
         }
 

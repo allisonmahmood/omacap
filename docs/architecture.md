@@ -140,9 +140,10 @@ capture. Each surface is a QML item it hosts in a window it owns:
   ends the session; the recording itself stays in Videos.
 - **Recovery card**: a video process started without a request or file (as
   `omacap --record` does when one is left) offers the newest earlier session's unfinished
-  edit on the same card. Recover (E or Enter) opens it in the editor. Closing or fading
-  the card, or starting a new recording, ends the offer; the edit stays recoverable until
-  it is recovered and its session ends.
+  edit on the same card. Recover (E or Enter) opens it in the editor. Discard (D or Delete)
+  deletes it; a recording it edits stays in Videos. Not now (X or Esc), fading, or starting
+  a new recording ends the offer; the edit stays recoverable until it is recovered and its
+  session ends, or is discarded.
 
 Opening a file goes straight to the editor. The process exits once its session has ended
 and no surface is open. The chrome is painted with Omasnap's own theme, fonts and icon code

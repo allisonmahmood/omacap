@@ -45,6 +45,19 @@ QString capturedRecording(const QString &session) {
 bool screenshotSession(const QString &session) {
     return readJson(session + "/recovery.json")["kind"] == "image";
 }
+// The newest session under `root` that left something to recover: an unfinished edit, or a
+// capture the editor never opened. Empty when there is none.
+QString recoverableSession(const QString &root) {
+    for (const auto &d : QDir(root).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time)) {
+        const QString dir = d.filePath();
+        if (!readJson(dir + "/recovery.json").isEmpty()
+                ? !screenshotSession(dir)
+                : !readJson(dir + "/capture.json").isEmpty() &&
+                      QFileInfo(capturedRecording(dir)).size() > 1024)
+            return dir;
+    }
+    return {};
+}
 // Where sessions live while they are edited. Discarding one removes it; one left behind by a
 // crash is offered for recovery.
 QString scratchRoot() {
@@ -1139,50 +1152,45 @@ void Backend::endSession(bool remove) {
         answer(true);
 }
 bool Backend::recoverable() {
-    const QString root = scratchRoot();
-    for (auto d : QDir(root).entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
-        const QString dir = root + "/" + d;
-        if ((QFile::exists(dir + "/recovery.json") && !screenshotSession(dir)) ||
-            QFileInfo(capturedRecording(dir)).size() > 1024)
-            return true;
-    }
-    return false;
+    return !recoverableSession(scratchRoot()).isEmpty();
 }
 void Backend::recover() {
-    auto dirs = QDir(recoveryRoot).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
-    for (auto d : dirs) {
-        auto o = readJson(d.filePath() + "/recovery.json");
-        if (o.isEmpty()) {
-            auto capture = readJson(d.filePath() + "/capture.json");
-            const QString recording = capturedRecording(d.filePath());
-            if (capture.isEmpty() || QFileInfo(recording).size() <= 1024)
-                continue;
-            session = d.filePath();
-            // Older versions kept the capture inside the session, which discard removes.
-            if (!recording.startsWith(session + "/"))
-                m_original = recording;
-            state = Edit::fromJson(capture["edit"].toObject());
-            hasMic = capture["mic"].toBool();
-            hasDesktop = capture["desktop"].toBool();
-            hasCamera = capture["camera"].toBool();
-            m_dirty = true;
-            prepare(recording, true);
-            return;
-        }
-        if (screenshotSession(d.filePath()))
-            continue;
-        session = d.filePath();
-        state = Edit::fromJson(o["edit"].toObject());
-        m_aspect = o["aspect"].toDouble(16. / 9);
-        screenStart = o["screenStart"].toDouble();
-        cameraStart = o["cameraStart"].toDouble();
-        sourceWidth = o["sourceWidth"].toInt(1920);
-        sourceHeight = o["sourceHeight"].toInt(1080);
-        m_dirty = o["dirty"].toBool(true);
-        recoveredEdits = true;
-        m_lastExport = o["lastExport"].toString();
-        m_original = o["original"].toString();
-        ready();
+    if (m_phase != "idle")
+        return;
+    const QString dir = recoverableSession(recoveryRoot);
+    if (dir.isEmpty())
+        return;
+    session = dir;
+    const auto o = readJson(session + "/recovery.json");
+    if (o.isEmpty()) {
+        const auto capture = readJson(session + "/capture.json");
+        const QString recording = capturedRecording(session);
+        // Older versions kept the capture inside the session, which discard removes.
+        if (!recording.startsWith(session + "/"))
+            m_original = recording;
+        state = Edit::fromJson(capture["edit"].toObject());
+        hasMic = capture["mic"].toBool();
+        hasDesktop = capture["desktop"].toBool();
+        hasCamera = capture["camera"].toBool();
+        m_dirty = true;
+        prepare(recording, true);
         return;
     }
+    state = Edit::fromJson(o["edit"].toObject());
+    m_aspect = o["aspect"].toDouble(16. / 9);
+    screenStart = o["screenStart"].toDouble();
+    cameraStart = o["cameraStart"].toDouble();
+    sourceWidth = o["sourceWidth"].toInt(1920);
+    sourceHeight = o["sourceHeight"].toInt(1080);
+    m_dirty = o["dirty"].toBool(true);
+    recoveredEdits = true;
+    m_lastExport = o["lastExport"].toString();
+    m_original = o["original"].toString();
+    ready();
+}
+void Backend::discardRecovery() {
+    if (m_phase != "idle")
+        return;
+    if (const QString dir = recoverableSession(recoveryRoot); !dir.isEmpty())
+        QDir(dir).removeRecursively();
 }
