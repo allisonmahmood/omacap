@@ -5,9 +5,11 @@ import OmaCap
 import "exports.js" as Exports
 
 // The card in the corner after a recording, as Omasnap's capture preview: the styled first
-// frame and its length; hover for Edit and Export, keep, reveal and close. It fades after ten
-// seconds unless it is hovered, kept or exporting. Closing it ends the session; the recording
-// stays in Videos. The same card offers an earlier session's unfinished edit for recovery.
+// frame and its length; hover for Edit and Export, keep, reveal and close. Keys: Enter exports
+// with the last settings, E edits, P keeps, X or Esc closes. It fades after ten seconds unless
+// it is hovered, kept or exporting, and can't close while exporting. Closing it ends the
+// session; the recording stays in Videos. The same card offers an earlier session's unfinished
+// edit for recovery: E or Enter recovers it.
 FocusScope {
     id: card
 
@@ -48,13 +50,13 @@ FocusScope {
     implicitHeight: 113
     focus: true
     Keys.onPressed: (event) => {
-        if (event.key === Qt.Key_E || event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+        if (event.key === Qt.Key_E || (recovery && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)))
             edit();
-        else if (event.key === Qt.Key_X)
+        else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
             exportNow();
         else if (event.key === Qt.Key_P && !recovery)
             keep();
-        else if (event.key === Qt.Key_Escape)
+        else if (event.key === Qt.Key_X || event.key === Qt.Key_Escape)
             stage.closeCard();
         else
             return ;
@@ -236,7 +238,7 @@ FocusScope {
             solid: true
             icon: card.exporting ? "close" : "export"
             text: card.exporting ? "Cancel export" : "Export"
-            key: card.exporting ? "" : "X"
+            key: card.exporting ? "" : "Enter"
             enabled: backend.duration > 0
             onClicked: card.exporting ? backend.cancelExport() : card.exportNow()
         }
@@ -277,7 +279,7 @@ FocusScope {
             height: 24
             radius: 6
             icon: "close"
-            tooltip: "Close · Esc"
+            tooltip: "Close · X"
             onClicked: stage.closeCard()
         }
 
