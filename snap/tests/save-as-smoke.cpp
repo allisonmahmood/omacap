@@ -323,6 +323,50 @@ bool runSaveAsSmoke(QString &error) {
     editor.wallpaperPending_ = false;
     editor.close();
   }
+  // A recording hides the editor and its chooser. Closing the chooser or
+  // asking the editor to show meanwhile puts nothing on screen; both come
+  // back as they were when it ends.
+  for (const bool windowed : {false, true}) {
+    CaptureEditor editor(capture, CaptureEditor::CaptureMode::File);
+    editor.setWindowedPresentation(windowed);
+    editor.resize(800, 600);
+    editor.show();
+    QCoreApplication::processEvents();
+    editor.saveAs();
+    if (!waitUntil([] { return saveDialog() != nullptr; })) {
+      error = QStringLiteral("Save As did not open before the recording");
+      return false;
+    }
+    QFileDialog *dialog = saveDialog();
+    editor.setConcealed(true);
+    if (editor.isVisible() || dialog->isVisible()) {
+      error = QStringLiteral("A recording left the editor or its chooser on screen");
+      return false;
+    }
+    editor.setConcealed(false);
+    if (!dialog->isVisible() || editor.isVisible() != windowed) {
+      error = QStringLiteral("The chooser did not come back after the recording");
+      return false;
+    }
+    editor.setConcealed(true);
+    dialog->reject();
+    if (!waitUntil([&] { return !editor.busy_ && saveDialog() == nullptr; }) ||
+        editor.isVisible()) {
+      error = QStringLiteral("Closing a chooser during a recording showed the editor");
+      return false;
+    }
+    editor.show();
+    if (editor.isVisible()) {
+      error = QStringLiteral("The editor showed during a recording");
+      return false;
+    }
+    editor.setConcealed(false);
+    if (!editor.isVisible() || saveDialog() != nullptr) {
+      error = QStringLiteral("The editor did not come back after the recording");
+      return false;
+    }
+    editor.close();
+  }
   // A finished worker may still have its GUI completion queued when close
   // arrives. Closing must invalidate that completion, even without destruction.
   for (const bool windowed : {false, true}) {

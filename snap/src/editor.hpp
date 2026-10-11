@@ -152,6 +152,15 @@ public:
    */
   void setSuppressSnapshots(bool suppress) { suppressSnapshots_ = suppress; }
 
+  /**
+   * While OmaCap records, nothing this editor shows may be on screen: the
+   * editor and an open chooser hide, and whatever asks to show them waits.
+   * They come back as they were when the recording ends.
+   */
+  void setConcealed(bool concealed);
+  /** Shows only while not concealed; remembers what was asked either way. */
+  void setVisible(bool visible) override;
+
 protected:
   bool eventFilter(QObject *watched, QEvent *event) override;
   void closeEvent(QCloseEvent *event) override;
@@ -1094,6 +1103,9 @@ private:
   quint64 saveAsRequest_ = 0;
   /// The open chooser (Save As, backdrop colour or image), if any.
   QPointer<QDialog> chooser_;
+  /// setConcealed(), and whether the editor was last asked to show.
+  bool concealed_ = false;
+  bool shown_ = false;
   LookPopover lookPopover_ = LookPopover::None;
   bool recordMode_ = false;
   /// The mode switch segment a press started on, or -1.
