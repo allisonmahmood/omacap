@@ -8,8 +8,21 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
+#include <QSocketNotifier>
 #include <QStandardPaths>
 #include <QTextStream>
+#include <fcntl.h>
+#include <memory>
+#include <signal.h>
+#include <unistd.h>
+namespace {
+int quitPipe[2] = {-1, -1};
+// Async-signal-safe: the event loop sees the byte and quits.
+void requestQuit(int) {
+    const char byte = 1;
+    [[maybe_unused]] const auto written = ::write(quitPipe[1], &byte, 1);
+}
+} // namespace
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
     app.setApplicationName("omacap");
@@ -43,6 +56,18 @@ int main(int argc, char **argv) {
         }
         qWarning("OmaCap is already running.");
         return 1;
+    }
+    // SIGINT and SIGTERM quit through the event loop rather than killing the process, so
+    // the backend's destructor still ends a screen freeze left by an interrupted capture.
+    std::unique_ptr<QSocketNotifier> quitting;
+    if (::pipe2(quitPipe, O_CLOEXEC) == 0) {
+        quitting = std::make_unique<QSocketNotifier>(quitPipe[0], QSocketNotifier::Read);
+        QObject::connect(quitting.get(), &QSocketNotifier::activated, &app,
+                         &QCoreApplication::quit);
+        struct sigaction action = {};
+        action.sa_handler = requestQuit;
+        sigaction(SIGINT, &action, nullptr);
+        sigaction(SIGTERM, &action, nullptr);
     }
     // The lock is ours, so a socket left at this path belongs to a crashed instance.
     QLocalServer::removeServer(requests);
