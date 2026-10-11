@@ -37,7 +37,6 @@ class Backend : public QObject {
     Q_PROPERTY(bool dirty READ dirty NOTIFY changed)
     Q_PROPERTY(QString lastExport READ lastExport NOTIFY changed)
     Q_PROPERTY(QString original READ original NOTIFY changed)
-    Q_PROPERTY(QSize sourceSize READ sourceSize NOTIFY changed)
   public:
     Backend(Theme *, Frames *, QObject *p = nullptr);
     ~Backend();
@@ -69,12 +68,11 @@ class Backend : public QObject {
     QString lastExport() const { return m_lastExport; }
     // The recording this session edits. Discarding the session keeps it.
     QString original() const { return m_original; }
-    QSize sourceSize() const { return {sourceWidth, sourceHeight}; }
     // Starts the countdown for a recording, replacing the session. Returns why it can't start
     // (it would lose unsaved edits, or can't record the request); empty when it started.
     QString startRecording(const RecordRequest &request, bool synthetic = false);
     // Cancels the countdown, or stops the recording.
-    Q_INVOKABLE void stop();
+    void stop();
     // The UI reports whether a card or editor is open, counting one hidden for a recording.
     // Once nothing is open and the phase is idle, exitRequested() follows.
     void setUiOpen(bool open);
@@ -104,10 +102,11 @@ class Backend : public QObject {
     Q_INVOKABLE int addZoom(double at);
     Q_INVOKABLE void updateZoom(int index, double a, double b, double x, double y, double amount);
     Q_INVOKABLE void deleteZoom(int index);
-    Q_INVOKABLE void chooseBackground();
-    Q_INVOKABLE void chooseColor();
     Q_INVOKABLE void useWallpaper();
-    Q_INVOKABLE void exportVideo(bool gif, int width, int fps, int quality);
+    // Choosers and Export's save dialog; VideoStage hands the screen over to them.
+    void chooseBackground();
+    void chooseColor();
+    void exportVideo(bool gif, int width, int fps, int quality);
     Q_INVOKABLE void cancelExport();
     Q_INVOKABLE void revealExport();
     Q_INVOKABLE void openExport();
