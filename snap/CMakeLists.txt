@@ -154,7 +154,8 @@ target_link_libraries(omasnap-core PUBLIC
   PkgConfig::Libdeflate
 )
 
-target_compile_definitions(omasnap-core PRIVATE OMACAP_VERSION="${PROJECT_VERSION}")
+# Public so every target that links the core, or reuses its precompiled header, sees the same version.
+target_compile_definitions(omasnap-core PUBLIC OMACAP_VERSION="${PROJECT_VERSION}")
 
 if(BUILD_TESTING)
 qt_add_executable(omasnap-smoke

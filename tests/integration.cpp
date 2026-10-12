@@ -1673,8 +1673,9 @@ class Integration : public QObject {
         };
         const auto ask = [](const QJsonObject &command) {
             auto reply = QtConcurrent::run([command] { return askVideoOwner(command); });
-            QTest::qWaitFor([&] { return reply.isFinished(); }, 5000);
-            return reply.isFinished() ? reply.result().value_or(QJsonObject()) : QJsonObject();
+            if (!QTest::qWaitFor([&] { return reply.isFinished(); }, 5000))
+                return QJsonObject();
+            return reply.result().value_or(QJsonObject());
         };
         const QJsonObject recordKey{{"cmd", "record-key"}};
         QCOMPARE(ask(recordKey)["action"].toString(), QString("pick"));

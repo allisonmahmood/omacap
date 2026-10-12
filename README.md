@@ -202,7 +202,7 @@ To try OmaCap on a real compositor without touching your session, `scripts/neste
 
 In T3 Code, import **Build and run** and **Run tests** from **From t3.json** in the project scripts menu. The shared configuration also sets the OmaCap project icon. Both actions run on demand in the current thread's checkout.
 
-For a per-user install after building, run `./scripts/install-local.sh` instead of installing the Arch package. Its `~/.local/bin/omacap` and desktop entry take precedence over the package, so remove them when you switch to the package.
+For a per-user install, run `./scripts/install-local.sh` instead of installing the Arch package. It builds OmaCap and ends by printing the installed version. Its `~/.local/bin/omacap` and desktop entry take precedence over the package, so remove them when you switch to the package.
 
 See [Releasing OmaCap](docs/releasing.md) for preparing a draft release and publishing it on GitHub.
 

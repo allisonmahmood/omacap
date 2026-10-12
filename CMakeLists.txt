@@ -53,12 +53,15 @@ qt_add_executable(omacap
   resources.qrc
 )
 target_compile_options(omacap PRIVATE -Wall -Wextra)
-target_compile_definitions(omacap PRIVATE OMACAP_VERSION="${PROJECT_VERSION}")
 target_link_libraries(omacap PRIVATE omacap-video omasnap-core)
+# The QML import scan only links plugins into static Qt builds, and it would also
+# read tests/notification-daemon.qml, a Quickshell file the app never loads.
+set_target_properties(omacap PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
 
 if(BUILD_TESTING)
   qt_add_executable(omacap-tests tests/integration.cpp resources.qrc)
   target_link_libraries(omacap-tests PRIVATE omacap-video Qt6::Concurrent Qt6::Test)
+  set_target_properties(omacap-tests PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
 endif()
 
 install(TARGETS omacap RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
