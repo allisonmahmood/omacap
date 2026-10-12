@@ -53,7 +53,7 @@ jobs:
       - name: Install application and test dependencies
         run: |
           source packaging/PKGBUILD.in
-          pacman -S --noconfirm --needed "${depends[@]}" \
+          pacman -S --noconfirm --needed "${depends[@]}" "${makedepends[@]}" \
             python-numpy mesa xorg-server-xvfb xorg-xauth ttf-dejavu desktop-file-utils
           useradd --create-home builder
           chown -R builder:builder "$GITHUB_WORKSPACE"

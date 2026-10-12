@@ -1,0 +1,74 @@
+cmake_minimum_required(VERSION 3.24)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" OMACAP_VERSION LIMIT_COUNT 1)
+project(omacap VERSION ${OMACAP_VERSION} LANGUAGES C CXX)
+include(GNUInstallDirs)
+include(CTest)
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+
+find_package(Qt6 6.8 REQUIRED COMPONENTS
+  Concurrent Core DBus Gui Widgets Qml Quick QuickControls2 Multimedia OpenGL Network Test)
+# The capture overlay and the recording chrome are layer-shell surfaces.
+find_package(LayerShellQt REQUIRED)
+
+# Contracts between the capture overlay and the video process.
+add_library(omacap-ipc STATIC
+  src/record-request.cpp src/record-request.h
+  src/video-ipc.cpp src/video-ipc.h
+)
+target_include_directories(omacap-ipc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_features(omacap-ipc PUBLIC cxx_std_23)
+target_link_libraries(omacap-ipc PUBLIC Qt6::Core Qt6::Network)
+
+# Capture overlay, screenshot editor, previews and pins, derived from Omasnap.
+add_subdirectory(snap)
+
+# The video editor: recording, edit model, timeline and exports.
+add_library(omacap-video STATIC
+  src/backend.cpp src/backend.h
+  src/chrome-items.cpp src/chrome-items.h
+  src/exporter.cpp src/exporter.h
+  src/frames.h
+  src/model.cpp src/model.h
+  src/recorder.cpp src/recorder.h
+  src/recording-chrome.cpp src/recording-chrome.h
+  src/recording-layout.cpp src/recording-layout.h
+  src/theme.cpp src/theme.h
+  src/video-icons.cpp src/video-icons.h
+  src/video-owner.cpp src/video-owner.h
+  src/video-stage.cpp src/video-stage.h
+  src/waveforms.cpp src/waveforms.h
+)
+target_include_directories(omacap-video PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_features(omacap-video PUBLIC cxx_std_23)
+target_compile_options(omacap-video PRIVATE -Wall -Wextra)
+# omasnap-core supplies the recording chrome's theme and fonts.
+target_link_libraries(omacap-video PUBLIC omacap-ipc omasnap-core
+  Qt6::Core Qt6::DBus Qt6::Gui Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickControls2
+  Qt6::Multimedia Qt6::OpenGL Qt6::Network)
+
+qt_add_executable(omacap
+  src/main.cpp
+  src/video-app.cpp src/video-app.h
+  resources.qrc
+)
+target_compile_options(omacap PRIVATE -Wall -Wextra)
+target_link_libraries(omacap PRIVATE omacap-video omasnap-core)
+# The QML import scan only links plugins into static Qt builds, and it would also
+# read tests/notification-daemon.qml, a Quickshell file the app never loads.
+set_target_properties(omacap PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
+
+if(BUILD_TESTING)
+  qt_add_executable(omacap-tests tests/integration.cpp resources.qrc)
+  target_link_libraries(omacap-tests PRIVATE omacap-video Qt6::Concurrent Qt6::Test)
+  set_target_properties(omacap-tests PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
+endif()
+
+install(TARGETS omacap RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(FILES packaging/omacap.desktop DESTINATION "${CMAKE_INSTALL_DATADIR}/applications")
+install(FILES packaging/omacap.svg DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps")
+install(FILES LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/omacap")
+install(FILES snap/LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/omacap" RENAME Omasnap-LICENSE)
+install(FILES snap/assets/OFL.txt DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/omacap" RENAME Neucha-OFL.txt)
+install(FILES snap/assets/JetBrainsMono-OFL.txt snap/assets/Inter-OFL.txt snap/assets/Lucide-ISC.txt
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/omacap")

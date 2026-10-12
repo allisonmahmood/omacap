@@ -10,3 +10,8 @@ Categories=AudioVideo;Video;Recorder;
 MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;image/png;image/jpeg;image/webp;
 StartupNotify=true
 StartupWMClass=omacap
+Actions=record;
+
+[Desktop Action record]
+Name=Record screen
+Exec=omacap --record

@@ -1,13 +1,18 @@
 #include "../src/backend.h"
 #include "../src/exporter.h"
+#include "../src/video-stage.h"
+#include "../src/recording-layout.h"
+#include "../src/video-ipc.h"
+#include "../src/video-owner.h"
+#include <QtConcurrent>
 #include <QApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QPainter>
-#include <QQmlApplicationEngine>
-#include <QQmlContext>
+#include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickItemGrabResult>
 #include <QQuickStyle>
@@ -20,13 +25,52 @@
 #include <ctime>
 #include <functional>
 #include <signal.h>
+#include <sys/file.h>
 #if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
 #include <QAudioBuffer>
 #include <QAudioBufferOutput>
 #endif
+// A whole 1280×720 monitor with every device, as the synthetic worker records it.
+RecordRequest syntheticRequest() {
+    RecordRequest request;
+    request.monitor = "TEST-1";
+    request.monitorLogical = QRect(0, 0, 1280, 720);
+    request.area = request.monitorLogical;
+    request.mic = request.camera = "test";
+    request.desktopAudio = true;
+    return request;
+}
 class Integration : public QObject {
     Q_OBJECT
     QTemporaryDir themeRoot;
+    // The video UI as runVideoApp builds it: a stage presenting a backend's sessions.
+    struct Studio {
+        Theme theme;
+        QQmlEngine engine;
+        Frames *frames = new Frames;
+        Backend backend{&theme, frames};
+        VideoStage stage{engine, backend, theme};
+        Studio() { engine.addImageProvider("frames", frames); }
+    };
+    // The item named `name` under `item`. Repeater delegates and hosted QML are visual
+    // children, not QObject children, so walk the item tree.
+    static QQuickItem *find(QQuickItem *item, const QString &name) {
+        if (item->objectName() == name)
+            return item;
+        for (auto child : item->childItems())
+            if (auto match = find(child, name))
+                return match;
+        return nullptr;
+    }
+    // Opens the editor on `path` and waits for it to be on screen and focused.
+    static QQuickWindow *openEditor(Studio &studio, const QString &path) {
+        studio.backend.loadFile(QDir::current().absoluteFilePath(path));
+        if (!QTest::qWaitFor([&] { return studio.stage.editorWindow() != nullptr; }, 10000))
+            return nullptr;
+        auto win = studio.stage.editorWindow();
+        win->requestActivate();
+        return QTest::qWaitForWindowActive(win) ? win : nullptr;
+    }
 
   private slots:
     void initTestCase() {
@@ -60,21 +104,20 @@ class Integration : public QObject {
         Backend b(&theme, &frames);
         b.newSession();
         b.hasMic = true;
-        b.lead = 3;
         b.prepare(QDir::current().absoluteFilePath("tests/out/unfinished-tail.mkv"), true);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
-        QVERIFY(b.duration() > 4.9);
-        b.seek(4.5);
+        QVERIFY(b.duration() > 7.9);
+        b.seek(7.5);
         QTRY_VERIFY_WITH_TIMEOUT(!b.seeking, 3000);
         QVERIFY(b.screenSink.videoFrame().startTime() < 1000000);
         QVERIFY(b.screenSink.videoFrame().endTime() >= 7990000);
-        QCOMPARE(b.position(), 4.5);
+        QCOMPARE(b.position(), 7.5);
         b.micOutput.setVolume(0);
         b.togglePlay();
-        QTRY_VERIFY_WITH_TIMEOUT(b.position() > 4.7, 2000);
+        QTRY_VERIFY_WITH_TIMEOUT(b.position() > 7.7, 2000);
         b.pause();
         QVERIFY(b.mic.position() > 7600);
-        b.trim(4, 5);
+        b.trim(7, 8);
         const QString output = QDir::current().absoluteFilePath("tests/out/recovered-tail.mp4");
         QFile::remove(output);
         b.startExport(output, false, 640, 30, 20);
@@ -251,26 +294,76 @@ class Integration : public QObject {
         QCOMPARE(b.position(), 4.49);
         b.discard();
     }
-    void windowModes() {
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-        QCOMPARE(win->minimumSize(), QSize(520, 640));
-        QCOMPARE(win->maximumSize(), QSize(520, 640));
+    void presentation() {
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
+        QSignalSpy exits(&b, &Backend::exitRequested);
+        const QString fixture = QDir::current().absoluteFilePath("tests/out/delayed.mkv");
+        // An opened file goes straight to the editor, over the desktop.
+        auto overlay = openEditor(s, "tests/out/delayed.mkv");
+        QVERIFY(overlay);
+        QVERIFY(s.stage.card().isEmpty());
+        QVERIFY(!s.stage.windowed());
+        auto editor = s.stage.editor();
+        QCOMPARE(overlay->size(), overlay->screen()->size());
+        // W moves the same editor, popover and all, into a floating window, and back.
+        editor->setProperty("popover", "frame");
+        QTest::keyClick(overlay, Qt::Key_W);
+        QTRY_VERIFY(s.stage.editorWindow() && s.stage.editorWindow() != overlay);
+        auto window = s.stage.editorWindow();
+        QVERIFY(s.stage.windowed());
+        QVERIFY(QSettings().value("editor/window").toBool());
+        QCOMPARE(window->minimumSize(), QSize(1000, 680));
+        QCOMPARE(s.stage.editor(), editor);
+        QCOMPARE(editor->window(), window);
+        QCOMPARE(editor->property("popover").toString(), QString("frame"));
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        s.stage.setWindowed(false);
+        QTRY_VERIFY(s.stage.editorWindow() != window);
+        QCOMPARE(s.stage.editor(), editor);
+        // No OmaCap pixels while a countdown or recording runs.
+        for (const QString phase : {"countdown", "recording", "stopping"}) {
+            b.status(phase);
+            QVERIFY(!s.stage.editorWindow()->isVisible());
+        }
         b.status("editor");
-        QTRY_COMPARE(win->minimumSize(), QSize(1000, 680));
-        QVERIFY(win->maximumWidth() > 1280);
-        win->resize(1100, 720);
-        QTRY_COMPARE(win->size(), QSize(1100, 720));
+        QVERIFY(s.stage.editorWindow()->isVisible());
+        // Ending the session closes the editor, and with nothing left open the process may go.
+        QCOMPARE(exits.count(), 0);
+        b.discard();
+        QVERIFY(!s.stage.editorWindow());
+        QTRY_COMPARE(exits.count(), 1);
+        // A new recording shows its card, which never comes up during a recording.
+        b.announceRecording = true;
+        b.loadFile(fixture);
+        QTRY_COMPARE_WITH_TIMEOUT(s.stage.card(), QString("recording"), 10000);
+        QVERIFY(!s.stage.editorWindow());
+        auto card = s.stage.cardWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(card));
+        QCOMPARE(card->size(), QSize(200, 113));
+        b.status("countdown");
+        QVERIFY(!card->isVisible());
+        b.status("editor");
+        QVERIFY(card->isVisible());
+        // E on the card opens the editor in its place.
+        card->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(card));
+        QTest::keyClick(card, Qt::Key_E);
+        QTRY_VERIFY(s.stage.editorWindow());
+        QVERIFY(s.stage.card().isEmpty());
+        b.discard();
+        QTRY_COMPARE(exits.count(), 2);
+        // Closing a recording's card ends its session; the recording stays where it is.
+        b.announceRecording = true;
+        b.loadFile(fixture);
+        QTRY_COMPARE_WITH_TIMEOUT(s.stage.card(), QString("recording"), 10000);
+        QTest::qWait(50);
+        QCOMPARE(exits.count(), 2);
+        s.stage.closeCard();
+        QCOMPARE(b.phase(), QString("idle"));
+        QVERIFY(QFile::exists(fixture));
+        QTRY_COMPARE(exits.count(), 3);
     }
     void mapping() {
         Edit e;
@@ -465,40 +558,22 @@ class Integration : public QObject {
         b.discard();
     }
     void timelineGestures() {
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-        b.loadFile(QDir::current().absoluteFilePath("tests/out/delayed.mkv"));
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
+        auto win = openEditor(s, "tests/out/delayed.mkv");
+        QVERIFY(win);
         QTRY_VERIFY(!b.screenSource().isEmpty());
-        std::function<QQuickItem *(QQuickItem *, const QString &)> find =
-            [&](QQuickItem *item, const QString &name) -> QQuickItem * {
-            if (item->objectName() == name)
-                return item;
-            for (auto child : item->childItems())
-                if (auto match = find(child, name))
-                    return match;
-            return nullptr;
-        };
-        win->requestActivate();
-        QVERIFY(QTest::qWaitForWindowActive(win));
-        auto timeline = find(win->contentItem(), "timeline");
-        auto track = find(win->contentItem(), "recordingTimeline");
-        auto zoomLane = find(win->contentItem(), "zoomLane");
+        auto root = win->contentItem();
+        auto editor = s.stage.editor();
+        auto timeline = find(root, "timeline");
+        auto track = find(root, "recordingTimeline");
+        auto zoomLane = find(root, "zoomLane");
         QVERIFY(timeline);
         QVERIFY(track);
         QVERIFY(zoomLane);
         auto click = [&](QQuickItem *item, double fraction) {
-            QTest::qWait(40); // Let the contextual panel finish its layout before hit testing.
+            QTest::qWait(40); // Let the editor finish its layout before hit testing.
             QTest::mouseClick(
                 win, Qt::LeftButton, Qt::NoModifier,
                 item->mapToScene(QPointF(item->width() * fraction, item->height() / 2)).toPoint());
@@ -508,54 +583,80 @@ class Integration : public QObject {
         QVERIFY(timeline->isEnabled());
         QTRY_VERIFY(b.zoom() > 1.7);
         const auto initialFocus = b.state.zooms[0].x;
-        auto picker = find(win->contentItem(), "zoomFocusPicker");
-        QVERIFY(picker && picker->isVisible());
-        // Selecting a zoom changes the sidebar layout. Hit-test the rendered layout.
+        // A selected zoom is aimed on the preview: its view lit over the whole frame.
+        auto aim = find(root, "zoomAim");
+        QVERIFY(aim && aim->isVisible());
+        QVERIFY(find(root, "zoomButton")->property("selected").toBool());
         QSignalSpy laidOut(win, &QQuickWindow::frameSwapped);
         win->update();
         QVERIFY(laidOut.wait(3000));
+        const auto frame = aim->parentItem()->property("frame").toRectF();
+        const auto at = [&](double fx, double fy) {
+            return aim->mapToScene(QPointF(frame.x() + frame.width() * fx,
+                                           frame.y() + frame.height() * fy))
+                .toPoint();
+        };
+        // Dragging the view aims it live, as one undo step.
         const auto beforeDrag = b.past.size();
-        const auto start = picker->mapToScene(QPointF(picker->width() * .25, picker->height() / 2));
-        const auto end = picker->mapToScene(QPointF(picker->width() * .8, picker->height() / 2));
-        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, start.toPoint());
-        QVERIFY(picker->property("pressed").toBool());
-        QTest::mouseMove(win, end.toPoint(), 40);
-        // Observe the live result while the button is still held.
+        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, at(.5, .5));
+        QVERIFY(aim->property("pressed").toBool());
+        QTest::mouseMove(win, at(.9, .5), 40);
         QTRY_VERIFY_WITH_TIMEOUT(b.state.zooms[0].x > .7, 1000);
         QCOMPARE(b.past.size(), beforeDrag);
-        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, end.toPoint());
+        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, at(.9, .5));
         QCOMPARE(b.past.size(), beforeDrag + 1);
         const auto movedFocus = b.state.zooms[0].x;
         b.undo();
         QCOMPARE(b.state.zooms[0].x, initialFocus);
         b.redo();
         QCOMPARE(b.state.zooms[0].x, movedFocus);
-        // Clicking footage keeps the focus edit and restores normal controls/seeking.
+        // The wheel changes the amount; a run of notches is one undo step.
+        const auto beforeWheel = b.past.size();
+        for (int i = 0; i < 3; ++i) {
+            QWheelEvent notch(at(.5, .5), win->mapToGlobal(at(.5, .5)), {}, {0, 120}, Qt::NoButton,
+                              Qt::NoModifier, Qt::NoScrollPhase, false);
+            QGuiApplication::sendEvent(win, &notch);
+        }
+        QTRY_VERIFY(std::abs(b.state.zooms[0].amount - 2.1) < .001);
+        QTRY_COMPARE_WITH_TIMEOUT(b.past.size(), beforeWheel + 1, 1000);
+        // Undo within a run undoes the run. Its timer then ends nothing: a press held past it
+        // stays one open edit, and redo still restores the run.
+        QWheelEvent notch(at(.5, .5), win->mapToGlobal(at(.5, .5)), {}, {0, 120}, Qt::NoButton,
+                          Qt::NoModifier, Qt::NoScrollPhase, false);
+        QGuiApplication::sendEvent(win, &notch);
+        QVERIFY(std::abs(b.state.zooms[0].amount - 2.2) < .001);
+        QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(b.state.zooms.size(), 1);
+        QVERIFY(std::abs(b.state.zooms[0].amount - 2.1) < .001);
+        const auto view =
+            aim->mapToScene(aim->parentItem()->property("view").toRectF().center()).toPoint();
+        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, view);
+        QTest::qWait(500);
+        QVERIFY(b.grouping);
+        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, view);
+        QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+        QVERIFY(std::abs(b.state.zooms[0].amount - 2.2) < .001);
+        b.undo();
+        // Clicking footage keeps the aim, ends aiming and seeks.
         click(track, .8);
-        QVERIFY(!picker->isVisible());
+        QVERIFY(!aim->isVisible());
         QCOMPARE(timeline->property("selectedZoom").toInt(), -1);
-        auto appearance = find(win->contentItem(), "appearanceControls");
-        auto controls = find(win->contentItem(), "zoomControls");
-        QVERIFY(appearance && controls);
-        QVERIFY(appearance->isVisible());
-        QVERIFY(!controls->isVisible());
         QVERIFY(std::abs(b.position() - .8 * b.duration()) < .02);
         QCOMPARE(b.state.zooms[0].x, movedFocus);
-        auto zoomBodyForFocus = find(win->contentItem(), "zoomDrag0");
-        QVERIFY(zoomBodyForFocus);
-        click(zoomBodyForFocus, .5);
-        QVERIFY(controls->isVisible() && picker->isVisible());
-        QVERIFY(!appearance->isVisible());
-        click(picker, .6);
-        QVERIFY(std::abs(b.state.zooms[0].x - .6) < .02);
-        auto ruler = find(win->contentItem(), "timelineRuler");
+        // Clicking the zoom aims it again; a click outside the view centres it there.
+        click(find(root, "zoomDrag0"), .5);
+        QVERIFY(aim->isVisible());
+        QTest::qWait(40);
+        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(.3, .5));
+        QVERIFY(std::abs(b.state.zooms[0].x - .3) < .02);
+        auto ruler = find(root, "timelineRuler");
         QVERIFY(ruler);
         click(ruler, .15);
         QCOMPARE(timeline->property("selectedZoom").toInt(), -1);
-        QVERIFY(appearance->isVisible());
+        QVERIFY(!aim->isVisible());
         QVERIFY(std::abs(b.position() - .15 * b.duration()) < .02);
         b.seek(0);
-        auto zoomBody = find(win->contentItem(), "zoomDrag0");
+        auto zoomBody = find(root, "zoomDrag0");
         QVERIFY(zoomBody);
         click(zoomBody, .5);
         QTRY_VERIFY(b.zoom() > 1.7);
@@ -577,13 +678,15 @@ class Integration : public QObject {
         QCOMPARE(timeline->property("selection").toString(), QString("clip"));
         b.setValue("cameraCorners", .3);
         QCOMPARE(timeline->property("selection").toString(), QString("clip"));
-        auto dialog = win->findChild<QObject *>("exportDialog");
-        QVERIFY(dialog);
-        QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        // Delete belongs to the export settings while they are open.
+        editor->setProperty("popover", "export");
         QTest::qWait(100);
         QTest::keyClick(win, Qt::Key_Delete);
         QCOMPARE(b.duration(), original);
-        QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+        // Escape closes the popover before it touches the selection.
+        QTest::keyClick(win, Qt::Key_Escape);
+        QCOMPARE(editor->property("popover").toString(), QString());
+        QCOMPARE(timeline->property("selection").toString(), QString("clip"));
         click(track, .8);
         QTest::keyClick(win, Qt::Key_Delete);
         QVERIFY(std::abs(b.duration() - original * .4) < .02);
@@ -600,12 +703,33 @@ class Integration : public QObject {
         QTest::keyClick(win, Qt::Key_Backspace);
         QVERIFY(std::abs(b.duration() - original * .9) < .02);
         b.undo();
+        // S splits at the playhead and Z adds a zoom there.
+        b.seek(original / 2);
+        QTest::keyClick(win, Qt::Key_S);
+        QCOMPARE(b.state.spans.size(), 3);
+        QTest::keyClick(win, Qt::Key_Z);
+        QCOMPARE(b.state.zooms.size(), 1);
+        b.undo();
+        b.undo();
         b.removeRange(0, b.duration());
         QCOMPARE(b.duration(), 0.);
         QVERIFY(!b.playing());
         b.undo();
         QCOMPARE(b.duration(), original);
-        b.discard();
+        // Escape walks back to closing; unexported edits ask first.
+        click(track, .5);
+        QTest::keyClick(win, Qt::Key_Escape);
+        QCOMPARE(timeline->property("selection").toString(), QString());
+        QCOMPARE(editor->property("discarding").toString(), QString());
+        QTest::keyClick(win, Qt::Key_Escape);
+        QCOMPARE(editor->property("discarding").toString(), QString("close"));
+        QTest::keyClick(win, Qt::Key_Escape);
+        QCOMPARE(editor->property("discarding").toString(), QString());
+        QCOMPARE(b.phase(), QString("editor"));
+        QTest::keyClick(win, Qt::Key_Escape);
+        QTest::keyClick(win, Qt::Key_Return);
+        QCOMPARE(b.phase(), QString("idle"));
+        QVERIFY(!s.stage.editorWindow());
     }
     void playbackCuts() {
         Theme t;
@@ -759,35 +883,19 @@ class Integration : public QObject {
         delete scene;
     }
     void transparencyControls() {
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects().value(0));
-        QVERIFY(win);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
         b.newSession();
         b.status("editor");
-        win->resize(1280, 900);
+        QTRY_VERIFY(s.stage.editorWindow());
+        auto win = s.stage.editorWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(win));
         QTest::qWait(100);
-        auto setting = win->findChild<QQuickItem *>("windowOpacitySetting");
+        auto setting = find(win->contentItem(), "windowOpacitySetting");
         QVERIFY(setting);
         auto click = [&](const QString &name) {
-            // Repeater delegates are visual children, not QObject children of the window.
-            std::function<QQuickItem *(QQuickItem *)> find = [&](QQuickItem *item) -> QQuickItem * {
-                if (item->objectName() == name)
-                    return item;
-                for (auto child : item->childItems())
-                    if (auto match = find(child))
-                        return match;
-                return nullptr;
-            };
-            auto button = find(win->contentItem());
+            auto button = find(win->contentItem(), name);
             QVERIFY(button);
             QTest::mouseClick(
                 win, Qt::LeftButton, Qt::NoModifier,
@@ -795,6 +903,8 @@ class Integration : public QObject {
             QTest::qWait(40);
         };
         QCOMPARE(b.state.windowTransparency, QString("off"));
+        // Window transparency lives in the toolbar's glass popover.
+        click("glassButton");
         QVERIFY(!setting->isVisible());
         click("transparencyLight");
         QCOMPARE(b.state.windowTransparency, QString("light"));
@@ -807,6 +917,8 @@ class Integration : public QObject {
             if (child->metaObject()->indexOfProperty("handle") >= 0)
                 slider = child;
         QVERIFY(slider);
+        // The opacity row has only just appeared; hit-test it once it is laid out.
+        QTRY_VERIFY(slider->width() > 100);
         const auto start = slider->mapToScene(QPointF(slider->width() * .8, slider->height() / 2));
         const auto end = slider->mapToScene(QPointF(slider->width() * .4, slider->height() / 2));
         QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, start.toPoint());
@@ -834,6 +946,47 @@ class Integration : public QObject {
         QCOMPARE(b.state.windowTransparency, QString("off"));
         b.discard();
     }
+    // Each format shows its own remembered width and frame rate, which are what it exports.
+    void exportChoices() {
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
+        b.newSession();
+        b.status("editor");
+        QTRY_VERIFY(s.stage.editorWindow());
+        auto win = s.stage.editorWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(win));
+        QTest::qWait(100);
+        auto click = [&](const QString &name) {
+            auto button = find(win->contentItem(), name);
+            QVERIFY(button);
+            QTest::mouseClick(
+                win, Qt::LeftButton, Qt::NoModifier,
+                button->mapToScene(QPointF(button->width() / 2, button->height() / 2)).toPoint());
+            QTest::qWait(40);
+        };
+        const auto chosen = [&](const QString &name) {
+            auto segment = find(win->contentItem(), name);
+            return segment && segment->property("chosen").toBool();
+        };
+        b.remember("export/fpsIndex1", 0);
+        click("exportButton");
+        click("formatMP4");
+        click("rate60");
+        click("formatGIF");
+        QVERIFY(chosen("rate15"));
+        click("rate20");
+        click("formatMP4");
+        QVERIFY(chosen("rate60"));
+        click("formatGIF");
+        QVERIFY(chosen("rate20"));
+        QCOMPARE(b.preference("export/fpsIndex1").toInt(), 2);
+        // The defaults again, for the exports after this.
+        click("formatMP4");
+        click("rate30");
+        b.remember("export/fpsIndex1", 0);
+        b.discard();
+    }
     void cropEditor_data() {
         QTest::addColumn<double>("aspect");
         QTest::newRow("landscape") << 16. / 9;
@@ -841,20 +994,11 @@ class Integration : public QObject {
     }
     void cropEditor() {
         QFETCH(double, aspect);
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-        b.loadFile(QDir::current().absoluteFilePath("tests/out/frames15.mkv"));
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
+        auto win = openEditor(s, "tests/out/frames15.mkv");
+        QVERIFY(win);
         QTRY_VERIFY_WITH_TIMEOUT(!b.seeking && !b.screenSource().isEmpty(), 3000);
         // Exercise the same source-coordinate mapping in both display orientations.
         b.m_aspect = aspect;
@@ -878,16 +1022,14 @@ class Integration : public QObject {
                 item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint());
             return true;
         };
-        win->requestActivate();
-        QVERIFY(QTest::qWaitForWindowActive(win));
         b.togglePlay();
         QTRY_VERIFY(b.playing());
-        QVERIFY(click("Crop"));
+        QVERIFY(click("cropButton"));
         QVERIFY(!b.playing());
-        auto view = win->findChild<QQuickItem *>("cropView");
+        auto view = find(win->contentItem(), "cropView");
         QVERIFY2(view && view->isVisible(), "Crop must open a dedicated full-source editor");
-        auto image = win->findChild<QQuickItem *>("cropImage");
-        auto selection = win->findChild<QQuickItem *>("cropSelection");
+        auto image = find(win->contentItem(), "cropImage");
+        auto selection = find(win->contentItem(), "cropSelection");
         QVERIFY(image && selection);
         QTRY_VERIFY(image->width() > 100 && image->height() > 100);
         QVERIFY(std::abs(image->width() / image->height() - aspect) < .001);
@@ -919,21 +1061,21 @@ class Integration : public QObject {
         QVERIFY(std::abs(cropped.x() - .2) < .01);
         QVERIFY(std::abs(cropped.y() - .2) < .01);
         QVERIFY(std::abs(cropped.width() - .6) < .01);
-        auto composition = win->findChild<QQuickItem *>("composition");
+        auto composition = find(win->contentItem(), "composition");
         QVERIFY(composition);
         QCOMPARE(composition->property("crop").toList(), b.edit()["crop"].toList());
         b.undo();
         QCOMPARE(b.state.crop, full);
         b.redo();
         QCOMPARE(b.state.crop, cropped);
-        QVERIFY(click("Crop"));
+        QVERIFY(click("cropButton"));
         QTRY_VERIFY(view->isVisible());
         QVERIFY(selection->width() < image->width() * .65);
         QVERIFY(drag("cropCorner0", -inset));
         QVERIFY(selection->width() > image->width() * .75); // Expand beyond the old crop.
         QVERIFY(click("Cancel"));
         QCOMPARE(b.state.crop, cropped);
-        QVERIFY(click("Crop"));
+        QVERIFY(click("cropButton"));
         QTRY_VERIFY(view->isVisible());
         QVERIFY(drag("cropSelection",
                      QPoint(qRound(image->width() * .45), qRound(image->height() * .45))));
@@ -946,7 +1088,7 @@ class Integration : public QObject {
         QCOMPARE(b.state.crop, full);
         b.undo();
         QCOMPARE(b.state.crop, cropped);
-        QVERIFY(click("Crop"));
+        QVERIFY(click("cropButton"));
         QTRY_VERIFY(view->isVisible());
         QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier);
         QCOMPARE(b.state.crop, cropped);
@@ -965,18 +1107,9 @@ class Integration : public QObject {
         b.discard();
     }
     void styledPreviewMatchesExport() {
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
         b.newSession();
         b.hasCamera = true;
         b.prepare(QDir::current().absoluteFilePath("tests/out/camera-wide.mkv"), true);
@@ -990,7 +1123,9 @@ class Integration : public QObject {
         b.edited();
         b.seek(0);
         QTRY_VERIFY_WITH_TIMEOUT(!b.seeking && !b.cameraSource().isEmpty(), 3000);
-        auto composition = win->findChild<QQuickItem *>("composition");
+        QVERIFY(s.stage.editorWindow());
+        QVERIFY(QTest::qWaitForWindowExposed(s.stage.editorWindow()));
+        auto composition = find(s.stage.editorWindow()->contentItem(), "composition");
         QVERIFY(composition);
         struct Style {
             QString mode, shape;
@@ -1043,326 +1178,7 @@ class Integration : public QObject {
         }
         b.discard();
     }
-    void stillSize() {
-        Edit e;
-        e.padding = .1;
-        // An auto canvas is the shot plus equal padding on every side.
-        QCOMPARE(e.stillSize({1000, 500}), QSize(1250, 750));
-        e.canvas = "1:1";
-        QCOMPARE(e.stillSize({1000, 500}), QSize(1250, 1250));
-        // A tall shot on a wide canvas keeps its source height.
-        e.canvas = "16:9";
-        const auto tall = e.stillSize({500, 1000});
-        QVERIFY(std::abs(tall.height() - 2 * e.padding * tall.width() - 1000) <= 1);
-        e.canvas = "auto";
-        e.crop = {.25, 0, .5, 1};
-        QCOMPARE(e.stillSize({1000, 500}), QSize(625, 625));
-        e.crop = {0, 0, 1, 1};
-        QCOMPARE(e.stillSize({8000, 4000}), QSize(8192, 4915));
-        QCOMPARE(Edit::fromJson({{"canvas", "21:9"}}).canvas, QString("auto"));
-        QCOMPARE(Edit::fromJson(e.json()).json(), e.json());
-    }
-    void screenshotEditor() {
-        QTemporaryDir dir;
-        QImage shot(900, 600, QImage::Format_RGB32);
-        shot.fill(QColor("#202830"));
-        QPainter(&shot).fillRect(360, 240, 180, 120, QColor("#e04040"));
-        const QString source = dir.path() + "/shot.png";
-        QVERIFY(shot.save(source));
-        // A stand-in wl-copy records what Copy sends, leaving the real clipboard alone.
-        const QString clipboard = dir.path() + "/clipboard.png", slow = dir.path() + "/slow";
-        QFile fake(dir.path() + "/wl-copy");
-        QVERIFY(fake.open(QIODevice::WriteOnly));
-        fake.write(QString("#!/bin/sh\n[ -e '%2' ] && sleep 1\n"
-                           "[ \"$*\" = \"--type image/png\" ] && cat > '%1'\n")
-                       .arg(clipboard, slow)
-                       .toUtf8());
-        fake.close();
-        fake.setPermissions(fake.permissions() | QFileDevice::ExeOwner);
-        const auto path = qgetenv("PATH");
-        qputenv("PATH", dir.path().toUtf8() + ":" + path);
-        auto restorePath = qScopeGuard([&] { qputenv("PATH", path); });
-
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        // Opening the image first starts the window in the editor, as `omacap shot.png` does.
-        b.loadFile(source);
-        QCOMPARE(b.phase(), QString("editor"));
-        QCOMPARE(b.kind(), QString("image"));
-        QCOMPARE(b.sourceSize(), QSize(900, 600));
-        QVERIFY(QFile::exists(b.sessionPath() + "/source.png"));
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-        b.setValue("crop", QVariantList{.1, .1, .8, .8});
-        b.setValue("padding", .08);
-        b.setValue("windowTransparency", "light");
-        auto composition = win->findChild<QQuickItem *>("composition");
-        QVERIFY(composition);
-        for (const QString canvas : {"auto", "1:1"}) {
-            b.setValue("canvas", canvas);
-            QCOMPARE(b.state.canvas, canvas);
-            const QSize size = b.stillSize();
-            QTRY_COMPARE(composition->height(), 1920 / b.canvasAspect());
-            QTest::qWait(100);
-            auto grab = composition->grabToImage(
-                QSize(qRound(composition->width()), qRound(composition->height())));
-            QVERIFY(grab);
-            QSignalSpy ready(grab.data(), &QQuickItemGrabResult::ready);
-            QVERIFY(ready.wait(5000));
-            const auto preview = grab->image();
-            b.outputImage(true, true);
-            QCOMPARE(b.phase(), QString("exporting"));
-            QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
-            QVERIFY2(b.message().startsWith("Copied and saved omacap-"), qPrintable(b.message()));
-            QVERIFY(!b.dirty());
-            QCOMPARE(QFileInfo(b.lastExport()).absolutePath(),
-                     QStandardPaths::writableLocation(QStandardPaths::PicturesLocation) +
-                         "/Screenshots");
-            const QImage saved(b.lastExport());
-            QCOMPARE(saved.size(), size);
-            QCOMPARE(QImage(clipboard), saved);
-            QCOMPARE(saved.pixelColor(2, 2), QColor("#223344"));
-            const QColor red = saved.pixelColor(size.width() / 2, size.height() / 2);
-            QVERIFY2(red.red() > 200 && red.green() < 80, qPrintable(red.name()));
-            const auto exported =
-                saved.scaled(preview.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-            double error = 0;
-            for (int y = 0; y < preview.height(); y += 4)
-                for (int x = 0; x < preview.width(); x += 4) {
-                    const auto p = preview.pixelColor(x, y), e = exported.pixelColor(x, y);
-                    error += std::abs(p.red() - e.red()) + std::abs(p.green() - e.green()) +
-                             std::abs(p.blue() - e.blue());
-                }
-            error /= preview.width() * preview.height() * 3. / 16;
-            qInfo() << "STILL_PREVIEW_EXPORT" << canvas << "mean_channel_error=" << error;
-            QVERIFY2(error < 5, qPrintable(QString::number(error)));
-            QFile::remove(b.lastExport());
-            if (canvas == "auto") {
-                QTest::qWait(100);
-                win->grabWindow().save("tests/out/preview-screenshot-editor.png");
-            }
-        }
-        // Save and Copy are independent: an unusable screenshot folder still copies.
-        qputenv("OMARCHY_SCREENSHOT_DIR", (source + "/folder").toUtf8());
-        auto restoreFolder = qScopeGuard([] { qunsetenv("OMARCHY_SCREENSHOT_DIR"); });
-        QFile::remove(clipboard);
-        b.setValue("padding", .1);
-        b.outputImage(true, true);
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
-        QVERIFY2(b.message().startsWith("Copied to the clipboard. Could not save"),
-                 qPrintable(b.message()));
-        QVERIFY(QFile::exists(clipboard));
-        QVERIFY(!b.dirty());
-        // A slow clipboard doesn't hold up the editor while it finishes.
-        QVERIFY(QFile(slow).open(QIODevice::WriteOnly));
-        QElapsedTimer beat;
-        qint64 longest = 0;
-        QTimer heartbeat;
-        heartbeat.setInterval(10);
-        connect(&heartbeat, &QTimer::timeout, [&] { longest = std::max(longest, beat.restart()); });
-        beat.start();
-        heartbeat.start();
-        b.outputImage(true, false);
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
-        heartbeat.stop();
-        QCOMPARE(b.message(), QString("Copied to the clipboard."));
-        QVERIFY2(longest < 500, qPrintable(QString::number(longest)));
-        b.setValue("padding", .12);
-        QVERIFY(b.dirty());
-        b.discard();
-        QCOMPARE(b.kind(), QString("video"));
-        QVERIFY(QFile::exists(source));
-    }
-    void tallScreenshot() {
-        QTemporaryDir dir;
-        QImage shot(160, 4000, QImage::Format_RGB32);
-        shot.fill(QColor("#336699"));
-        QVERIFY(shot.save(dir.path() + "/tall.png"));
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        b.loadFile(dir.path() + "/tall.png");
-        QCOMPARE(b.kind(), QString("image"));
-        // Earlier tests leave a remembered canvas; a tall shot needs auto.
-        b.setValue("canvas", "auto");
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-        // The preview stays within 1920 px however tall the shot, and renders.
-        auto composition = win->findChild<QQuickItem *>("composition");
-        QVERIFY(composition);
-        QTRY_COMPARE(composition->height(), 1920.);
-        QVERIFY(composition->width() < 100);
-        QTest::qWait(200);
-        b.outputImage(false, true);
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
-        QVERIFY(b.stillSize().height() > 4000);
-        QCOMPARE(QImage(b.lastExport()).size(), b.stillSize());
-        QFile::remove(b.lastExport());
-        b.discard();
-    }
-    void screenshotCapture() {
-        QTemporaryDir dir;
-        QImage shot(300, 200, QImage::Format_RGB32);
-        shot.fill(QColor("#336699"));
-        QVERIFY(shot.save(dir.path() + "/shot.png"));
-        // Stand-ins for Omarchy's picker and grim. The picker starts a "freeze" that must
-        // be ended afterwards. Marker files make it cancel, fail, hang, garble its output,
-        // or report someone else's PID.
-        const auto tool = [&](const QString &name, const QString &body) {
-            QFile f(dir.path() + "/" + name);
-            QVERIFY(f.open(QIODevice::WriteOnly));
-            f.write(("#!/bin/sh\n" + body).toUtf8());
-            f.close();
-            f.setPermissions(f.permissions() | QFileDevice::ExeOwner);
-        };
-        const QString d = dir.path();
-        tool("omarchy-capture-region",
-             QString("echo \"$@\" > '%1/picker-args'\n"
-                     "sleep 30 & echo $! > '%1/freeze'\n"
-                     "if [ -e '%1/liar' ]; then cat '%1/liar'; else cat '%1/freeze'; fi\n"
-                     "[ -e '%1/hang' ] && wait\n"
-                     "[ -e '%1/cancel' ] && exit 1\n"
-                     "[ -e '%1/fail' ] && { echo boom >&2; exit 2; }\n"
-                     "[ -e '%1/garbled' ] && { echo 'not a region'; exit 0; }\n"
-                     "echo '10,20 300x200'\n")
-                 .arg(d));
-        const auto mark = [&](const QString &name, bool on) {
-            QFile f(d + "/" + name);
-            QVERIFY(on ? f.open(QIODevice::WriteOnly) : (!f.exists() || f.remove()));
-        };
-        tool("grim", QString("echo \"$@\" > '%1/grim-args'\ncp '%1/shot.png' \"$3\"\n").arg(d));
-        const auto path = qgetenv("PATH");
-        qputenv("PATH", d.toUtf8() + ":" + path);
-        auto restorePath = qScopeGuard([&] { qputenv("PATH", path); });
-        // An orphaned freeze may linger as a zombie in containers without a reaping init.
-        const auto freezeEnded = [&] {
-            QFile pid(d + "/freeze");
-            if (!pid.open(QIODevice::ReadOnly))
-                return false;
-            QFile stat("/proc/" + pid.readAll().trimmed() + "/stat");
-            return !stat.open(QIODevice::ReadOnly) || stat.readAll().contains(") Z ");
-        };
-
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-
-        b.takeScreenshot();
-        QCOMPARE(b.phase(), QString("capturing"));
-        QVERIFY(!win->isVisible());
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 5000);
-        QVERIFY(win->isVisible());
-        QCOMPARE(b.kind(), QString("image"));
-        QCOMPARE(b.sourceSize(), QSize(300, 200));
-        QVERIFY(b.dirty());
-        QVERIFY(b.original().isEmpty());
-        auto read = [&](const QString &name) {
-            QFile f(d + "/" + name);
-            return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()).trimmed()
-                                               : QString();
-        };
-        QCOMPARE(read("picker-args"), QString("smart --keep-freeze"));
-        QCOMPARE(read("grim-args"), "-g 10,20 300x200 " + b.sessionPath() + "/source.png");
-        QTRY_VERIFY(freezeEnded());
-        b.discard();
-
-        // A cancelled pick returns to the start window and still ends the freeze.
-        mark("cancel", true);
-        QFile::remove(d + "/freeze");
-        b.takeScreenshot();
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recorder"), 5000);
-        QVERIFY(win->isVisible());
-        QVERIFY(b.sessionPath().isEmpty());
-        QVERIFY(b.message().isEmpty());
-        QTRY_VERIFY(freezeEnded());
-        mark("cancel", false);
-
-        // Only the picker's own process group is signalled, never a PID it reports.
-        QProcess bystander;
-        bystander.start("sleep", {"30"});
-        QVERIFY(bystander.waitForStarted());
-        auto stopBystander = qScopeGuard([&] {
-            bystander.kill();
-            bystander.waitForFinished();
-        });
-        QFile liar(d + "/liar");
-        QVERIFY(liar.open(QIODevice::WriteOnly));
-        liar.write(QByteArray::number(bystander.processId()) + "\n");
-        liar.close();
-        b.takeScreenshot();
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 5000);
-        QTRY_VERIFY(freezeEnded());
-        QCOMPARE(bystander.state(), QProcess::Running);
-        b.discard();
-        mark("liar", false);
-
-        // Picker failures are reported rather than passed off as a cancel.
-        for (const QString failure : {"fail", "garbled"}) {
-            mark(failure, true);
-            b.takeScreenshot();
-            QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recorder"), 5000);
-            QVERIFY2(b.message().startsWith("The region picker failed."), qPrintable(b.message()));
-            QVERIFY(failure != "fail" || b.message().contains("boom"));
-            QTRY_VERIFY(freezeEnded());
-            mark(failure, false);
-        }
-
-        // Quitting mid-pick ends the freeze as well.
-        mark("hang", true);
-        QFile::remove(d + "/freeze");
-        {
-            Frames f;
-            Backend quitting(&theme, &f);
-            quitting.takeScreenshot();
-            QTRY_VERIFY(QFile(d + "/freeze").size() > 0);
-        }
-        QTRY_VERIFY(freezeEnded());
-        mark("hang", false);
-
-        // A request from a second `omacap --screenshot` closes a video's export dialog.
-        b.loadFile(QDir::current().absoluteFilePath("tests/out/delayed.mkv"));
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
-        auto exportDialog = win->findChild<QObject *>("exportDialog");
-        QVERIFY(exportDialog);
-        QMetaObject::invokeMethod(exportDialog, "open");
-        QTRY_VERIFY(exportDialog->property("opened").toBool());
-        emit b.screenshotRequested();
-        QTRY_VERIFY(!exportDialog->property("opened").toBool());
-        QTRY_VERIFY(win->findChild<QObject *>("discardDialog")->property("opened").toBool());
-        QMetaObject::invokeMethod(win->findChild<QObject *>("discardDialog"), "close");
-        b.discard();
-
-        // Without the picker, the start window says what is missing.
-        qputenv("PATH", "/nonexistent");
-        b.takeScreenshot();
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recorder"), 5000);
-        QVERIFY2(b.message().contains("omarchy-capture-region"), qPrintable(b.message()));
-    }
-    void animatedImages() {
+    void animatedGif() {
         QTemporaryDir dir;
         const auto make = [&](const QString &name) {
             QProcess ffmpeg;
@@ -1371,360 +1187,14 @@ class Integration : public QObject {
                           "1", "-loop", "0", dir.path() + "/" + name});
             return ffmpeg.waitForFinished(15000) && ffmpeg.exitCode() == 0;
         };
-        QVERIFY(make("loop.gif") && make("loop.webp"));
+        QVERIFY(make("loop.gif"));
         Theme t;
         Frames f;
         Backend b(&t, &f);
         // GIFs play on the timeline.
         b.loadFile(dir.path() + "/loop.gif");
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
-        QCOMPARE(b.kind(), QString("video"));
         QVERIFY(b.duration() > .5);
-        b.discard();
-        // FFmpeg can't open an animated WebP as a recording, so it opens as a still.
-        b.loadFile(dir.path() + "/loop.webp");
-        QCOMPARE(b.phase(), QString("editor"));
-        QCOMPARE(b.kind(), QString("image"));
-        QCOMPARE(b.sourceSize(), QSize(160, 90));
-        b.discard();
-    }
-    void annotationModel() {
-        const auto parse = [](QJsonObject o) { return Annotation::fromJson(o); };
-        QCOMPARE(parse({{"kind", "box"}, {"points", QJsonArray{QJsonArray{1, 2}}}}).kind,
-                 QString());
-        QCOMPARE(
-            parse({{"kind", "star"}, {"points", QJsonArray{QJsonArray{1, 2}, QJsonArray{3, 4}}}})
-                .kind,
-            QString());
-        QCOMPARE(
-            parse({{"kind", "text"}, {"points", QJsonArray{QJsonArray{1, 2}}}, {"text", " "}}).kind,
-            QString());
-        const auto box = parse({{"kind", "box"},
-                                {"points", QJsonArray{QJsonArray{1, 2}, QJsonArray{3, 4}}},
-                                {"color", "not a colour"},
-                                {"size", 1e9},
-                                {"fill", "glitter"}});
-        QCOMPARE(box.kind, QString("box"));
-        QCOMPARE(box.color, QString("#ff375f"));
-        QCOMPARE(box.size, 1000.);
-        QCOMPARE(box.fill, QString("outline"));
-        QCOMPARE(
-            parse({{"kind", "step"}, {"points", QJsonArray{QJsonArray{std::nan(""), 2}}}}).kind,
-            QString());
-        Edit e;
-        e.annotations = {box, parse({{"kind", "step"}, {"points", QJsonArray{QJsonArray{5, 6}}}})};
-        QCOMPARE(Edit::fromJson(e.json()).json(), e.json());
-    }
-    void annotationEditing() {
-        // Script errors in the drawing code would otherwise only be logged.
-        QTest::failOnWarning(QRegularExpression("annotations\\.js|Annotation"));
-        QTemporaryDir dir;
-        QImage shot(900, 600, QImage::Format_RGB32);
-        shot.fill(QColor("#202830"));
-        QVERIFY(shot.save(dir.path() + "/shot.png"));
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        b.loadFile(dir.path() + "/shot.png");
-        b.setValue("canvas", "auto");
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-        win->requestActivate();
-        QVERIFY(QTest::qWaitForWindowActive(win));
-        auto editor = win->findChild<QQuickItem *>("annotationEditor");
-        QVERIFY(editor);
-        QTRY_VERIFY(editor->property("k").toDouble() > 0);
-        const double k = editor->property("k").toDouble();
-        // Source pixels to window coordinates, through the preview's scale.
-        const auto at = [&](double x, double y) {
-            return editor
-                ->mapToScene({editor->property("originX").toDouble() + x * k,
-                              editor->property("originY").toDouble() + y * k})
-                .toPoint();
-        };
-        const auto drag = [&](QPoint from, QPoint to) {
-            QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, from);
-            QTest::mouseMove(win, (from + to) / 2, 20);
-            QTest::mouseMove(win, to, 20);
-            QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, to, 20);
-        };
-        const auto near = [&](QPointF actual, QPointF expected) {
-            return std::abs(actual.x() - expected.x()) <= 2 / k &&
-                   std::abs(actual.y() - expected.y()) <= 2 / k;
-        };
-
-        // A box lands where it was drawn, and the tool returns to Select.
-        QTest::keyClick(win, Qt::Key_R);
-        QCOMPARE(editor->property("tool").toString(), QString("box"));
-        drag(at(100, 100), at(300, 200));
-        QTRY_COMPARE(b.state.annotations.size(), 1);
-        auto box = b.state.annotations[0];
-        QCOMPARE(box.kind, QString("box"));
-        QVERIFY(near(box.points[0], {100, 100}) && near(box.points[1], {300, 200}));
-        QCOMPARE(editor->property("tool").toString(), QString("select"));
-        QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier);
-        QCOMPARE(b.state.annotations.size(), 0);
-        QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
-        QCOMPARE(b.state.annotations.size(), 1);
-
-        // Dragging it moves it as one undo step; Delete removes it.
-        drag(at(200, 100), at(260, 140));
-        QTRY_VERIFY(near(b.state.annotations[0].points[0], {160, 140}));
-        QCOMPARE(editor->property("selectedId").toString(), box.id);
-        QTest::keyClick(win, Qt::Key_Z, Qt::ControlModifier);
-        QVERIFY(near(b.state.annotations[0].points[0], {100, 100}));
-        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(200, 100));
-        QTest::keyClick(win, Qt::Key_5);
-        QCOMPARE(b.state.annotations[0].color, QString("#0a84ff"));
-        QTest::keyClick(win, Qt::Key_Delete);
-        QCOMPARE(b.state.annotations.size(), 0);
-
-        // Text is typed in place and committed with Enter.
-        QTest::keyClick(win, Qt::Key_T);
-        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(400, 300));
-        QTRY_VERIFY(editor->property("typing").isValid() && !editor->property("typing").isNull());
-        for (char c : QByteArray("Ship it"))
-            QTest::keyClick(win, c);
-        QTest::keyClick(win, Qt::Key_Return);
-        QTRY_COMPARE(b.state.annotations.size(), 1);
-        QCOMPARE(b.state.annotations[0].kind, QString("text"));
-        QCOMPARE(b.state.annotations[0].text, QString("Ship it"));
-        QVERIFY(near(b.state.annotations[0].points[0], {400, 300}));
-
-        // Steps are placed with a click.
-        for (int i = 0; i < 2; i++) {
-            QTest::keyClick(win, Qt::Key_C);
-            QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(100 + i * 100, 500));
-        }
-        QTRY_COMPARE(b.state.annotations.size(), 3);
-        QCOMPARE(b.state.annotations[2].kind, QString("step"));
-
-        // The pen keeps the pointer's path.
-        QTest::keyClick(win, Qt::Key_F);
-        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, at(500, 100));
-        for (int i = 1; i <= 10; i++)
-            QTest::mouseMove(win, at(500 + i * 20, 100 + (i % 2) * 30), 10);
-        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, at(700, 100), 10);
-        QTRY_COMPARE(b.state.annotations.size(), 4);
-        QCOMPARE(b.state.annotations[3].kind, QString("pen"));
-        QVERIFY(b.state.annotations[3].points.size() > 5);
-
-        // A stroke stops sampling at the model's point limit rather than being rejected.
-        editor->setProperty("maxPoints", 20);
-        QTest::keyClick(win, Qt::Key_F);
-        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, at(500, 400));
-        for (int i = 1; i <= 40; i++)
-            QTest::mouseMove(win, at(500 + i * 8, 400 + (i % 2) * 20), 5);
-        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, at(820, 400), 5);
-        QTRY_COMPARE(b.state.annotations.size(), 5);
-        QCOMPARE(b.state.annotations[4].points.size(), 20);
-        editor->setProperty("maxPoints", 5000);
-
-        // Escape cancels a move for good, even if the pointer keeps going.
-        QTest::keyClick(win, Qt::Key_R);
-        drag(at(100, 250), at(250, 350));
-        QTRY_COMPARE(b.state.annotations.size(), 6);
-        const auto before = b.state.annotations[5].points;
-        QTest::mousePress(win, Qt::LeftButton, Qt::NoModifier, at(175, 250));
-        QTest::mouseMove(win, at(200, 270), 20);
-        QTest::keyClick(win, Qt::Key_Escape);
-        QTest::mouseMove(win, at(260, 300), 20);
-        QTest::mouseRelease(win, Qt::LeftButton, Qt::NoModifier, at(260, 300), 20);
-        QCOMPARE(b.state.annotations[5].points, before);
-
-        // The Undo button mid-typing commits the edit, then undoes it.
-        QTest::mouseDClick(win, Qt::LeftButton, Qt::NoModifier, at(420, 315));
-        QTRY_VERIFY(!editor->property("typing").isNull());
-        QTest::keyClick(win, '!');
-        const auto click = [&](const char *name) {
-            auto button = win->findChild<QQuickItem *>(name);
-            QVERIFY(button);
-            QTest::mouseClick(
-                win, Qt::LeftButton, Qt::NoModifier,
-                button->mapToScene({button->width() / 2, button->height() / 2}).toPoint());
-        };
-        click("undo");
-        QCOMPARE(b.state.annotations[0].text, QString("Ship it"));
-        QVERIFY(editor->property("typing").isNull());
-
-        // Save mid-typing includes the text, so nothing unexported is left behind.
-        QTest::keyClick(win, Qt::Key_T);
-        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(600, 300));
-        QTRY_VERIFY(!editor->property("typing").isNull());
-        for (char c : QByteArray("Saved"))
-            QTest::keyClick(win, c);
-        click("saveImage");
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
-        QCOMPARE(b.state.annotations.last().text, QString("Saved"));
-        QVERIFY(!b.dirty());
-        QFile::remove(b.lastExport());
-
-        // Text is drawn as typed, never as markup.
-        QTest::keyClick(win, Qt::Key_T);
-        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier, at(100, 50));
-        QTRY_VERIFY(!editor->property("typing").isNull());
-        for (char c : QByteArray("<b>x</b>"))
-            QTest::keyClick(win, c);
-        // A screenshot request mid-typing keeps the text, so the discard prompt sees it. No
-        // tools are on PATH for the rest of the test, so a regression can't start the real
-        // picker on the desktop.
-        const auto path = qgetenv("PATH");
-        qputenv("PATH", "/nonexistent");
-        auto restorePath = qScopeGuard([&] { qputenv("PATH", path); });
-        emit b.screenshotRequested();
-        QTRY_VERIFY(win->findChild<QObject *>("discardDialog")->property("opened").toBool());
-        QCOMPARE(b.phase(), QString("editor"));
-        QCOMPARE(b.state.annotations.last().text, QString("<b>x</b>"));
-        QMetaObject::invokeMethod(win->findChild<QObject *>("discardDialog"), "close");
-        // Repeater delegates are visual children, so walk the item tree.
-        std::function<QQuickItem *(QQuickItem *)> find = [&](QQuickItem *item) -> QQuickItem * {
-            if (item->property("text").toString() == "<b>x</b>")
-                return item;
-            for (auto child : item->childItems())
-                if (auto found = find(child))
-                    return found;
-            return nullptr;
-        };
-        auto drawn = find(win->findChild<QQuickItem *>("composition"));
-        QVERIFY(drawn);
-        QCOMPARE(drawn->property("textFormat").toInt(), int(Qt::PlainText));
-        b.discard();
-    }
-    void annotationExport() {
-        QTest::failOnWarning(QRegularExpression("annotations\\.js|Annotation"));
-        QTemporaryDir dir;
-        QImage shot(900, 600, QImage::Format_RGB32);
-        shot.fill(QColor("#202830"));
-        QPainter(&shot).fillRect(360, 240, 180, 120, QColor("#e04040"));
-        QVERIFY(shot.save(dir.path() + "/shot.png"));
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        b.loadFile(dir.path() + "/shot.png");
-        b.setValue("canvas", "auto");
-        b.setValue("padding", .08);
-        b.setValue("windowTransparency", "custom");
-        b.setValue("windowOpacity", .5);
-        const auto points = [](std::initializer_list<QPointF> ps) {
-            QVariantList list;
-            for (auto p : ps)
-                list << QVariant(QVariantList{p.x(), p.y()});
-            return list;
-        };
-        QVERIFY(!b.addAnnotation({{"kind", "redact"}, {"points", points({{350, 230}, {550, 370}})}})
-                     .isEmpty());
-        QVERIFY(!b.addAnnotation({{"kind", "box"},
-                                  {"points", points({{100, 100}, {300, 200}})},
-                                  {"color", "#30d158"},
-                                  {"size", 8}})
-                     .isEmpty());
-        b.addAnnotation({{"kind", "arrow"},
-                         {"points", points({{600, 100}, {800, 250}})},
-                         {"color", "#ff375f"},
-                         {"size", 6}});
-        b.addAnnotation({{"kind", "text"},
-                         {"points", points({{560, 450}})},
-                         {"text", "Hello"},
-                         {"size", 30},
-                         {"color", "#0a84ff"}});
-        b.addAnnotation({{"kind", "step"}, {"points", points({{80, 500}})}, {"size", 40}});
-        b.addAnnotation(
-            {{"kind", "ellipse"}, {"points", points({{620, 300}, {760, 380}})}, {"fill", "tint"}});
-        b.addAnnotation({{"kind", "line"}, {"points", points({{100, 400}, {300, 420}})}});
-        b.addAnnotation({{"kind", "marker"},
-                         {"points", points({{100, 560}, {200, 565}, {300, 560}})},
-                         {"color", "#ffd60a"},
-                         {"size", 18}});
-        QCOMPARE(b.state.annotations.size(), 8);
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-        auto composition = win->findChild<QQuickItem *>("composition");
-        QVERIFY(composition);
-        QTest::qWait(200);
-        auto grab = composition->grabToImage(
-            QSize(qRound(composition->width()), qRound(composition->height())));
-        QVERIFY(grab);
-        QSignalSpy ready(grab.data(), &QQuickItemGrabResult::ready);
-        QVERIFY(ready.wait(5000));
-        const auto preview = grab->image();
-        // The editor with the box selected, for the CI test evidence.
-        win->findChild<QQuickItem *>("annotationEditor")
-            ->setProperty("selectedId", b.state.annotations[1].id);
-        QTest::qWait(100);
-        win->grabWindow().save("tests/out/preview-annotation-editor.png");
-        b.outputImage(false, true);
-        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 15000);
-        const QImage saved(b.lastExport());
-        QCOMPARE(saved.size(), b.stillSize());
-        // Where a source pixel lands in the saved PNG, from Composition's layout.
-        const double w = saved.width(), h = saved.height(), pad = .08 * w;
-        const double frameW = std::min(w - 2 * pad, (h - 2 * pad) * 1.5), scale = frameW / 900;
-        const auto out = [&](double x, double y) {
-            return saved.pixelColor(qRound((w - frameW) / 2 + x * scale),
-                                    qRound((h - frameW / 1.5) / 2 + y * scale));
-        };
-        // Annotations stay opaque over a half-transparent window.
-        QCOMPARE(out(450, 300), QColor("#000000"));
-        const auto green = out(200, 100);
-        QVERIFY2(std::abs(green.red() - 0x30) <= 3 && std::abs(green.green() - 0xd1) <= 3 &&
-                     std::abs(green.blue() - 0x58) <= 3,
-                 qPrintable(green.name()));
-        const auto pill = out(590, 452);
-        QVERIFY2(pill.blue() > 200 && pill.red() < 40, qPrintable(pill.name()));
-        const auto exported =
-            saved.scaled(preview.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-        double error = 0;
-        for (int y = 0; y < preview.height(); y += 4)
-            for (int x = 0; x < preview.width(); x += 4) {
-                const auto p = preview.pixelColor(x, y), e = exported.pixelColor(x, y);
-                error += std::abs(p.red() - e.red()) + std::abs(p.green() - e.green()) +
-                         std::abs(p.blue() - e.blue());
-            }
-        error /= preview.width() * preview.height() * 3. / 16;
-        qInfo() << "ANNOTATED_PREVIEW_EXPORT mean_channel_error=" << error;
-        saved.save("tests/out/export-annotated.png");
-        QVERIFY2(error < 5, qPrintable(QString::number(error)));
-        QFile::remove(b.lastExport());
-        b.discard();
-    }
-    void screenshotRecovery() {
-        QTemporaryDir dir;
-        QImage shot(640, 400, QImage::Format_RGB32);
-        shot.fill(QColor("#336699"));
-        QVERIFY(shot.save(dir.path() + "/shot.png"));
-        Theme t;
-        Frames f;
-        {
-            Backend b(&t, &f);
-            b.loadFile(dir.path() + "/shot.png");
-            QCOMPARE(b.kind(), QString("image"));
-            b.setValue("canvas", "4:3");
-        }
-        // The original can move; the session keeps its own copy.
-        QVERIFY(QFile::remove(dir.path() + "/shot.png"));
-        Backend b(&t, &f);
-        QVERIFY(b.recoverable());
-        b.recover();
-        QCOMPARE(b.phase(), QString("editor"));
-        QCOMPARE(b.kind(), QString("image"));
-        QCOMPARE(b.state.canvas, QString("4:3"));
-        QCOMPARE(b.sourceSize(), QSize(640, 400));
-        QVERIFY(!b.screenSource().isEmpty());
-        QVERIFY(b.dirty());
         b.discard();
     }
     void theme() {
@@ -1733,16 +1203,19 @@ class Integration : public QObject {
         auto write = [&](QString accent) {
             QFile f(dir.path() + "/theme/colors.toml");
             QVERIFY(f.open(QIODevice::WriteOnly));
-            f.write(QString("accent = \"%1\"\nbackground = \"#101010\"\n").arg(accent).toUtf8());
+            f.write(QString("accent = \"%1\"\nbackground = \"#101010\"\nforeground = \"#eeeeee\"\n")
+                        .arg(accent)
+                        .toUtf8());
         };
         write("#123456");
         const auto previousRoot = qgetenv("OMACAP_THEME_ROOT");
         auto restoreTheme = qScopeGuard([&] { qputenv("OMACAP_THEME_ROOT", previousRoot); });
         qputenv("OMACAP_THEME_ROOT", dir.path().toUtf8());
+        // Omasnap's chrome theme needs both a background and a foreground.
         Theme t;
-        QCOMPARE(t.colors()["accent"].toString(), QString("#123456"));
+        QTRY_COMPARE(t.accent(), QColor("#123456"));
         write("#abcdef");
-        QTRY_COMPARE_WITH_TIMEOUT(t.colors()["accent"].toString(), QString("#abcdef"), 2000);
+        QTRY_COMPARE_WITH_TIMEOUT(t.accent(), QColor("#abcdef"), 2000);
     }
     void delayedTracks() {
         Theme t;
@@ -1752,7 +1225,6 @@ class Integration : public QObject {
         b.hasMic = true;
         b.hasCamera = true;
         b.hasDesktop = false;
-        b.lead = .5;
         b.prepare(QDir::current().absoluteFilePath("tests/out/delayed-origin.mkv"), true);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
         QVERIFY(std::abs(b.cameraStart - .4) < .002);
@@ -1796,6 +1268,29 @@ class Integration : public QObject {
             QVERIFY(!QDir(saved).exists());
         }
     }
+    // Unsaved edits are those since the last export, however undo and redo reach them.
+    void undoAfterExport() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        b.loadFile(QDir::current().absoluteFilePath("tests/out/delayed.mkv"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QVERIFY(!b.dirty());
+        b.setValue("padding", .12);
+        QVERIFY(b.dirty());
+        const QString out = QDir::current().absoluteFilePath("tests/out/undo-export.mp4");
+        QFile::remove(out);
+        b.startExport(out, false, 640, 30, 28);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 30000);
+        QVERIFY2(QFileInfo(out).size() > 1000, qPrintable(b.message()));
+        QVERIFY(!b.dirty());
+        b.undo();
+        QVERIFY(b.past.isEmpty());
+        QVERIFY(b.dirty());
+        b.redo();
+        QVERIFY(!b.dirty());
+        b.discard();
+    }
     void interruptedCapture_data() {
         QTest::addColumn<bool>("legacy");
         QTest::newRow("saved-to-videos") << false;
@@ -1833,6 +1328,582 @@ class Integration : public QObject {
         QVERIFY(!QDir(saved).exists());
         QVERIFY(QFile::exists(fixture));
     }
+    void recordingLayout_data() {
+        QTest::addColumn<QRect>("area");
+        QTest::addColumn<double>("scale");
+        QTest::addColumn<bool>("otherMonitor");
+        QTest::addColumn<QString>("hudMonitor");
+        QTest::newRow("middle") << QRect(300, 200, 640, 360) << 1. << false << "DP-1";
+        QTest::newRow("fractional") << QRect(301, 199, 641, 359) << 1.25 << false << "DP-1";
+        QTest::newRow("bottom edge") << QRect(300, 600, 640, 120) << 1.6 << false << "DP-1";
+        QTest::newRow("whole monitor") << QRect(0, 0, 1280, 720) << 1. << true << "DP-2";
+        QTest::newRow("whole, alone") << QRect(0, 0, 1280, 720) << 2. << false << "";
+    }
+    // Chrome shown while recording never touches the encoded area, and stays on screen.
+    void recordingLayout() {
+        QFETCH(QRect, area);
+        QFETCH(double, scale);
+        QFETCH(bool, otherMonitor);
+        QFETCH(QString, hudMonitor);
+        RecordRequest request;
+        request.monitor = "DP-1";
+        request.monitorLogical = QRect(1920, 0, 1280, 720);
+        request.scale = scale;
+        request.area = area;
+        QList<Monitor> monitors{{"DP-1", request.monitorLogical}};
+        if (otherMonitor)
+            monitors.append({"DP-2", QRect(0, 0, 1920, 1080)});
+        const auto layout = layoutRecording(request, monitors, QSize(124, 40), QSize(300, 150));
+        const QRect e = layout.encoded;
+        QCOMPARE(e.width() % 2, 0);
+        QCOMPARE(e.height() % 2, 0);
+        QVERIFY(QRect(QPoint(), request.nativeSize()).contains(e));
+        // Every encoded pixel's logical footprint lies inside the guard.
+        const QRectF footprint(request.monitorLogical.topLeft() + QPointF(e.topLeft()) / scale,
+                               QSizeF(e.size()) / scale);
+        QVERIFY(QRectF(layout.guard).contains(footprint));
+        for (const QRect &strip : layout.outline) {
+            QVERIFY(!strip.intersects(layout.guard));
+            QVERIFY(request.monitorLogical.contains(strip));
+        }
+        QCOMPARE(layout.hudMonitor, hudMonitor);
+        QCOMPARE(layout.hud.has_value(), !hudMonitor.isEmpty());
+        if (layout.hud) {
+            QVERIFY(!layout.hud->intersects(layout.guard));
+            const auto monitor = std::ranges::find(monitors, hudMonitor, &Monitor::name);
+            QVERIFY(monitor->logical.contains(*layout.hud));
+        }
+        QVERIFY(request.monitorLogical.contains(layout.countdown));
+    }
+    void recordHotkey() {
+        const auto binds = [](QJsonArray list) { return QJsonDocument(list).toJson(); };
+        QCOMPARE(::recordHotkey(binds({QJsonObject{{"modmask", 64}, {"key", "r"},
+                                                   {"dispatcher", "exec"},
+                                                   {"arg", "omacap --screenshot"}},
+                                       QJsonObject{{"modmask", 72}, {"key", "r"},
+                                                   {"dispatcher", "exec"},
+                                                   {"arg", "uwsm app -- omacap --record"},
+                                                   {"submap", ""}}})),
+                 QString("Super + Alt + R"));
+        // Lua binds only describe themselves.
+        QCOMPARE(::recordHotkey(binds({QJsonObject{{"modmask", 65}, {"key", "PRINT"},
+                                                   {"dispatcher", "__lua"}, {"arg", "272"},
+                                                   {"description", "Record with OmaCap"}}})),
+                 QString("Super + Shift + Print"));
+        QCOMPARE(::recordHotkey(binds({QJsonObject{{"modmask", 8}, {"key", "PRINT"},
+                                                   {"dispatcher", "__lua"},
+                                                   {"description", "Screenrecording"}}})),
+                 QString());
+    }
+    // A request is recorded only on the monitor as it was picked on.
+    void requestedDisplay() {
+        RecordRequest request;
+        request.monitor = "DP-1";
+        request.monitorLogical = QRect(1920, 0, 1280, 800);
+        request.scale = 2;
+        request.area = QRect(0, 0, 100, 100);
+        QJsonObject monitor{{"name", "DP-1"},   {"width", 2560},       {"height", 1600},
+                            {"scale", 2},       {"transform", 0},      {"x", 1920},
+                            {"y", 0},           {"mirrorOf", "none"},  {"disabled", false},
+                            {"focused", true}};
+        const auto answer = [](const QJsonObject &monitor) {
+            return QJsonDocument(QJsonArray{QJsonObject{{"name", "HDMI-A-1"}}, monitor}).toJson();
+        };
+        const auto state = ::requestedDisplay(request, answer(monitor));
+        QVERIFY(state);
+        QCOMPARE(state->keys(), (QStringList{"disabled", "height", "mirrorOf", "scale",
+                                             "transform", "width", "x", "y"}));
+        QCOMPARE((*state)["width"].toInt(), 2560);
+        // A new scale, a flip, a new mode or a move since the area was picked.
+        for (const auto &[field, value] : {std::pair<QString, QJsonValue>{"scale", 1.6},
+                                           {"transform", 4},
+                                           {"width", 1920},
+                                           {"x", 0}}) {
+            QJsonObject changed = monitor;
+            changed[field] = value;
+            QVERIFY2(!::requestedDisplay(request, answer(changed)), qPrintable(field));
+        }
+        QVERIFY(!::requestedDisplay(request, "[]"));
+        // A rotated monitor's logical sides are swapped.
+        request.transform = 1;
+        request.monitorLogical = QRect(1920, 0, 800, 1280);
+        monitor["transform"] = 1;
+        QVERIFY(::requestedDisplay(request, answer(monitor)));
+    }
+    // The marker lists this process and the worker from the request until the worker has
+    // exited; a cancelled countdown leaves no recording behind.
+    void recordingLifecycle() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        QSignalSpy finished(&b, &Backend::recordingFinished);
+        QSignalSpy exits(&b, &Backend::exitRequested);
+        const QString marker = recordingMarkerPath();
+        // Notifications shown before go as the recording starts.
+        QFile shown(notificationIdsPath());
+        QVERIFY(shown.open(QIODevice::WriteOnly));
+        shown.write("41\n42\n");
+        shown.close();
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        QCOMPARE(b.phase(), QString("countdown"));
+        QCOMPARE(QFileInfo(notificationIdsPath()).size(), 0);
+        const QList<qint64> pids = recordingMarkerPids();
+        QCOMPARE(pids.size(), 2);
+        QCOMPARE(pids[0], QCoreApplication::applicationPid());
+        QVERIFY(processRunning(pids[1]));
+        QVERIFY(!b.startRecording(syntheticRequest(), true).isEmpty());
+        const QString cancelled = b.original();
+        b.stop();
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+        QVERIFY(!QFile::exists(marker));
+        QVERIFY(!QFile::exists(cancelled));
+        QVERIFY(b.sessionPath().isEmpty());
+        QTRY_COMPARE(exits.count(), 1);
+        QCOMPARE(finished.count(), 0);
+
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recording"), 15000);
+        const qint64 worker = recordingMarkerPids().value(1);
+        QVERIFY(processRunning(worker));
+        QTest::qWait(1000);
+        b.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(marker), 10000);
+        QVERIFY(!processRunning(worker));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 20000);
+        QCOMPARE(finished.count(), 1);
+        QVERIFY(b.duration() > .5 && b.duration() < 2.5);
+
+        // An edited session is only replaced once the UI agrees, which discards it at once.
+        b.setValue("padding", b.edit()["padding"].toDouble() + .01);
+        QSignalSpy asked(&b, &Backend::replaceRequested);
+        std::optional<bool> answer;
+        b.confirmReplace([&](bool yes) { answer = yes; });
+        QCOMPARE(asked.count(), 1);
+        QVERIFY(!answer);
+        b.confirmReplace([](bool yes) { QVERIFY(!yes); }); // already asking
+        QVERIFY(!b.startRecording(syntheticRequest(), true).isEmpty());
+        b.answerReplace(false);
+        QCOMPARE(answer, std::optional(false));
+        QCOMPARE(b.phase(), QString("editor"));
+        const QString first = b.original();
+        b.confirmReplace([&](bool yes) { answer = yes; });
+        b.answerReplace(true);
+        QCOMPARE(answer, std::optional(true));
+        QCOMPARE(b.phase(), QString("idle"));
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        QVERIFY(QFile::exists(first));
+        b.stop();
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+        QFile::remove(first);
+    }
+    // Without a marker, nothing would keep OmaCap's other surfaces out of the recording.
+    void unwritableMarker() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        QVERIFY(QDir().mkpath(recordingMarkerPath())); // can't be replaced by a file
+        const QString error = b.startRecording(syntheticRequest(), true);
+        QVERIFY(QDir().rmdir(recordingMarkerPath()));
+        QVERIFY2(error.startsWith("OmaCap can't record: "), qPrintable(error));
+        QCOMPARE(b.phase(), QString("idle"));
+        QVERIFY(b.sessionPath().isEmpty());
+    }
+    // OmaCap's notifications are listed under a lock that no sender holds for long: a send that
+    // fails is taken back, and one that hangs is given up on in time and stays listed, as it may
+    // be up all the same. A lock held past that leaves what is on screen unknown, so a recording
+    // refuses to start rather than take the list unlocked, before it runs a worker.
+    void notificationLock() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        QTemporaryDir bin;
+        QFile notifier(bin.filePath("omarchy-notification-send"));
+        QVERIFY(notifier.open(QIODevice::WriteOnly));
+        notifier.write("#!/bin/sh\ncase $* in *hangs*) exec sleep 10 ;; esac\nexit 1\n");
+        notifier.close();
+        notifier.setPermissions(QFileDevice::ReadOwner | QFileDevice::ExeOwner);
+        const QByteArray path = qgetenv("PATH");
+        qputenv("PATH", QFile::encodeName(bin.path()) + ":" + path);
+        const auto restorePath = qScopeGuard([&] { qputenv("PATH", path); });
+        QFile::remove(notificationIdsPath());
+        QVERIFY(!sendNotification({"OmaCap", "fails"}));
+        QCOMPARE(QFileInfo(notificationIdsPath()).size(), 0);
+        QElapsedTimer sending;
+        sending.start();
+        QVERIFY(!sendNotification({"OmaCap", "hangs"}));
+        QVERIFY(sending.elapsed() < notificationSendMs + 500);
+
+        // A `?` that no id follows is one that may be up without an id, as the hung one is.
+        const auto take = [](const QByteArray &listed) {
+            QFile file(notificationIdsPath());
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Append) || file.write(listed) < 0)
+                return std::optional<ShownNotifications>();
+            file.close();
+            return takeShownNotifications();
+        };
+        auto shown = take("");
+        QVERIFY(shown && shown->unnamed && shown->ids.isEmpty() && shown->newest.isValid());
+        shown = take("5\n?\n?\n6\n");
+        QVERIFY(shown && shown->unnamed);
+        QCOMPARE(shown->ids, (QList<quint32>{5, 6}));
+        shown = take("?\n7\n");
+        QVERIFY(shown && !shown->unnamed && shown->ids == QList<quint32>{7});
+        QCOMPARE(QFileInfo(notificationIdsPath()).size(), 0);
+        shown = take("");
+        QVERIFY(shown && !shown->newest.isValid());
+
+        QFile held(notificationIdsPath());
+        QVERIFY(held.open(QIODevice::ReadWrite));
+        QCOMPARE(::flock(held.handle(), LOCK_EX | LOCK_NB), 0);
+        // The worker would be this process's child.
+        const auto children = [] {
+            QFile file(QString("/proc/self/task/%1/children").arg(QCoreApplication::applicationPid()));
+            return file.open(QIODevice::ReadOnly)
+                       ? QString::fromLatin1(file.readAll()).split(' ', Qt::SkipEmptyParts)
+                       : QStringList();
+        };
+        const QStringList before = children();
+        QElapsedTimer waited;
+        waited.start();
+        QCOMPARE(b.startRecording(syntheticRequest(), true),
+                 QString("OmaCap is busy showing a notification; try again."));
+        QVERIFY(waited.elapsed() >= notificationSendMs);
+        QCOMPARE(b.phase(), QString("idle"));
+        QVERIFY(!QFile::exists(recordingMarkerPath()));
+        for (const QString &child : children())
+            QVERIFY2(before.contains(child), qPrintable(child));
+        held.close();
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        QCOMPARE(QFileInfo(notificationIdsPath()).size(), 0);
+        b.stop();
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+    }
+    // Quitting mid-recording finalizes the file, which the next run recovers.
+    void quitWhileRecording() {
+        Theme t;
+        Frames f;
+        QString recording;
+        {
+            Backend b(&t, &f);
+            QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+            QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recording"), 15000);
+            QTest::qWait(1000);
+            recording = b.original();
+        }
+        QVERIFY(!QFile::exists(recordingMarkerPath()));
+        QVERIFY(QFileInfo(recording).size() > 1024);
+        Backend b(&t, &f);
+        QVERIFY(b.recoverable());
+        b.recover();
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QCOMPARE(b.original(), recording);
+        b.discard();
+        QFile::remove(recording);
+    }
+    // A file that can't be opened leaves no session behind, and the process exits 1.
+    void failedOpen() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        QSignalSpy exits(&b, &Backend::exitRequested);
+        QSignalSpy errors(&b, &Backend::backgroundError);
+        const QDir scratch(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) +
+                           "/scratch");
+        const QStringList sessions = scratch.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        QTemporaryDir dir;
+        QFile broken(dir.filePath("broken.mp4"));
+        QVERIFY(broken.open(QIODevice::WriteOnly));
+        broken.write("not a video");
+        broken.close();
+        b.loadFile(broken.fileName());
+        QVERIFY(QDir(b.sessionPath()).exists());
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+        QCOMPARE(errors.count(), 1);
+        QVERIFY(b.sessionPath().isEmpty());
+        QCOMPARE(scratch.entryList(QDir::Dirs | QDir::NoDotAndDotDot), sessions);
+        QTRY_COMPARE(exits.count(), 1);
+        QCOMPARE(exits[0][0].toInt(), 1);
+        // A session that ends as asked exits 0.
+        b.loadFile(QDir::current().absoluteFilePath("tests/out/delayed.mkv"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        b.discard();
+        QTRY_COMPARE(exits.count(), 2);
+        QCOMPARE(exits[1][0].toInt(), 0);
+    }
+    // How the video owner answers `omacap --record`, the capture overlay and opened files.
+    void ownerCommands() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        // Left by an owner that died while its worker still runs: kept until the worker exits.
+        QProcess survivor;
+        survivor.start("sleep", {"30"});
+        QVERIFY(survivor.waitForStarted());
+        QFile stale(recordingMarkerPath());
+        QVERIFY(stale.open(QIODevice::WriteOnly));
+        stale.write("999999999\n" + QByteArray::number(survivor.processId()) + "\n");
+        stale.close();
+        VideoOwner owner;
+        QVERIFY(owner.acquire());
+        QTest::qWait(700);
+        QVERIFY(QFile::exists(recordingMarkerPath()));
+        survivor.kill();
+        QTRY_VERIFY(!QFile::exists(recordingMarkerPath()));
+        owner.attach(b);
+        // Keep the test process running and the desktop free of notifications: they go to a
+        // log instead.
+        QObject::disconnect(&b, &Backend::exitRequested, nullptr, nullptr);
+        QObject::disconnect(&b, &Backend::backgroundError, nullptr, nullptr);
+        QTemporaryDir bin;
+        QFile notifier(bin.filePath("omarchy-notification-send"));
+        QVERIFY(notifier.open(QIODevice::WriteOnly));
+        notifier.write("#!/bin/sh\nfor last; do :; done\nprintf '%s\\n' \"$last\" >>\"$0.log\"\n"
+                       "echo 7\n");
+        notifier.close();
+        notifier.setPermissions(QFileDevice::ReadOwner | QFileDevice::ExeOwner);
+        const QByteArray path = qgetenv("PATH");
+        qputenv("PATH", QFile::encodeName(bin.path()) + ":" + path);
+        const auto notified = [&] {
+            QFile log(notifier.fileName() + ".log");
+            QStringList lines;
+            if (log.open(QIODevice::ReadOnly))
+                lines = QString::fromUtf8(log.readAll()).split('\n', Qt::SkipEmptyParts);
+            lines.sort();
+            return lines;
+        };
+        const auto ask = [](const QJsonObject &command) {
+            auto reply = QtConcurrent::run([command] { return askVideoOwner(command); });
+            if (!QTest::qWaitFor([&] { return reply.isFinished(); }, 5000))
+                return QJsonObject();
+            return reply.result().value_or(QJsonObject());
+        };
+        const QJsonObject recordKey{{"cmd", "record-key"}};
+        QCOMPARE(ask(recordKey)["action"].toString(), QString("pick"));
+        QCOMPARE(ask({{"cmd", "record"}, {"request", QJsonObject{}}})["error"].toString(),
+                 QString("Not a valid recording request."));
+        auto rotated = syntheticRequest();
+        rotated.transform = 1;
+        QVERIFY(ask({{"cmd", "record"}, {"request", rotated.toJson()}})["error"].toString().contains(
+            "rotated"));
+
+        // Refused during a capture, and shown only once it has ended.
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        const QJsonObject record{{"cmd", "record"}, {"request", syntheticRequest().toJson()}};
+        const QJsonObject refused = ask(record);
+        QCOMPARE(refused["ok"].toBool(), false);
+        QVERIFY(refused["deferred"].toBool());
+        QCOMPARE(refused["error"].toString(),
+                 QString("OmaCap is recording, so it can't start another recording."));
+        const QString video = QDir::current().absoluteFilePath("tests/out/delayed.mkv");
+        const QJsonObject open{{"cmd", "open"}, {"path", video}};
+        QCOMPARE(ask(open)["deferred"].toBool(), true);
+        auto forwarded = QtConcurrent::run([open] { return forwardToVideoOwner(open); });
+        QTRY_VERIFY(forwarded.isFinished());
+        QCOMPARE(forwarded.result(), std::optional(1));
+        QVERIFY(!sendNotification({"OmaCap", "Recorded if it were shown."}));
+        QTest::qWait(300);
+        QVERIFY(notified().isEmpty());
+        QCOMPARE(ask(recordKey)["action"].toString(), QString("stopped"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+        const QString didntOpen = "OmaCap was recording, so it didn't open delayed.mkv.";
+        QTRY_COMPARE(notified(),
+                     (QStringList{didntOpen, didntOpen,
+                                  "OmaCap was recording, so it didn't start another recording."}));
+        // Each is listed, for the next recording to take down.
+        QFile shown(notificationIdsPath());
+        QVERIFY(shown.open(QIODevice::ReadOnly));
+        QCOMPARE(shown.readAll(), QByteArray("?\n7\n?\n7\n?\n7\n"));
+        QVERIFY(shown.remove()); // they would lengthen later tests' countdowns
+        qputenv("PATH", path);
+
+        QCOMPARE(ask(open)["ok"].toBool(), true);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        // The record key starts over: a session without unsaved edits ends at once.
+        QCOMPARE(ask(recordKey)["action"].toString(), QString("pick"));
+        QCOMPARE(b.phase(), QString("idle"));
+        // Whatever would replace unsaved edits asks first; yes discards them.
+        bool replace = false;
+        QObject::connect(&b, &Backend::replaceRequested, &b, [&] { b.answerReplace(replace); });
+        const auto edit = [&] {
+            if (b.phase() != "editor") {
+                b.loadFile(video);
+                QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+            }
+            b.setValue("padding", b.edit()["padding"].toDouble() + .01);
+            QVERIFY(b.dirty());
+        };
+        edit();
+        QCOMPARE(ask(recordKey)["action"].toString(), QString("busy"));
+        QCOMPARE(ask(record)["error"].toString(), QString("OmaCap is busy."));
+        QCOMPARE(ask(open)["ok"].toBool(), false);
+        QVERIFY(b.dirty());
+        replace = true;
+        QCOMPARE(ask(recordKey)["action"].toString(), QString("pick"));
+        QCOMPARE(b.phase(), QString("idle"));
+        edit();
+        QCOMPARE(ask(open)["ok"].toBool(), true);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QVERIFY(!b.dirty());
+        b.discard();
+    }
+    // A video process that loses the race to one still starting hands its file over once that
+    // one listens, instead of giving up.
+    void forwardWhileStarting() {
+        Theme t;
+        Frames f;
+        Backend b(&t, &f);
+        VideoOwner owner;
+        QVERIFY(owner.acquire());
+        QProcess loser;
+        loser.setProcessChannelMode(QProcess::ForwardedChannels);
+        loser.start(QCoreApplication::applicationDirPath() + "/omacap",
+                    {QDir::current().absoluteFilePath("tests/out/delayed.mkv")});
+        QVERIFY(loser.waitForStarted());
+        QTest::qWait(1500); // it found the lock taken and nobody listening
+        QCOMPARE(loser.state(), QProcess::Running);
+        owner.attach(b);
+        QObject::disconnect(&b, &Backend::exitRequested, nullptr, nullptr);
+        QObject::disconnect(&b, &Backend::backgroundError, nullptr, nullptr);
+        QTRY_COMPARE_WITH_TIMEOUT(loser.state(), QProcess::NotRunning, 10000);
+        QCOMPARE(loser.exitCode(), 0);
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        b.discard();
+    }
+    // The editor asks before a command replaces unexported edits; Esc keeps them.
+    void replaceWhileEditing() {
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
+        VideoOwner owner;
+        QVERIFY(owner.acquire());
+        owner.attach(b);
+        QObject::disconnect(&b, &Backend::exitRequested, nullptr, nullptr);
+        QObject::disconnect(&b, &Backend::backgroundError, nullptr, nullptr);
+        auto win = openEditor(s, "tests/out/delayed.mkv");
+        QVERIFY(win);
+        auto editor = s.stage.editor();
+        b.setValue("padding", b.edit()["padding"].toDouble() + .01);
+        auto keyReply = QtConcurrent::run([] { return askVideoOwner({{"cmd", "record-key"}}); });
+        QTRY_COMPARE(editor->property("discarding").toString(), QString("replace"));
+        QVERIFY(find(win->contentItem(), "discardDialog")->isVisible());
+        QTest::keyClick(win, Qt::Key_Escape);
+        QTRY_VERIFY(keyReply.isFinished());
+        QCOMPARE(keyReply.result().value_or(QJsonObject())["action"].toString(), QString("busy"));
+        QCOMPARE(b.phase(), QString("editor"));
+        QVERIFY(b.dirty());
+        // Enter discards the edit, and the video opens in its place.
+        const QString video = QDir::current().absoluteFilePath("tests/out/delayed.mkv");
+        auto openReply = QtConcurrent::run(
+            [video] { return askVideoOwner({{"cmd", "open"}, {"path", video}}); });
+        QTRY_COMPARE(editor->property("discarding").toString(), QString("replace"));
+        QTest::keyClick(win, Qt::Key_Return);
+        QTRY_VERIFY(openReply.isFinished());
+        QVERIFY(openReply.result().value_or(QJsonObject())["ok"].toBool());
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);
+        QTRY_VERIFY(s.stage.editorWindow());
+        QVERIFY(!b.dirty());
+        b.discard();
+    }
+    // The backend ends the process once no card or editor is open and nothing records,
+    // prepares or exports.
+    void lifetime() {
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
+        QSignalSpy exits(&b, &Backend::exitRequested);
+        // Nothing to recover and nothing asked for. A test that failed may have left a session.
+        QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/scratch")
+            .removeRecursively();
+        s.stage.offerRecovery();
+        QVERIFY(s.stage.card().isEmpty());
+        QTRY_COMPARE(exits.count(), 1);
+        // A recording opens nothing until its card.
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recording"), 15000);
+        QTest::qWait(1500);
+        b.stop();
+        QTRY_COMPARE_WITH_TIMEOUT(s.stage.card(), QString("recording"), 20000);
+        const QString recording = b.original(), session = b.sessionPath();
+        // Exported from the card, which can't close until that is done. Then it fades,
+        // closing as below, and the session ends.
+        auto card = find(s.stage.cardWindow()->contentItem(), "card");
+        QVERIFY(QMetaObject::invokeMethod(card, "exportNow"));
+        QCOMPARE(b.phase(), QString("exporting"));
+        s.stage.closeCard();
+        QCOMPARE(s.stage.card(), QString("recording"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 60000);
+        QVERIFY2(QFileInfo(b.lastExport()).size() > 1000, qPrintable(b.message()));
+        QTest::qWait(50);
+        QCOMPARE(exits.count(), 1);
+        s.stage.closeCard();
+        QVERIFY(s.stage.card().isEmpty());
+        QCOMPARE(b.phase(), QString("idle"));
+        QTRY_COMPARE(exits.count(), 2);
+        QVERIFY(!QDir(session).exists());
+        QVERIFY(QFile::exists(recording));
+        QFile::remove(recording);
+
+        // An earlier session's unfinished edit is offered.
+        QString saved;
+        {
+            Backend crashed(&s.theme, s.frames);
+            crashed.loadFile(QDir::current().absoluteFilePath("tests/out/delayed.mkv"));
+            QTRY_COMPARE_WITH_TIMEOUT(crashed.phase(), QString("editor"), 10000);
+            crashed.setValue("padding", .123);
+            saved = crashed.sessionPath();
+        }
+        s.stage.offerRecovery();
+        QCOMPARE(s.stage.card(), QString("recovery"));
+        QTest::qWait(50);
+        QCOMPARE(exits.count(), 2);
+        // A new recording ends the offer; the edit stays recoverable.
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
+        QVERIFY(s.stage.card().isEmpty());
+        b.stop();
+        QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("idle"), 10000);
+        QTRY_COMPARE(exits.count(), 3);
+        QVERIFY(QDir(saved).exists());
+        // So does closing the card.
+        s.stage.offerRecovery();
+        QCOMPARE(s.stage.card(), QString("recovery"));
+        s.stage.closeCard();
+        QTRY_COMPARE(exits.count(), 4);
+        QVERIFY(QDir(saved).exists());
+        // Recovering opens the editor on it; closing the editor ends it.
+        s.stage.offerRecovery();
+        card = find(s.stage.cardWindow()->contentItem(), "card");
+        QVERIFY(QMetaObject::invokeMethod(card, "edit"));
+        QTRY_VERIFY_WITH_TIMEOUT(s.stage.editorWindow(), 10000);
+        QVERIFY(s.stage.card().isEmpty());
+        QCOMPARE(b.sessionPath(), saved);
+        QCOMPARE(b.edit()["padding"].toDouble(), .123);
+        QTest::qWait(50);
+        QCOMPARE(exits.count(), 4);
+        b.discard();
+        QTRY_COMPARE(exits.count(), 5);
+        QVERIFY(!QDir(saved).exists());
+
+        // D discards the offered edit and closes the card; its recording stays.
+        const QString video = QDir::current().absoluteFilePath("tests/out/delayed.mkv");
+        {
+            Backend crashed(&s.theme, s.frames);
+            crashed.loadFile(video);
+            QTRY_COMPARE_WITH_TIMEOUT(crashed.phase(), QString("editor"), 10000);
+            crashed.setValue("padding", .123);
+            saved = crashed.sessionPath();
+        }
+        s.stage.offerRecovery();
+        QCOMPARE(s.stage.card(), QString("recovery"));
+        auto cardWindow = s.stage.cardWindow();
+        cardWindow->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(cardWindow));
+        QTest::keyClick(cardWindow, Qt::Key_D);
+        QVERIFY(s.stage.card().isEmpty());
+        QVERIFY(!QDir(saved).exists());
+        QVERIFY(!Backend::recoverable());
+        QVERIFY(QFile::exists(video));
+        QTRY_COMPARE(exits.count(), 6);
+    }
     void portalFixture() {
         const auto fixture = qEnvironmentVariable("OMACAP_PORTAL_FIXTURE");
         if (fixture.isEmpty())
@@ -1852,25 +1923,21 @@ class Integration : public QObject {
         b.discard();
     }
     void workflow() {
-        Theme theme;
-        QQmlApplicationEngine engine;
-        auto frames = new Frames;
-        engine.addImageProvider("frames", frames);
-        Backend b(&theme, frames);
-        engine.rootContext()->setContextProperty("theme", &theme);
-        engine.rootContext()->setContextProperty("backend", &b);
-        engine.load(QUrl("qrc:/qml/Main.qml"));
-        QVERIFY(!engine.rootObjects().isEmpty());
-        auto win = qobject_cast<QQuickWindow *>(engine.rootObjects()[0]);
-        QVERIFY(win);
-        auto cleanup = qScopeGuard([&] { delete win; });
-        QVERIFY(QTest::qWaitForWindowExposed(win));
-        b.record("test", "test", true, true);
+        Studio s;
+        auto &b = s.backend;
+        QVERIFY(s.stage.load());
+        QVERIFY(b.startRecording(syntheticRequest(), true).isEmpty());
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("recording"), 15000);
         QTest::qWait(4000);
         b.stop();
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 20000);
         QVERIFY2(b.duration() > 3, qPrintable(b.message()));
+        // A recording shows its card; this edit continues in the editor.
+        QTRY_VERIFY(s.stage.editorWindow() || !s.stage.card().isEmpty());
+        s.stage.openEditor();
+        auto win = s.stage.editorWindow();
+        QVERIFY(win);
+        QVERIFY(QTest::qWaitForWindowExposed(win));
         const QString recording = b.original();
         QCOMPARE(QFileInfo(recording).absolutePath(),
                  QStandardPaths::writableLocation(QStandardPaths::MoviesLocation));
@@ -1882,7 +1949,13 @@ class Integration : public QObject {
         QSignalSpy waveformChanges(&b, &Backend::waveformsChanged);
         QString frozen = b.edit()["background"].toString();
         QVERIFY(!frozen.isEmpty());
-        QVERIFY(QFile::exists(frozen));
+        // The session's own copy of the wallpaper, byte for byte: nothing re-encodes it.
+        const auto bytes = [](const QString &path) {
+            QFile file(path);
+            return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+        };
+        QCOMPARE(QFileInfo(frozen).absolutePath(), b.sessionPath());
+        QCOMPARE(bytes(frozen), bytes(themeRoot.path() + "/background"));
         b.setValue("crop", QVariantList{.1, .05, .8, .9});
         b.setValue("padding", .08);
         int z = b.addZoom(.2);
@@ -1892,15 +1965,7 @@ class Integration : public QObject {
         b.updateZoom(z, zm["start"].toDouble(), zm["end"].toDouble(), .72, .35, 1.9);
         b.updateZoom(z, zm["start"].toDouble(), zm["start"].toDouble() + .8, .72, .35, 1.9);
         QTest::qWait(150);
-        std::function<QQuickItem *(QQuickItem *)> findDrag = [&](QQuickItem *item) -> QQuickItem * {
-            if (item->objectName() == "zoomDrag0")
-                return item;
-            for (auto child : item->childItems())
-                if (auto found = findDrag(child))
-                    return found;
-            return nullptr;
-        };
-        auto drag = findDrag(win->contentItem());
+        auto drag = find(win->contentItem(), "zoomDrag0");
         QVERIFY(drag);
         auto point = drag->mapToScene(QPointF(drag->width() / 2, drag->height() / 2)).toPoint();
         double beforeDrag = b.edit()["zooms"].toList()[0].toMap()["start"].toDouble();
@@ -1998,7 +2063,7 @@ class Integration : public QObject {
         b.discard();
         QVERIFY(!QDir(session).exists());
         QVERIFY(QFileInfo(recording).size() > 1024);
-        QCOMPARE(b.phase(), QString("recorder"));
+        QCOMPARE(b.phase(), QString("idle"));
         // Reopening the saved capture brings back both audio tracks.
         b.loadFile(recording);
         QTRY_COMPARE_WITH_TIMEOUT(b.phase(), QString("editor"), 10000);

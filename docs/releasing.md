@@ -9,7 +9,7 @@ GitHub hosts the downloadable Arch packages. AUR distribution is deferred. The r
 3. Open [Actions > Prepare release](https://github.com/allisonmahmood/omacap/actions/workflows/release.yml), select `main`, and click **Run workflow**. The workflow uses the exact commit selected at dispatch, even if `main` advances during the build.
 4. Open the draft linked in the workflow summary. Review the notes and assets, then click **Publish release**. Until then the release is visible only to people with repository write access.
 
-The workflow refuses branches other than `main`, existing tags, and duplicate releases. It builds against Omarchy's stable Arch mirror, runs the integration tests, then installs and launches the resulting package in a fresh container before creating the draft. It downgrades the base container to the stable repository versions too. Current-Arch compatibility is checked separately by CI.
+The workflow refuses branches other than `main`, existing tags, and duplicate releases. It builds against Omarchy's stable Arch mirror, runs the tests, then installs the resulting package in a fresh container and opens a video in its editor before creating the draft. The capture overlay needs Hyprland, so the container doesn't launch it. It downgrades the base container to the stable repository versions too. Current-Arch compatibility is checked separately by CI.
 
 The first draft can also be staged from the successful PR's `release-assets-omarchy-stable` artifact. Use the exact commit in `BUILD-INFO.txt` as its target. That draft contains the tested PR code; merging the PR makes the repeatable workflow available on `main`.
 
@@ -25,7 +25,7 @@ Download the package and `SHA256SUMS`, verify with `sha256sum --check --ignore-m
 
 ## Validation and maintenance
 
-Automated tests use synthetic audio/video and a virtual X display. They do not establish that real Hyprland portal capture, microphone or camera hardware works. Before a release, check those on Omarchy stable, including an MP4 and GIF export. Do not describe container checks as a full Omarchy desktop test.
+Automated tests use synthetic audio/video, a virtual X display and Omasnap's offscreen smoke tests. They do not establish that the picker, real Hyprland portal capture, microphone or camera hardware work. `tests/record-nested.py` records through the portal in a nested Hyprland, but not with your devices. Before a release, check on Omarchy stable: a screenshot from the picker, copied and edited; a recording with microphone and camera, stopped with the record key; and an MP4 and GIF export. Do not describe container checks as a full Omarchy desktop test.
 
 Omarchy stable uses a delayed Arch mirror. Release binaries must come from the stable build, not the current-Arch CI artifact. `BUILD-INFO.txt` records the dependency versions used; rebuilding later can produce different binaries because the mirror moves. Publish a new version if a library update requires a rebuild. Keep published assets and tags unchanged.
 
