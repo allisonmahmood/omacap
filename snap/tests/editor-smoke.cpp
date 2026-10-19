@@ -1018,8 +1018,15 @@ bool runShortcutGuideSmoke(QApplication &application, QString &error) {
       return false;
     }
     auto *guide = editor.findChild<ShortcutGuide *>();
-    if (!guide || !guide->isVisible() || !guide->expanded()) {
-      error = QStringLiteral("Shortcut guide did not open by default");
+    if (!guide || !guide->isVisible() || guide->expanded() ||
+        guide->height() > 40) {
+      error = QStringLiteral("Shortcut guide did not start collapsed");
+      return false;
+    }
+    QTest::keyClick(&editor, Qt::Key_Question, Qt::ShiftModifier);
+    application.processEvents();
+    if (!guide->expanded()) {
+      error = QStringLiteral("Question mark did not open the shortcut card");
       return false;
     }
     const QPoint local(5, 18);
@@ -1096,18 +1103,6 @@ bool runShortcutGuideSmoke(QApplication &application, QString &error) {
   }
   return true;
 }
-
-// Canvas tests keep the reference card collapsed, as a user can, so its
-// deliberate overlap does not conceal the annotation pixels being tested.
-class CollapseShortcutGuides final : public QObject {
-  bool eventFilter(QObject *watched, QEvent *event) override {
-    if (event->type() == QEvent::Show) {
-      if (auto *guide = qobject_cast<ShortcutGuide *>(watched))
-        guide->setExpanded(false);
-    }
-    return QObject::eventFilter(watched, event);
-  }
-};
 
 bool runTextBandDetectionCheck(QString &error) {
   for (const qreal scale : {1.0, 2.0}) {
@@ -5654,6 +5649,130 @@ bool runCutToolSmoke(QApplication &application, QString &error) {
   }
 
   editor.close();
+  return true;
+}
+
+// Pointer motion outside the picker looks for the monitor it is on, unless a
+// pick is under way, and a click there picks nothing. Moving the overlay needs
+// a named screen, which offscreen lacks.
+bool runFollowPointerSmoke(QApplication &application, QString &error) {
+  QTemporaryDir commands;
+  if (!commands.isValid()) {
+    error = QStringLiteral("Could not create follow-pointer command directory");
+    return false;
+  }
+  QFile hyprctl(QDir(commands.path()).filePath(QStringLiteral("hyprctl")));
+  if (!hyprctl.open(QIODevice::WriteOnly) ||
+      hyprctl.write(
+          "#!/usr/bin/env bash\n"
+          "case $1 in\n"
+          "  monitors) echo '[{\"focused\":true,\"scale\":1,\"width\":400,"
+          "\"height\":300,\"transform\":0,\"name\":\"FIRST\",\"x\":0,\"y\":0,"
+          "\"activeWorkspace\":{\"id\":1}},{\"focused\":false,\"scale\":2,"
+          "\"width\":320,\"height\":240,\"transform\":0,\"name\":\"SECOND\","
+          "\"x\":400,\"y\":0,\"activeWorkspace\":{\"id\":2}}]' ;;\n"
+          "  *) echo '[]' ;;\n"
+          "esac\n") < 0 ||
+      !hyprctl.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                              QFileDevice::ExeOwner)) {
+    error = QStringLiteral("Could not create follow-pointer commands");
+    return false;
+  }
+  hyprctl.close();
+  QImage secondPixels(320, 240, QImage::Format_RGB32);
+  secondPixels.fill(QColor(QStringLiteral("#5c2840")));
+  const QString secondPath =
+      QDir(commands.path()).filePath(QStringLiteral("second.png"));
+  if (!secondPixels.save(secondPath, "PNG")) {
+    error = QStringLiteral("Could not create follow-pointer capture");
+    return false;
+  }
+  const QByteArray oldPath = qgetenv("PATH");
+  const QByteArray oldCapture = qgetenv("OMACAP_TEST_CAPTURE");
+  qputenv("PATH", commands.path().toUtf8() + ':' + oldPath);
+  qputenv("OMACAP_TEST_CAPTURE", secondPath.toUtf8());
+  const auto restore = qScopeGuard([&] {
+    qputenv("PATH", oldPath);
+    if (oldCapture.isEmpty())
+      qunsetenv("OMACAP_TEST_CAPTURE");
+    else
+      qputenv("OMACAP_TEST_CAPTURE", oldCapture);
+  });
+
+  // SECOND is 160 logical px wide at scale 2, so x 559 is its last column.
+  MonitorInfo under;
+  if (!probeMonitorAt({559, 100}, under, error) ||
+      under.name != QStringLiteral("SECOND") ||
+      under.geometry != QRect(400, 0, 160, 120)) {
+    if (error.isEmpty())
+      error = QStringLiteral("The point was placed on %1").arg(under.name);
+    return false;
+  }
+
+  CaptureData capture;
+  capture.monitor.name = QStringLiteral("FIRST");
+  capture.monitor.geometry = {0, 0, 400, 300};
+  capture.monitor.pixelSize = {400, 300};
+  capture.source = QImage(400, 300, QImage::Format_RGB32);
+  capture.source.fill(QColor(QStringLiteral("#28405c")));
+  capture.previewSize = capture.source.size();
+  const auto moveTo = [](CaptureEditor &editor, QPointF local, Qt::MouseButtons held) {
+    QMouseEvent move(QEvent::MouseMove, local, editor.mapToGlobal(local),
+                     Qt::NoButton, held, Qt::NoModifier);
+    QApplication::sendEvent(&editor, &move);
+  };
+  // x == 400 is the first column of SECOND: the seam belongs to the monitor
+  // on the right.
+  const QPointF onSecond(400, 100);
+  {
+    // In smart mode a click on open space takes the whole monitor; one on
+    // another monitor reaches this overlay as well, and must take nothing.
+    CaptureEditor smart(capture, CaptureEditor::CaptureMode::Smart);
+    smart.setSuppressSnapshots(true);
+    smart.resize(400, 300);
+    smart.show();
+    for (const QEvent::Type type :
+         {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
+      QMouseEvent click(type, onSecond, smart.mapToGlobal(onSecond), Qt::LeftButton,
+                        type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton,
+                        Qt::NoModifier);
+      QApplication::sendEvent(&smart, &click);
+    }
+    application.processEvents();
+    const bool picked = !smart.currentSelection().isEmpty();
+    smart.close();
+    if (picked) {
+      error = QStringLiteral("A click on another monitor picked on this one");
+      return false;
+    }
+  }
+  CaptureEditor editor(capture, CaptureEditor::CaptureMode::Region);
+  editor.setSuppressSnapshots(true);
+  editor.resize(400, 300);
+  editor.show();
+  moveTo(editor, onSecond, Qt::NoButton);
+  if (!editor.followingPointerForTest()) {
+    error = QStringLiteral("The pointer leaving the picker went unfollowed");
+    return false;
+  }
+  QElapsedTimer timer;
+  timer.start();
+  while (editor.followingPointerForTest() && timer.elapsed() < 10000)
+    application.processEvents(QEventLoop::AllEvents, 10);
+  if (editor.followingPointerForTest()) {
+    error = QStringLiteral("Following the pointer never finished");
+    return false;
+  }
+  QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(40, 60));
+  moveTo(editor, {200, 180}, Qt::LeftButton);
+  moveTo(editor, onSecond, Qt::LeftButton);
+  const bool followedMidDrag = editor.followingPointerForTest();
+  QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(200, 180));
+  editor.close();
+  if (followedMidDrag) {
+    error = QStringLiteral("The picker looked for another monitor mid-drag");
+    return false;
+  }
   return true;
 }
 
@@ -12507,8 +12626,6 @@ int main(int argc, char **argv) {
     qWarning().noquote() << snapshotError;
     return 216;
   }
-  CollapseShortcutGuides collapseGuides;
-  application.installEventFilter(&collapseGuides);
   // Early, before main() keeps editors of its own alive under the pointer.
   if (!runLookSmoke(application, snapshotError)) {
     qWarning().noquote() << "look smoke failed:" << snapshotError;
@@ -12729,6 +12846,10 @@ int main(int argc, char **argv) {
   if (!runAsyncCaptureRegionSmoke(application, snapshotError)) {
     qWarning().noquote() << snapshotError;
     return 82;
+  }
+  if (!runFollowPointerSmoke(application, snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return 131;
   }
   if (!runScrollStartupSmoke(snapshotError)) {
     qWarning().noquote() << snapshotError;

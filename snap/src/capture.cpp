@@ -26,6 +26,7 @@
 #include <QLinearGradient>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPoint>
 #include <QPointF>
 #include <QProcess>
 #include <QRandomGenerator>
@@ -40,6 +41,7 @@
 #include <cmath>
 #include <fcntl.h>
 #include <numbers>
+#include <optional>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -373,8 +375,10 @@ QString screenshotTargetPath(QString &error, const QString &appSlug) {
   return path;
 }
 
-bool parseMonitor(const QByteArray &json, MonitorInfo &monitor,
-                  QString &error) {
+// The focused monitor in `hyprctl monitors -j` output, or with `at` (layout
+// coordinates) the one containing that point.
+bool parseMonitor(const QByteArray &json, MonitorInfo &monitor, QString &error,
+                  std::optional<QPoint> at = std::nullopt) {
   QJsonParseError parseError;
   const QJsonDocument document = QJsonDocument::fromJson(json, &parseError);
   if (parseError.error != QJsonParseError::NoError || !document.isArray()) {
@@ -385,7 +389,7 @@ bool parseMonitor(const QByteArray &json, MonitorInfo &monitor,
 
   for (const QJsonValue value : document.array()) {
     const QJsonObject object = value.toObject();
-    if (!object.value(QStringLiteral("focused")).toBool())
+    if (!at && !object.value(QStringLiteral("focused")).toBool())
       continue;
 
     const qreal scale = object.value(QStringLiteral("scale")).toDouble(1.0);
@@ -396,11 +400,14 @@ bool parseMonitor(const QByteArray &json, MonitorInfo &monitor,
     int logicalHeight = qRound(rawHeight / std::max<qreal>(scale, 0.01));
     if (transform == 1 || transform == 3 || transform == 5 || transform == 7)
       std::swap(logicalWidth, logicalHeight);
+    const QRect geometry(object.value(QStringLiteral("x")).toInt(),
+                         object.value(QStringLiteral("y")).toInt(), logicalWidth,
+                         logicalHeight);
+    if (at && !geometry.contains(*at))
+      continue;
 
     monitor.name = object.value(QStringLiteral("name")).toString();
-    monitor.geometry = {object.value(QStringLiteral("x")).toInt(),
-                        object.value(QStringLiteral("y")).toInt(), logicalWidth,
-                        logicalHeight};
+    monitor.geometry = geometry;
     monitor.pixelSize = {rawWidth, rawHeight};
     monitor.scale = scale;
     monitor.transform = transform;
@@ -411,7 +418,8 @@ bool parseMonitor(const QByteArray &json, MonitorInfo &monitor,
     return !monitor.name.isEmpty() && logicalWidth > 0 && logicalHeight > 0;
   }
 
-  error = QStringLiteral("Hyprland did not report a focused monitor");
+  error = at ? QStringLiteral("No monitor contains %1, %2").arg(at->x()).arg(at->y())
+             : QStringLiteral("Hyprland did not report a focused monitor");
   return false;
 }
 
@@ -1175,6 +1183,33 @@ bool probeFocusedMonitor(MonitorInfo &monitor, QString &error) {
     return false;
   }
   return true;
+}
+
+bool probeMonitorAt(QPoint at, MonitorInfo &monitor, QString &error) {
+  const ProcessResult monitors =
+      runProcess(QStringLiteral("hyprctl"),
+                 {QStringLiteral("monitors"), QStringLiteral("-j")});
+  if (!monitors.finished || monitors.exitCode != 0 ||
+      !parseMonitor(monitors.output, monitor, error, at)) {
+    if (error.isEmpty())
+      error = QString::fromUtf8(monitors.error).trimmed();
+    return false;
+  }
+  return true;
+}
+
+std::optional<QPoint> probePointer() {
+  const ProcessResult cursor =
+      runProcess(QStringLiteral("hyprctl"),
+                 {QStringLiteral("cursorpos"), QStringLiteral("-j")}, {}, 2000);
+  const QJsonObject position = QJsonDocument::fromJson(cursor.output).object();
+  if (!cursor.finished || cursor.exitCode != 0 ||
+      !position.contains(QStringLiteral("x")) ||
+      !position.contains(QStringLiteral("y")))
+    return std::nullopt;
+  return QPoint(
+      static_cast<int>(std::floor(position.value(QStringLiteral("x")).toDouble())),
+      static_cast<int>(std::floor(position.value(QStringLiteral("y")).toDouble())));
 }
 
 bool captureMonitorPixels(const MonitorInfo &monitor, CaptureData &capture,

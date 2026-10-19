@@ -19,6 +19,7 @@
 #include "startup-timing.hpp"
 #include "text-band.hpp"
 
+#include <LayerShellQt/Window>
 #include <QtConcurrent/QtConcurrentRun>
 
 #include <QApplication>
@@ -978,6 +979,62 @@ CaptureEditor::CaptureEditor(CaptureData capture, CaptureMode mode,
             emit captureReady(true, {});
           });
 
+  // Hyprland sends a remade surface its enter at once. Should it never come,
+  // clicks and following must not stay held, and the pointer may have moved.
+  enterFallback_.setSingleShot(true);
+  enterFallback_.setInterval(500);
+  connect(&enterFallback_, &QTimer::timeout, this, [this] {
+    queuedOffset_.reset();
+    followPointer();
+  });
+  connect(&pointerWatcher_, &QFutureWatcher<std::optional<QPoint>>::finished,
+          this, [this] {
+    const std::optional<QPoint> at = pointerWatcher_.result();
+    // Motion since the query is newer; a pick under way keeps its pointer.
+    if (!at || motionSerial_ != pointerProbeSerial_ ||
+        phase_ != Phase::Select || dragging_)
+      return;
+    cursor_ = QPointF(*at - capture_.monitor.geometry.topLeft());
+    if (!onThisMonitor(cursor_)) {
+      followPointer();
+      return;
+    }
+    trackRecentsHover();
+    if (smartMode_ || windowMode_)
+      hoveredWindow_ = recentsOpen_ ? -1 : windowAt(cursor_);
+    updatePointerCursor();
+    update();
+  });
+  connect(&followWatcher_, &QFutureWatcher<CaptureJob>::finished, this, [this] {
+    following_ = false;
+    CaptureJob job = followWatcher_.result();
+    if (!job.ok) {
+      // Not again in this pick: the pointer resting there would retry it on
+      // every motion. It may have gone on to another monitor meanwhile.
+      qWarning().noquote() << "Could not follow the pointer:" << job.error;
+      unfollowable_.append(followScreen_);
+      followPointer();
+      return;
+    }
+    if (!canFollowPointer())
+      return;
+    // Hyprland places that point on this monitor: it and Qt disagree.
+    if (job.capture.monitor.name == capture_.monitor.name) {
+      unfollowable_.append(followScreen_);
+      followPointer();
+      return;
+    }
+    // The pointer may have come back, or gone on to a third monitor, meanwhile.
+    if (!job.capture.monitor.geometry.contains(pointerOnLayout())) {
+      followPointer();
+      return;
+    }
+    if (!moveToCapture(std::move(job.capture))) {
+      unfollowable_.append(followScreen_);
+      followPointer();
+    }
+  });
+
   connect(&pinWatcher_, &QFutureWatcher<PinResult>::resultReadyAt, this, [this] {
     pinPending_ = false;
     const PinResult result = pinWatcher_.result();
@@ -1083,7 +1140,11 @@ CaptureEditor::~CaptureEditor() {
   // the instance lock first so another capture cannot terminate this save.
   disconnect(&finishWatcher_, nullptr, this, nullptr);
   disconnect(&pinWatcher_, nullptr, this, nullptr);
+  disconnect(&followWatcher_, nullptr, this, nullptr);
+  disconnect(&pointerWatcher_, nullptr, this, nullptr);
   finishWatcher_.waitForFinished();
+  followWatcher_.waitForFinished();
+  pointerWatcher_.waitForFinished();
   pinWatcher_.waitForFinished();
   dismissFuture_.waitForFinished();
   // A recording request is handed off after the overlay has gone.
@@ -3618,6 +3679,87 @@ void CaptureEditor::startCapture(CaptureMode mode, bool includeWindows) {
   }));
 }
 
+bool CaptureEditor::canFollowPointer() const {
+  // Only an overlay that has picked nothing yet; a pick belongs to its monitor.
+  return !windowedPresentation_ && captureMode_ != CaptureMode::File &&
+         phase_ == Phase::Select && !capturePending_ && !dragging_ &&
+         selection_.isEmpty() && !scrollPanel_ && !busy_;
+}
+
+QPoint CaptureEditor::pointerOnLayout() const {
+  return capture_.monitor.geometry.topLeft() +
+         QPoint(static_cast<int>(std::floor(cursor_.x())),
+                static_cast<int>(std::floor(cursor_.y())));
+}
+
+bool CaptureEditor::onThisMonitor(QPointF point) const {
+  // Half-open: x == width() is the first column of the monitor to the right.
+  return point.x() >= 0 && point.y() >= 0 && point.x() < width() &&
+         point.y() < height();
+}
+
+void CaptureEditor::followPointer() {
+  // following_, not the watcher: a finished job's notification may still be
+  // queued, and setFuture() would drop it. A move waits for its surface's
+  // enter (queuedOffset_), which reconsiders.
+  if (onThisMonitor(cursor_) || !canFollowPointer() || following_ ||
+      queuedOffset_)
+    return;
+  const QPoint at = pointerOnLayout();
+  const QScreen *target = QGuiApplication::screenAt(at);
+  if (!target || target->name() == capture_.monitor.name ||
+      unfollowable_.contains(target->name()))
+    return;
+  following_ = true;
+  followScreen_ = target->name();
+  followWatcher_.setFuture(QtConcurrent::run([at] {
+    CaptureJob job;
+    job.ok = probeMonitorAt(at, job.capture.monitor, job.error) &&
+             captureMonitorPixels(job.capture.monitor, job.capture, true,
+                                  job.error);
+    return job;
+  }));
+}
+
+bool CaptureEditor::moveToCapture(CaptureData capture) {
+  QScreen *target = nullptr;
+  for (QScreen *screen : QGuiApplication::screens()) {
+    if (screen->name() == capture.monitor.name)
+      target = screen;
+  }
+  if (!target)
+    return false;
+  const QPointF offset = QPointF(capture_.monitor.geometry.topLeft() -
+                                 capture.monitor.geometry.topLeft());
+  capture_ = std::move(capture);
+  cursor_ += offset;
+  liveMonitor_ = capture_.monitor;
+  pristineSource_ = capture_.source;
+  pristineLogicalSize_ = capture_.previewSize;
+  cuts_.clear();
+  redactionBaseStale_ = true;
+  hoveredWindow_ = -1;
+  // A layer surface stays on the output it was made for; shown again, it is
+  // made for the new one.
+  const bool shown = isVisible();
+  if (shown)
+    hide();
+  setScreen(target);
+  if (layer_)
+    layer_->setScreen(target);
+  setGeometry(target->geometry());
+  if (shown) {
+    show();
+    setFocus(Qt::ActiveWindowFocusReason);
+    queuedOffset_ = offset;
+    enterFallback_.start();
+  }
+  remapped_ = true;
+  updatePointerCursor();
+  update();
+  return true;
+}
+
 void CaptureEditor::enterEdit(QString status) {
   phase_ = Phase::Edit;
   tool_ = Tool::Select;
@@ -4945,13 +5087,28 @@ void CaptureEditor::keyReleaseEvent(QKeyEvent *event) {
 
 void CaptureEditor::enterEvent(QEnterEvent *event) {
   QWidget::enterEvent(event);
+  enterFallback_.stop();
+  queuedOffset_.reset();
   if (phase_ != Phase::Select || dragging_)
     return;
   const QRegion oldVisual = pointerMotionRegion(cursor_);
   const int oldHoveredWindow = hoveredWindow_;
   // The constructor runs before Wayland gives the overlay pointer focus.
   // Entry carries the current local position, without needing a mouse move.
-  cursor_ = event->position();
+  // QtWayland reports a new layer surface's own coordinates as global ones,
+  // and position() takes this widget's monitor origin off them. Once the
+  // surface has moved monitors neither is right, so cursor_, converted from
+  // the last motion by moveToCapture(), stands until Hyprland answers.
+  if (!remapped_) {
+    cursor_ = event->globalPosition();
+    if (!onThisMonitor(cursor_))
+      followPointer(); // it moved on before the overlay appeared
+  } else {
+    // Hyprland maps the surface without a motion, so where the pointer went
+    // while it was remade comes from Hyprland itself.
+    pointerProbeSerial_ = motionSerial_;
+    pointerWatcher_.setFuture(QtConcurrent::run(&probePointer));
+  }
   if (capturePending_)
     return;
   trackRecentsHover();
@@ -5416,7 +5573,13 @@ void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
   const QRegion oldPointerVisual = pointerMotionRegion(cursor_, &oldCanvas);
   const QRectF oldSelection = selection_;
   const int oldHoveredWindow = hoveredWindow_;
-  cursor_ = event->position();
+  // Motion Qt queued from the surface on the previous monitor is relative to it.
+  cursor_ = event->position() + queuedOffset_.value_or(QPointF());
+  ++motionSerial_;
+  // Hyprland goes on sending an exclusive overlay the pointer's motion once it
+  // is on another monitor, at positions outside the overlay.
+  if (!onThisMonitor(cursor_))
+    followPointer();
   if (phase_ == Phase::Export)
     return;
   if (capturePending_)
@@ -5843,6 +6006,11 @@ void CaptureEditor::mousePressEvent(QMouseEvent *event) {
     return;
   }
   if (event->button() != Qt::LeftButton)
+    return;
+  // Hyprland hands this overlay presses on other monitors too, outside it (see
+  // mouseMoveEvent). While picking, they must not pick here.
+  if ((phase_ == Phase::Select || phase_ == Phase::Record) &&
+      (queuedOffset_ || !onThisMonitor(event->position())))
     return;
   cursor_ = event->position();
   endNudgeRun();

@@ -15,6 +15,7 @@
 #include <QColor>
 #include <QImage>
 #include <QPointF>
+#include <QPoint>
 #include <QRect>
 #include <QRectF>
 #include <QString>
@@ -166,6 +167,12 @@ enum class AnnotationLayer { Redaction, Default };
  * overlay after the pixel capture has already produced a frozen frame.
  */
 [[nodiscard]] bool probeFocusedMonitor(MonitorInfo &monitor, QString &error);
+/** The monitor containing `at`, in Hyprland's layout coordinates. Like
+ *  probeFocusedMonitor(), one `hyprctl monitors` call. */
+[[nodiscard]] bool probeMonitorAt(QPoint at, MonitorInfo &monitor, QString &error);
+/** The pointer in Hyprland's layout coordinates, from `hyprctl cursorpos`.
+ *  Spawns a process: keep it off the main thread. */
+[[nodiscard]] std::optional<QPoint> probePointer();
 /**
  * Captures the focused monitor's pixels onto the given monitor, and its window
  * list when `includeWindows` is set. Window discovery runs alongside the screen

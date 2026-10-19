@@ -54,6 +54,20 @@ exports and spotlight sampling cannot disagree.
 - The toolbar's style group has Backdrop, Frame and Glass popovers (`src/editor-look.cpp`).
   Colour… and Image… use the Save As chooser handoff (`src/editor-choosers.cpp`).
 
+### Picker and key guide
+
+- The picker follows the pointer to another monitor until something is picked
+  (`CaptureEditor::followPointer()`). Hyprland gives an exclusive overlay the
+  pointer's motion and presses on other monitors too, at positions outside it:
+  motion there captures that monitor on a worker, then the layer surface is
+  recreated on its output; presses there are ignored. A monitor that fails is
+  not tried again in that pick.
+- A new layer surface's pointer enter is read from its global position, which
+  QtWayland fills with the surface's own coordinates; Qt's mapped position is
+  off by the monitor's origin, which on a monitor away from the layout's origin
+  misplaced the crosshair until the first motion.
+- The key guide starts folded; `?` or its header opens it.
+
 ### Record mode and recordings
 
 - The picker has a Screenshot | Record switch (a click or V) and `--record-picker`

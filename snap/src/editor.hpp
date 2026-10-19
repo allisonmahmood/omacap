@@ -13,6 +13,7 @@
 #include <QFutureWatcher>
 #include <QHash>
 #include <QSet>
+#include <QStringList>
 #include <QPlainTextEdit>
 #include <QPixmap>
 #include <QPointer>
@@ -83,6 +84,15 @@ public:
    * false, for callers that never show the overlay.
    */
   void startCapture(CaptureMode mode, bool includeWindows);
+  /**
+   * Moves the picker to the monitor under the pointer, when that is another
+   * one and nothing has been picked yet: that monitor is captured on a worker,
+   * then the overlay reopens there with it. Pointer motion outside the overlay
+   * calls it.
+   */
+  void followPointer();
+  /// Whether a followPointer() capture is in flight. Test accessor.
+  [[nodiscard]] bool followingPointerForTest() const { return following_; }
   /**
    * Blocks until the in-flight snapshot persistence has drained, letting the
    * event loop run meanwhile. Returns whether the last write succeeded.
@@ -1046,6 +1056,31 @@ private:
     QString error;
   };
   QFutureWatcher<CaptureJob> captureWatcher_;
+  // followPointer()'s capture of the monitor under the pointer, for the screen
+  // followScreen_. A screen whose job or move fails joins unfollowable_.
+  QFutureWatcher<CaptureJob> followWatcher_;
+  bool following_ = false;
+  QString followScreen_;
+  QStringList unfollowable_;
+  // From moveToCapture() until the new surface's pointer enter: what turns a
+  // position on the previous monitor's surface into one on this monitor.
+  std::optional<QPointF> queuedOffset_;
+  // Ends the wait for that enter if it never comes.
+  QTimer enterFallback_;
+  // Whether the surface has moved monitors; its enter positions are off since.
+  bool remapped_ = false;
+  // `hyprctl cursorpos` after a moved surface's enter, used unless a motion
+  // (motionSerial_) has come since it was asked (pointerProbeSerial_).
+  QFutureWatcher<std::optional<QPoint>> pointerWatcher_;
+  quint64 motionSerial_ = 0;
+  quint64 pointerProbeSerial_ = 0;
+  /// Whether `point` (widget coordinates) is on this overlay's monitor.
+  [[nodiscard]] bool onThisMonitor(QPointF point) const;
+  [[nodiscard]] bool canFollowPointer() const;
+  /// The pointer in Hyprland's layout coordinates.
+  [[nodiscard]] QPoint pointerOnLayout() const;
+  /// False, changing nothing, when Qt has no screen for the capture's monitor.
+  bool moveToCapture(CaptureData capture);
   bool capturePending_ = false;
   bool captureStarted_ = false;
   bool firstPaintReported_ = false;

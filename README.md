@@ -68,7 +68,7 @@ This builds the committed checkout and installs its dependencies. OmaCap targets
 
 *The real screenshot editor, shown with a generated dashboard.*
 
-Run `omacap`, or press your screenshot key. The screen freezes under the picker: drag an area, click a window, or click empty space for the whole monitor. The shot is copied and saved straight away, wearing the look you used last, and a preview appears in the corner. Hover it to edit, copy, pin or drag out the file. It fades after 10 seconds unless you pin it.
+Run `omacap`, or press your screenshot key. The screen freezes under the picker: drag an area, click a window, or click empty space for the whole monitor. It opens on the focused monitor; move the pointer to another one and it follows, until you start picking. The shot is copied and saved straight away, wearing the look you used last, and a preview appears in the corner. Hover it to edit, copy, pin or drag out the file. It fades after 10 seconds unless you pin it.
 
 Press `E` in the picker to open the editor instead. `Tab` cycles the area's shape (free, square, 3:4, 16:9), `R` brings back the last area, and `S` captures a scrolling region and stitches it into one tall image. The stack on the right edge holds your last five shots; click one to reopen it with its marks still editable.
 
@@ -106,7 +106,7 @@ The editor draws over your desktop. `W` moves it into a normal window and back. 
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
 | Esc | Close; the shot stays in the stack on the right |
 
-Screenshots are saved as `omacap-<date>_<time>-<app>.png` in `$OMARCHY_SCREENSHOT_DIR`, or `~/Pictures/Screenshots`. The picker and editor list their keys in a card at the bottom left; `?` folds it away. [Omasnap's README](snap/README.md#controls) lists every key and modifier.
+Screenshots are saved as `omacap-<date>_<time>-<app>.png` in `$OMARCHY_SCREENSHOT_DIR`, or `~/Pictures/Screenshots`. The picker and editor list their keys in a card at the bottom left, folded until you press `?` or click it. [Omasnap's README](snap/README.md#controls) lists every key and modifier.
 
 ## Record your screen
 
