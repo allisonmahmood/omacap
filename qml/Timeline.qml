@@ -1,7 +1,10 @@
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Layouts
 
+// The timeline in the editor's dock: transport and edit actions, the time ruler, the
+// recording and audio lanes with waveforms, and the zooms lane. Drag across a lane to select
+// a range; click to select a clip (or split one, in cut mode); click the zooms lane to add a
+// zoom, and drag a zoom or its ends to time it.
 FocusScope {
     id: timeline
 
@@ -67,20 +70,22 @@ FocusScope {
         return Math.floor(t / 60) + ":" + (t % 60).toFixed(1).padStart(4, "0");
     }
 
+    // Splits every track at the playhead.
+    function splitAtPlayhead() {
+        backend.split(backend.position);
+    }
+
+    function keepRange() {
+        backend.trim(rangeA, rangeB);
+        selection = "";
+    }
+
+    // The width of the lane names, and the gap after them.
+    readonly property real labelWidth: 62
+    readonly property real gap: 8
+
     objectName: "timeline"
     implicitHeight: contents.implicitHeight
-    Keys.onPressed: (event) => {
-        if (event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) {
-            removeSelection();
-            event.accepted = true;
-        } else if (event.key === Qt.Key_C) {
-            cutting = true;
-            event.accepted = true;
-        } else if (event.key === Qt.Key_V || event.key === Qt.Key_Escape) {
-            cutting = false;
-            event.accepted = true;
-        }
-    }
 
     Connections {
         function onEditChanged() {
@@ -111,94 +116,146 @@ FocusScope {
         id: contents
 
         width: parent.width
-        spacing: 4
-
-        Rectangle {
-            Layout.fillWidth: true
-            height: 1
-            color: theme.colors.muted
-        }
+        spacing: 8
 
         RowLayout {
             Layout.fillWidth: true
+            spacing: 4
 
-            FlatButton {
-                text: backend.playing ? "Pause" : "Play"
+            ChromeButton {
+                objectName: "playButton"
+                icon: backend.playing ? "pause" : "play"
+                tooltip: (backend.playing ? "Pause" : "Play") + " · Space"
                 enabled: backend.duration > 0
                 onClicked: backend.togglePlay()
             }
 
-            Label {
+            Text {
                 text: timeline.time(backend.position) + " / " + timeline.time(backend.duration)
+                font: theme.mono(12)
+                color: theme.alpha(theme.foreground, 217)
+                Layout.leftMargin: 8
                 Layout.fillWidth: true
             }
 
-            FlatButton {
-                text: "Add zoom"
+            ChromeChip {
+                icon: "scissors"
+                text: "Split"
+                key: "S"
+                tooltip: "Split at the playhead"
+                enabled: backend.duration > 0
+                onClicked: timeline.splitAtPlayhead()
+            }
+
+            ChromeChip {
+                icon: "keep"
+                text: "Keep range"
+                tooltip: "Trim to the selected range or clip"
+                enabled: timeline.selection === "range" || timeline.selection === "clip"
+                onClicked: timeline.keepRange()
+            }
+
+            ChromeChip {
+                icon: "trash"
+                text: "Delete"
+                key: "Del"
+                tooltip: "Delete the selected clip, range or zoom"
+                enabled: timeline.selection !== ""
+                onClicked: timeline.removeSelection()
+            }
+
+            ChromeDivider {
+                implicitHeight: 28
+            }
+
+            ChromeChip {
+                icon: "plus"
+                text: "Zoom"
+                key: "Z"
+                tooltip: "Add a zoom at the playhead"
                 enabled: backend.duration > 0
                 onClicked: timeline.addZoom(backend.position)
             }
 
-            FlatButton {
-                objectName: "cutButton"
-                text: "✂ Cut"
-                primary: timeline.cutting
-                onClicked: {
-                    timeline.cutting = !timeline.cutting;
-                    timeline.forceActiveFocus();
-                }
+            ChromeDivider {
+                visible: mute.visible
+                implicitHeight: 28
             }
 
-            FlatButton {
-                text: "Select"
-                primary: !timeline.cutting
-                onClicked: {
-                    timeline.cutting = false;
-                    timeline.forceActiveFocus();
-                }
-            }
+            Row {
+                id: mute
 
-            FlatButton {
-                text: "Keep range"
-                enabled: timeline.selection === "range" || timeline.selection === "clip"
-                onClicked: {
-                    backend.trim(timeline.rangeA, timeline.rangeB);
-                    timeline.selection = "";
-                }
-            }
+                visible: backend.waveforms.mic !== undefined || backend.waveforms.desktop !== undefined
+                spacing: 4
 
-            FlatButton {
-                text: "Delete selection"
-                enabled: timeline.selection !== ""
-                onClicked: timeline.removeSelection()
+                ChromeButton {
+                    objectName: "micToggle"
+                    visible: backend.waveforms.mic !== undefined
+                    width: 30
+                    height: 30
+                    radius: 7
+                    icon: (backend.edit.mic ?? true) ? "mic" : "mic-off"
+                    selected: backend.edit.mic ?? true
+                    tooltip: (backend.edit.mic ?? true) ? "Microphone on · click to mute" : "Microphone muted"
+                    onClicked: backend.setValue("mic", !(backend.edit.mic ?? true))
+                }
+
+                ChromeButton {
+                    objectName: "desktopToggle"
+                    visible: backend.waveforms.desktop !== undefined
+                    width: 30
+                    height: 30
+                    radius: 7
+                    icon: (backend.edit.desktop ?? true) ? "speaker" : "speaker-off"
+                    selected: backend.edit.desktop ?? true
+                    tooltip: (backend.edit.desktop ?? true) ? "Desktop audio on · click to mute" : "Desktop audio muted"
+                    onClicked: backend.setValue("desktop", !(backend.edit.desktop ?? true))
+                }
+
             }
 
         }
 
         RowLayout {
             Layout.fillWidth: true
+            spacing: timeline.gap
 
-            Label {
-                Layout.preferredWidth: 80
-                text: timeline.cutting ? "Cut mode" : "Time"
-                color: theme.colors.dark_foreground
+            Text {
+                Layout.preferredWidth: timeline.labelWidth
+                text: timeline.cutting ? "Cut mode" : ""
+                font: theme.font(11, true)
+                color: theme.accent
             }
 
             Item {
                 id: ruler
 
+                // The roundest interval that gives at most six ticks.
+                readonly property real tick: [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600].find((step) => {
+                    return backend.duration / step <= 6;
+                }) ?? 1200
+
                 Layout.fillWidth: true
-                height: 22
+                height: 18
+
+                Rectangle {
+                    anchors.bottom: parent.bottom
+                    width: parent.width
+                    height: 1
+                    color: theme.alpha(theme.foreground, 30)
+                }
 
                 Repeater {
-                    model: 6
+                    model: backend.duration > 0 ? Math.floor(backend.duration / ruler.tick + 1e-6) + 1 : 0
 
-                    Label {
+                    Text {
                         required property int index
+                        readonly property real at: index * ruler.tick
 
-                        x: index / 5 * (ruler.width - width)
-                        text: timeline.time(index / 5 * backend.duration)
-                        color: theme.colors.dark_foreground
+                        x: Math.max(0, Math.min(ruler.width - width, at / backend.duration * ruler.width - width / 2))
+                        text: Math.floor(at / 60) + ":" + (ruler.tick < 1 ? (at % 60).toFixed(1).padStart(4, "0") : Math.floor(at % 60).toString().padStart(2, "0"))
+                        font: theme.mono(10)
+                        color: theme.alpha(theme.foreground, 128)
                     }
 
                 }
@@ -231,7 +288,7 @@ FocusScope {
                 id: lanes
 
                 width: parent.width
-                spacing: 3
+                spacing: 6
 
                 Repeater {
                     model: ["recording", "mic", "desktop"]
@@ -244,31 +301,52 @@ FocusScope {
 
                         visible: modelData === "recording" || wave !== undefined
                         Layout.fillWidth: true
+                        spacing: timeline.gap
 
-                        Label {
-                            Layout.preferredWidth: 80
-                            text: lane.modelData === "recording" ? "Recording" : lane.modelData === "mic" ? "Mic" : "Desktop"
+                        Text {
+                            Layout.preferredWidth: timeline.labelWidth
+                            text: lane.modelData === "recording" ? "Video" : lane.modelData === "mic" ? "Mic" : "Desktop"
+                            font: theme.font(12)
+                            color: theme.alpha(theme.foreground, 180)
                         }
 
                         Rectangle {
                             id: body
 
                             Layout.fillWidth: true
-                            height: lane.modelData === "recording" ? 36 : 30
-                            color: theme.colors.lighter_background
-                            border.color: theme.colors.muted
+                            height: lane.modelData === "recording" ? 26 : 22
+                            radius: 4
+                            color: theme.alpha(theme.foreground, 10)
+                            border.color: theme.alpha(theme.foreground, 20)
 
                             Repeater {
-                                model: backend.edit.spans || []
+                                model: lane.modelData === "recording" ? backend.edit.spans || [] : []
+
+                                Rectangle {
+                                    required property var modelData
+                                    readonly property bool chosen: timeline.selection === "clip" && timeline.clipId === modelData[2]
+
+                                    x: backend.toEditedTime(modelData[0]) / Math.max(0.001, backend.duration) * body.width + 1
+                                    width: (modelData[1] - modelData[0]) / Math.max(0.001, backend.duration) * body.width - 2
+                                    height: body.height
+                                    radius: 4
+                                    color: chosen ? theme.buttonSelected : theme.button
+                                    border.color: chosen ? theme.accent : theme.alpha(theme.foreground, 64)
+                                }
+
+                            }
+
+                            // Clip boundaries on the audio lanes, which stay linked to the video.
+                            Repeater {
+                                model: lane.modelData === "recording" ? [] : (backend.edit.spans || []).slice(1)
 
                                 Rectangle {
                                     required property var modelData
 
                                     x: backend.toEditedTime(modelData[0]) / Math.max(0.001, backend.duration) * body.width
-                                    width: (modelData[1] - modelData[0]) / Math.max(0.001, backend.duration) * body.width
+                                    width: 1
                                     height: body.height
-                                    color: timeline.selection === "clip" && timeline.clipId === modelData[2] ? theme.colors.selection : "transparent"
-                                    border.color: timeline.selection === "clip" && timeline.clipId === modelData[2] ? theme.colors.accent : theme.colors.muted
+                                    color: theme.alpha(theme.foreground, 64)
                                 }
 
                             }
@@ -278,11 +356,11 @@ FocusScope {
 
                                 property var audio: lane.wave
                                 property var spans: backend.edit.spans
-                                property color ink: theme.colors.accent
+                                // Muted tracks draw grey.
+                                property color ink: (backend.edit[lane.modelData] ?? true) ? theme.accent : theme.alpha(theme.foreground, 64)
 
                                 anchors.fill: parent
                                 visible: lane.modelData !== "recording"
-                                opacity: backend.edit[lane.modelData] ? 1 : 0.3
                                 onAudioChanged: requestPaint()
                                 onSpansChanged: requestPaint()
                                 onInkChanged: requestPaint()
@@ -318,11 +396,12 @@ FocusScope {
                                 }
                             }
 
-                            Label {
+                            Text {
                                 anchors.centerIn: parent
                                 visible: lane.modelData !== "recording" && !!lane.wave && lane.wave.status !== "ready"
                                 text: lane.wave && lane.wave.status === "loading" ? "Loading waveform…" : "Waveform unavailable"
-                                color: theme.colors.dark_foreground
+                                font: theme.font(11)
+                                color: theme.alpha(theme.foreground, 128)
                             }
 
                             Rectangle {
@@ -330,8 +409,7 @@ FocusScope {
                                 x: timeline.rangeA / Math.max(0.001, backend.duration) * body.width
                                 width: (timeline.rangeB - timeline.rangeA) / Math.max(0.001, backend.duration) * body.width
                                 height: parent.height
-                                color: theme.colors.accent
-                                opacity: 0.25
+                                color: theme.alpha(theme.accent, 64)
                             }
 
                             MouseArea {
@@ -380,7 +458,7 @@ FocusScope {
                                 x: clipMouse.mouseX
                                 width: 1
                                 height: parent.height
-                                color: theme.colors.accent
+                                color: theme.accent
                             }
 
                             Repeater {
@@ -392,7 +470,8 @@ FocusScope {
                                     x: (index === 0 ? timeline.rangeA : timeline.rangeB) / Math.max(0.001, backend.duration) * body.width - width / 2
                                     width: 6
                                     height: parent.height
-                                    color: theme.colors.accent
+                                    radius: 2
+                                    color: theme.accent
 
                                     MouseArea {
                                         anchors.fill: parent
@@ -421,19 +500,23 @@ FocusScope {
 
                 RowLayout {
                     Layout.fillWidth: true
+                    spacing: timeline.gap
 
-                    Label {
-                        Layout.preferredWidth: 80
+                    Text {
+                        Layout.preferredWidth: timeline.labelWidth
                         text: "Zooms"
+                        font: theme.font(12)
+                        color: theme.alpha(theme.foreground, 180)
                     }
 
                     Rectangle {
                         id: zoomTrack
 
                         Layout.fillWidth: true
-                        height: 30
-                        color: theme.colors.background
-                        border.color: theme.colors.muted
+                        height: 22
+                        radius: 4
+                        color: theme.alpha(theme.foreground, 10)
+                        border.color: theme.alpha(theme.foreground, 20)
 
                         MouseArea {
                             objectName: "zoomLane"
@@ -454,18 +537,22 @@ FocusScope {
                                 property real start: backend.toEditedTime(zoomData.start)
                                 property real end: backend.toEditedTime(zoomData.end)
 
+                                readonly property bool chosen: timeline.selectedZoom === index
+
                                 objectName: "zoomBlock" + index
                                 x: start / Math.max(0.001, backend.duration) * zoomTrack.width
                                 width: Math.max(2, (end - start) / Math.max(0.001, backend.duration) * zoomTrack.width)
                                 height: parent.height
                                 visible: end > start
-                                color: timeline.selectedZoom === index ? theme.colors.accent : theme.colors.selection
-                                border.color: theme.colors.accent
+                                radius: 4
+                                color: chosen ? theme.buttonSelected : theme.button
+                                border.color: chosen ? theme.accent : theme.alpha(theme.foreground, 77)
 
-                                Label {
+                                Text {
                                     anchors.centerIn: parent
                                     text: block.zoomData.amount.toFixed(1) + "×"
-                                    color: timeline.selectedZoom === block.index ? theme.colors.background : theme.colors.foreground
+                                    font: theme.font(10, true)
+                                    color: block.chosen ? theme.accent : theme.alpha(theme.foreground, 204)
                                 }
 
                                 MouseArea {
@@ -519,8 +606,17 @@ FocusScope {
                                         width: 7
                                         height: parent.height
                                         x: index === 0 ? 0 : parent.width - width
-                                        color: theme.colors.foreground
-                                        opacity: 0.7
+                                        color: "transparent"
+
+                                        // Resize grips: accent bars on the selected zoom, faint otherwise.
+                                        Rectangle {
+                                            x: parent.parent.index === 0 ? 1 : parent.width - width - 1
+                                            y: 3
+                                            width: 3
+                                            height: parent.height - 6
+                                            radius: 1.5
+                                            color: block.chosen ? theme.accent : theme.alpha(theme.foreground, 64)
+                                        }
 
                                         MouseArea {
                                             anchors.fill: parent
@@ -555,12 +651,23 @@ FocusScope {
 
             }
 
+            // The playhead, from the ruler down through the lanes.
             Rectangle {
-                x: 85 + backend.displayPosition / Math.max(0.001, backend.duration) * (parent.width - 85)
-                width: 1
-                height: parent.height
-                color: theme.colors.foreground
+                x: timeline.labelWidth + timeline.gap + backend.displayPosition / Math.max(0.001, backend.duration) * (parent.width - timeline.labelWidth - timeline.gap)
+                y: -ruler.height - contents.spacing
+                width: 1.5
+                height: parent.height - y
+                color: theme.foreground
                 visible: backend.duration > 0
+
+                Rectangle {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    width: 10
+                    height: 8
+                    radius: 2.5
+                    color: theme.foreground
+                }
+
             }
 
         }

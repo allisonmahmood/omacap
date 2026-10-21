@@ -1,0 +1,713 @@
+// Exercise the private window's real event handlers without adding a public
+// window API or test hooks to the production binary. pin.cpp is not otherwise
+// linked into the smoke executable.
+#include "../src/pin.cpp"
+#include "capture.hpp"
+#include "chrome-theme.hpp"
+#include "pin-file.hpp"
+#include "pin-layout.hpp"
+#include "pin-interaction-smoke.hpp"
+#include "video-ipc.h"
+
+#include <QByteArray>
+#include <QDeadlineTimer>
+#include <QDrag>
+#include <QProcess>
+#include <QHelpEvent>
+#include <QImage>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QList>
+#include <QPoint>
+#include <QRectF>
+#include <QSaveFile>
+#include <QScopeGuard>
+#include <QString>
+#include <QTemporaryDir>
+#include <QTest>
+#include <QThreadPool>
+#include <Qt>
+#include <QtCore/qtestsupport_core.h>
+#include <QtEnvironmentVariables>
+#include <QtMath>
+
+#include <sys/wait.h>
+#include <unistd.h>
+
+bool runPinThemeRenderingSmoke(const QString &path, QString &error) {
+  const QTemporaryDir runtime;
+  if (!runtime.isValid()) {
+    error = QStringLiteral("Could not isolate the pin theme fixture");
+    return false;
+  }
+  const QByteArray previousRuntime = qgetenv("XDG_RUNTIME_DIR");
+  const auto restore = qScopeGuard([&] {
+    pinPool().waitForDone();
+    QThreadPool::globalInstance()->waitForDone();
+    if (previousRuntime.isNull())
+      qunsetenv("XDG_RUNTIME_DIR");
+    else
+      qputenv("XDG_RUNTIME_DIR", previousRuntime);
+  });
+  qputenv("XDG_RUNTIME_DIR", runtime.path().toUtf8());
+  QImage source(320, 200, QImage::Format_ARGB32_Premultiplied);
+  source.fill(Qt::transparent);
+  const QString sourcePath = runtime.filePath(QStringLiteral("source.png"));
+  if (!source.save(sourcePath)) {
+    error = QStringLiteral("Could not save the pin theme fixture");
+    return false;
+  }
+  // No show/event loop: no compositor placement or interaction is requested.
+  PinWindow pin(source, sourcePath, source.size());
+  QImage card(source.size(), QImage::Format_ARGB32_Premultiplied);
+  card.fill(Qt::transparent);
+  pin.render(&card);
+  const QRectF button = pinControlRect(pin.size(), 5);
+  const QPoint fill(qRound(button.left() + 2), qRound(button.center().y()));
+  const bool saved = card.save(path);
+  if (card.pixelColor(160, 100).rgba() != chromeTheme().surface.rgba() ||
+      card.pixelColor(fill).rgba() != chromeTheme().button.rgba() || !saved) {
+    error = QStringLiteral("Pin chrome: surface=%1 expected=%2, button=%3 expected=%4 at %5,%6")
+                .arg(card.pixelColor(160, 100).name(), chromeTheme().surface.name(),
+                     card.pixelColor(fill).name(), chromeTheme().button.name())
+                .arg(fill.x()).arg(fill.y());
+    return false;
+  }
+  return true;
+}
+
+namespace {
+bool runPinRevealSmoke(QString &error) {
+  QTemporaryDir files;
+  if (!files.isValid())
+    return false;
+  const QByteArray oldPath = qgetenv("PATH");
+  const QByteArray oldRuntime = qgetenv("XDG_RUNTIME_DIR");
+  const QByteArray oldScreenshots = qgetenv("OMACAP_SCREENSHOT_DIR");
+  const auto restore = qScopeGuard([&] {
+    pinPool().waitForDone();
+    QThreadPool::globalInstance()->waitForDone();
+    for (const auto &variable : {qMakePair("PATH", oldPath),
+                                 qMakePair("XDG_RUNTIME_DIR", oldRuntime),
+                                 qMakePair("OMACAP_SCREENSHOT_DIR", oldScreenshots)}) {
+      if (variable.second.isNull())
+        qunsetenv(variable.first);
+      else
+        qputenv(variable.first, variable.second);
+    }
+  });
+  const auto write = [&](const QString &name, const QByteArray &contents,
+                          bool executable = false) {
+    QFile file(files.filePath(name));
+    return file.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+           file.write(contents) == contents.size() &&
+           (!executable || file.setPermissions(QFileDevice::ReadOwner |
+                              QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+  };
+  const auto read = [&](const QString &name) {
+    QFile file(files.filePath(name));
+    return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+  };
+  if (!write(QStringLiteral("xdg-mime"),
+             "#!/bin/sh\n/bin/cat \"${0%/*}/default-app\"\n", true) ||
+      !write(QStringLiteral("busctl"),
+             "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"${0%/*}/bus-args\"\n"
+             "test -f \"${0%/*}/bus-ok\"\n", true) ||
+      !write(QStringLiteral("xdg-open"),
+             "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"${0%/*}/open-args\"\n", true) ||
+      !write(QStringLiteral("wl-copy"),
+             "#!/bin/sh\n/bin/cat > \"${0%/*}/clipboard\"\n", true) ||
+      !write(QStringLiteral("wl-paste"),
+             "#!/bin/sh\n/bin/cat \"${0%/*}/clipboard\"\n", true) ||
+      !write(QStringLiteral("hyprctl"), "#!/bin/sh\nexit 1\n", true) ||
+      !write(QStringLiteral("default-app"), "org.example.ChosenBrowser.desktop\n") ||
+      !write(QStringLiteral("bus-ok"), "")) {
+    error = QStringLiteral("Could not isolate the reveal commands");
+    return false;
+  }
+  qputenv("PATH", files.path().toUtf8());
+  qputenv("XDG_RUNTIME_DIR", files.path().toUtf8());
+  const QString screenshots = files.filePath(QStringLiteral("shots # ' ü"));
+  qputenv("OMACAP_SCREENSHOT_DIR", screenshots.toUtf8());
+  const auto drain = [] {
+    for (int pass = 0; pass < 3; ++pass) {
+      pinPool().waitForDone();
+      QThreadPool::globalInstance()->waitForDone();
+      QCoreApplication::sendPostedEvents();
+    }
+  };
+  QImage image(1600, 904, QImage::Format_RGB32);
+  image.fill(Qt::cyan);
+  image.setPixelColor(71, 41, Qt::red);
+  const QString source = pinnedSnapshotPath(1);
+  if (!image.save(source))
+    return false;
+  QString saved;
+  {
+    PinWindow pin(pinDisplayImage(image), source, QSize(200, 113), PinLifetime::Timed);
+    pin.show();
+    const QPoint folder = pinControlRect(pin.size(), 6).center().toPoint();
+    QEnterEvent enter(folder, folder, pin.mapToGlobal(folder));
+    QApplication::sendEvent(&pin, &enter);
+    QTest::keyClick(&pin, Qt::Key_C);
+    drain();
+    if (QImage::fromData(read(QStringLiteral("clipboard")), "PNG")
+            .convertToFormat(image.format()) != image) {
+      error = QStringLiteral("Copy from a thumbnail lost full-resolution screenshot pixels");
+      return false;
+    }
+    QTest::mouseClick(&pin, Qt::LeftButton, Qt::NoModifier, folder);
+    drain();
+    const QStringList exports = QDir(screenshots).entryList({QStringLiteral("*.png")}, QDir::Files);
+    if (exports.size() != 1) {
+      error = QStringLiteral("Revealing a temporary preview did not save one PNG");
+      return false;
+    }
+    saved = QDir(screenshots).filePath(exports.constFirst());
+    const QString uri = QUrl::fromLocalFile(saved).toString(QUrl::FullyEncoded);
+    const QByteArray expected = QStringList{
+        QStringLiteral("--user"), QStringLiteral("--timeout=3s"), QStringLiteral("--"),
+        QStringLiteral("call"), QStringLiteral("org.example.ChosenBrowser"),
+        QStringLiteral("/org/freedesktop/FileManager1"),
+        QStringLiteral("org.freedesktop.FileManager1"), QStringLiteral("ShowItems"),
+        QStringLiteral("ass"), QStringLiteral("1"), uri, QString(), QString()
+    }.join(QLatin1Char('\n')).toUtf8();
+    if (read(QStringLiteral("bus-args")) != expected ||
+        QFileInfo::exists(files.filePath(QStringLiteral("open-args"))) ||
+        QImage(saved).convertToFormat(image.format()) != image) {
+      error = QStringLiteral("Reveal used the wrong browser, URI, or screenshot pixels");
+      return false;
+    }
+    // A second reveal and Copy path share the saved file, without duplicates.
+    QTest::keyClick(&pin, Qt::Key_R);
+    drain();
+    QTest::keyClick(&pin, Qt::Key_L);
+    drain();
+    if (read(QStringLiteral("clipboard")) != saved.toUtf8() ||
+        QDir(screenshots).entryList({QStringLiteral("*.png")}, QDir::Files) != exports) {
+      error = QStringLiteral("Reveal and Copy path did not reuse the same saved capture");
+      return false;
+    }
+    // A drag recipient may move the source away. Copy must not silently
+    // substitute the card's smaller display image for the full screenshot.
+    {
+      const QString moved = source + QStringLiteral(".moved");
+      if (!QFile::rename(source, moved))
+        return false;
+      const auto restoreSource = qScopeGuard([&] { QFile::rename(moved, source); });
+      if (!write(QStringLiteral("clipboard"), "a newer clipboard item"))
+        return false;
+      QTest::keyClick(&pin, Qt::Key_C);
+      drain();
+      if (read(QStringLiteral("clipboard")) != "a newer clipboard item") {
+        error = QStringLiteral("Copy used a display thumbnail after its full image disappeared");
+        return false;
+      }
+    }
+    pin.close();
+    drain();
+  }
+  if (QFileInfo::exists(source) || !QFileInfo::exists(saved)) {
+    error = QStringLiteral("Closing the preview removed its revealed file");
+    return false;
+  }
+  // Save As returns a timed runtime preview, but Reveal/Copy path must use
+  // the exact user-chosen file. Further editing starts a fresh working log.
+  const QString chosen = files.filePath(QStringLiteral("chosen # ' ü.png"));
+  const QString savedPreview = pinnedSnapshotPath(3);
+  if (!savePngFile(image, chosen, error) ||
+      !savePinnedSnapshot(image, savedPreview, image.size(), error, {}, chosen))
+    return false;
+  {
+    PinWindow pin(pinDisplayImage(image), savedPreview, QSize(200, 113), PinLifetime::Timed);
+    pin.show();
+    const QPoint folder = pinControlRect(pin.size(), 6).center().toPoint();
+    QEnterEvent enter(folder, folder, pin.mapToGlobal(folder));
+    QApplication::sendEvent(&pin, &enter);
+    QTest::mouseClick(&pin, Qt::LeftButton, Qt::NoModifier, folder);
+    drain();
+    QTest::keyClick(&pin, Qt::Key_L);
+    drain();
+    if (pin.expiry_.kept() || read(QStringLiteral("clipboard")) != chosen.toUtf8() ||
+        !read(QStringLiteral("bus-args")).contains(
+            QUrl::fromLocalFile(chosen).toString(QUrl::FullyEncoded).toUtf8()) ||
+        QDir(screenshots).entryList({QStringLiteral("*.png")}, QDir::Files).size() != 1) {
+      error = QStringLiteral("Saved preview was pinned or revealed an extra saved copy");
+      return false;
+    }
+    auto document = copyPinDocument(savedPreview, error);
+    OperationLog working;
+    if (!document || !loadOperationLog(operationLogPath(document->path()), working, error) ||
+        !working.savedPath.isEmpty()) {
+      error = QStringLiteral("Editing a saved preview retained its completed-export marker");
+      return false;
+    }
+    pin.pinDocument_ = document;
+    pin.documentFiles_.addPath(operationLogPath(document->path()));
+    QTest::keyClick(&pin, Qt::Key_T);
+    if (!pin.expiry_.kept()) {
+      error = QStringLiteral("Could not keep the originating preview for the save test");
+      return false;
+    }
+    document->finishSavedPreview(working, chosen);
+    if (!QTest::qWaitFor([&] { return !pin.isVisible(); }, 3000)) {
+      error = QStringLiteral("Saved replacement left its originating pin visible");
+      return false;
+    }
+    drain();
+  }
+  if (QFile::exists(savedPreview) || QImage(chosen).convertToFormat(image.format()) != image) {
+    error = QStringLiteral("Closing the saved preview damaged its durable PNG");
+    return false;
+  }
+  // Public --pin files need not already be PNGs. Copy still offers a PNG
+  // containing the full image, without changing or deleting the user file.
+  const QString bitmap = files.filePath(QStringLiteral("user.bmp"));
+  if (!image.save(bitmap, "BMP"))
+    return false;
+  {
+    PinWindow pin(image, bitmap, QSize(200, 113), PinLifetime::Timed);
+    pin.show();
+    QTest::keyClick(&pin, Qt::Key_C, Qt::ControlModifier);
+    drain();
+    if (QImage::fromData(read(QStringLiteral("clipboard")), "PNG")
+            .convertToFormat(image.format()) != image) {
+      error = QStringLiteral("Copying a non-PNG pin lost the original pixels");
+      return false;
+    }
+    pin.close();
+    drain();
+  }
+  if (!QFileInfo::exists(bitmap))
+    return false;
+  // A changed default is queried afresh. Unsupported ShowItems opens the
+  // folder via xdg-open, never an unrelated generic FileManager1 provider.
+  if (!write(QStringLiteral("default-app"), "org.example.OtherBrowser.desktop\n") ||
+      !QFile::remove(files.filePath(QStringLiteral("bus-ok"))) ||
+      !revealFileInFolder(saved, error) ||
+      !QTest::qWaitFor([&] { return !read(QStringLiteral("open-args")).isEmpty(); }, 2000) ||
+      !read(QStringLiteral("bus-args")).contains("\norg.example.OtherBrowser\n") ||
+      read(QStringLiteral("open-args")) !=
+          (QUrl::fromLocalFile(screenshots).toString(QUrl::FullyEncoded) + QLatin1Char('\n')).toUtf8()) {
+    error = QStringLiteral("Reveal did not honor a changed default or open its containing folder");
+    return false;
+  }
+  if (sharedPinPath(saved, {}, error) != saved ||
+      sharedPinPath(source, saved, error) != saved) {
+    error = QStringLiteral("An existing file or retained export was copied unnecessarily");
+    return false;
+  }
+  // Returned edits use their rendered preview, with a fresh saved copy.
+  const QString edited = pinnedSnapshotPath(2) + QStringLiteral(".preview.png");
+  image.fill(Qt::magenta);
+  if (!image.save(edited))
+    return false;
+  const QString editedCopy = sharedPinPath(edited, {}, error);
+  if (editedCopy.isEmpty() || editedCopy == saved ||
+      QImage(editedCopy).convertToFormat(image.format()) != image) {
+    error = QStringLiteral("Revealing returned edits lost the rendered image");
+    return false;
+  }
+  if (!QFile::remove(files.filePath(QStringLiteral("xdg-open"))))
+    return false;
+  QString launchError;
+  if (revealFileInFolder(saved, launchError) || launchError.isEmpty()) {
+    error = QStringLiteral("A missing file browser launcher did not report failure");
+    return false;
+  }
+  QString missingError;
+  if (!sharedPinPath(files.filePath(QStringLiteral("missing.png")), {}, missingError).isEmpty() ||
+      missingError.isEmpty()) {
+    error = QStringLiteral("A missing screenshot produced a shareable path");
+    return false;
+  }
+  return true;
+}
+} // namespace
+
+namespace {
+/// Pins and previews conceal themselves while OmaCap records: the marker
+/// must exist and name a live process, and a recorder that dies without
+/// removing it gives the cards back.
+bool runPinRecordingSmoke(QString &error) {
+  QTemporaryDir runtime;
+  const QByteArray previous = qgetenv("OMACAP_RUNTIME_DIR");
+  const auto restore = qScopeGuard([&] {
+    previous.isNull() ? qunsetenv("OMACAP_RUNTIME_DIR")
+                      : qputenv("OMACAP_RUNTIME_DIR", previous);
+  });
+  qputenv("OMACAP_RUNTIME_DIR", runtime.path().toUtf8());
+  const auto writeMarker = [](qint64 pid) {
+    QFile marker(recordingMarkerPath());
+    return marker.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+           marker.write(QByteArray::number(pid) + '\n') > 0;
+  };
+  QImage source(240, 140, QImage::Format_ARGB32_Premultiplied);
+  source.fill(Qt::darkCyan);
+  const QString sourcePath = runtime.filePath(QStringLiteral("source.png"));
+  if (!runtime.isValid() || !source.save(sourcePath)) {
+    error = QStringLiteral("Could not prepare the recording fixture");
+    return false;
+  }
+  PinWindow pin(source, sourcePath, source.size(), PinLifetime::Timed);
+  const auto painted = [&] {
+    QImage card(pin.size(), QImage::Format_ARGB32_Premultiplied);
+    card.fill(Qt::transparent);
+    pin.render(&card);
+    return card.pixelColor(card.rect().center()).alpha() > 0;
+  };
+  const auto settles = [&](bool recording) {
+    QDeadlineTimer deadline(3000);
+    while (pin.recording_.recording() != recording && !deadline.hasExpired())
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    return pin.recording_.recording() == recording;
+  };
+  if (!painted() || recordingInProgress()) {
+    error = QStringLiteral("A pin was hidden with no recording");
+    return false;
+  }
+
+  // A marker left by a process that is gone is ignored.
+  QProcess finished;
+  finished.start(QStringLiteral("/bin/true"));
+  finished.waitForFinished();
+  if (!writeMarker(finished.processId() ? finished.processId() : 999999) ||
+      recordingInProgress()) {
+    error = QStringLiteral("A stale recording marker counted");
+    return false;
+  }
+
+  QProcess recorder;
+  recorder.start(QStringLiteral("/bin/sleep"), {QStringLiteral("30")});
+  if (!recorder.waitForStarted() || !writeMarker(recorder.processId()) ||
+      !settles(true) || painted()) {
+    recorder.kill();
+    recorder.waitForFinished();
+    error = QStringLiteral("A pin stayed on screen during a recording");
+    return false;
+  }
+  // A press that reaches the drag handle now starts no drag: its thumbnail
+  // would be a window of its own. Qt deletes a drag only later.
+  pin.beginFileDrag();
+  if (pin.findChild<QDrag *>()) {
+    recorder.kill();
+    recorder.waitForFinished();
+    error = QStringLiteral("A pin started a file drag during a recording");
+    return false;
+  }
+  // The recorder dies without removing its marker.
+  recorder.kill();
+  recorder.waitForFinished();
+  if (!settles(false) || !painted()) {
+    error = QStringLiteral("A pin did not come back after the recorder died");
+    return false;
+  }
+  // A recorder that exited but nobody has reaped yet is gone too, though
+  // kill(pid, 0) still finds it.
+  const pid_t zombie = ::fork();
+  if (zombie == 0) {
+    ::usleep(500000);
+    ::_exit(0);
+  }
+  const auto reap = qScopeGuard([zombie] {
+    if (zombie > 0)
+      ::waitpid(zombie, nullptr, 0);
+  });
+  if (zombie < 0 || !writeMarker(zombie) || !settles(true) || painted()) {
+    error = QStringLiteral("A pin stayed on screen during a recording");
+    return false;
+  }
+  ::waitid(P_PID, static_cast<id_t>(zombie), nullptr, WEXITED | WNOWAIT);
+  if (!settles(false) || !painted() || recordingInProgress()) {
+    error = QStringLiteral("An exited, unreaped recorder kept pins hidden");
+    return false;
+  }
+
+  // The marker names the video process, then its capture worker too, one
+  // per line, and is replaced whole. The worker can outlive the video
+  // process; pins stay hidden until both are gone.
+  const auto replaceMarker = [](const QList<qint64> &pids) {
+    QByteArray text;
+    for (const qint64 pid : pids)
+      text += QByteArray::number(pid) + '\n';
+    QSaveFile marker(recordingMarkerPath());
+    return marker.open(QIODevice::WriteOnly) && marker.write(text) == text.size() &&
+           marker.commit();
+  };
+  QProcess owner;
+  QProcess worker;
+  const auto stop = qScopeGuard([&] {
+    for (QProcess *process : {&owner, &worker}) {
+      process->kill();
+      process->waitForFinished();
+    }
+  });
+  owner.start(QStringLiteral("/bin/sleep"), {QStringLiteral("30")});
+  worker.start(QStringLiteral("/bin/sleep"), {QStringLiteral("30")});
+  if (!owner.waitForStarted() || !worker.waitForStarted() ||
+      !replaceMarker({owner.processId()}) || !settles(true) ||
+      !replaceMarker({owner.processId(), worker.processId()})) {
+    error = QStringLiteral("Could not start the recording processes");
+    return false;
+  }
+  owner.kill();
+  owner.waitForFinished();
+  QTest::qWait(300);
+  if (!pin.recording_.recording() || painted() || !recordingInProgress()) {
+    error = QStringLiteral("A pin came back while the capture worker still ran");
+    return false;
+  }
+  worker.kill();
+  worker.waitForFinished();
+  if (!settles(false) || !painted() || recordingInProgress()) {
+    error = QStringLiteral("A pin stayed hidden after the capture worker exited");
+    return false;
+  }
+  return true;
+}
+} // namespace
+
+bool runPinInteractionSmoke(QString &error) {
+  if (!runPinRevealSmoke(error) || !runPinRecordingSmoke(error))
+    return false;
+  QTemporaryDir runtime;
+  if (!runtime.isValid()) {
+    error = QStringLiteral("Could not create the pin interaction fixture");
+    return false;
+  }
+  // Clipboard and compositor calls must not touch the developer's session.
+  // An editor child exits in the smoke entry point before creating any UI.
+  for (const QString &name : {QStringLiteral("hyprctl"), QStringLiteral("wl-copy"),
+                              QStringLiteral("wl-paste")}) {
+    QFile command(runtime.filePath(name));
+    if (!command.open(QIODevice::WriteOnly) ||
+        command.write("#!/bin/sh\nexit 1\n") < 0 ||
+        !command.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                                  QFileDevice::ExeOwner)) {
+      error = QStringLiteral("Could not isolate pin interaction commands");
+      return false;
+    }
+  }
+  const QByteArray previousPath = qgetenv("PATH");
+  const QByteArray previousRuntime = qgetenv("XDG_RUNTIME_DIR");
+  const QByteArray previousChild = qgetenv(kPinSmokeEditorChild);
+  const auto restore = qScopeGuard([&] {
+    pinPool().waitForDone();
+    QThreadPool::globalInstance()->waitForDone();
+    for (const auto &variable : {
+             qMakePair("PATH", previousPath),
+             qMakePair("XDG_RUNTIME_DIR", previousRuntime),
+             qMakePair(kPinSmokeEditorChild, previousChild)}) {
+      if (variable.second.isNull())
+        qunsetenv(variable.first);
+      else
+        qputenv(variable.first, variable.second);
+    }
+  });
+  qputenv("PATH", runtime.path().toUtf8());
+  qputenv("XDG_RUNTIME_DIR", runtime.path().toUtf8());
+  qputenv(kPinSmokeEditorChild, "1");
+
+  QImage image(200, 113, QImage::Format_RGB32);
+  image.fill(Qt::darkGray);
+  const QString path = runtime.filePath(QStringLiteral("capture.png"));
+  if (!image.save(path)) {
+    error = QStringLiteral("Could not save the pin interaction fixture");
+    return false;
+  }
+  PinWindow window(image, path, image.size(), PinLifetime::Timed);
+  window.show();
+  const QPoint background(100, 95);
+  QEnterEvent enter(background, background, window.mapToGlobal(background));
+  QApplication::sendEvent(&window, &enter);
+  const auto drainActions = [] {
+    // Completion handlers can queue document/stack reads of their own.
+    for (int pass = 0; pass < 3; ++pass) {
+      pinPool().waitForDone();
+      QThreadPool::globalInstance()->waitForDone();
+      QCoreApplication::sendPostedEvents();
+    }
+  };
+  const auto isKept = [&] {
+    const QPoint point = pinControlRect(window.size(), 5).center().toPoint();
+    QHelpEvent tip(QEvent::ToolTip, point, window.mapToGlobal(point));
+    QApplication::sendEvent(&window, &tip);
+    return QToolTip::text().startsWith(QStringLiteral("Unpin"));
+  };
+  const auto expectTimed = [&](const QString &action) {
+    drainActions();
+    if (!isKept())
+      return true;
+    error = QStringLiteral("%1 implicitly pinned a timed preview").arg(action);
+    return false;
+  };
+  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, background);
+  if (!expectTimed(QStringLiteral("Clicking the image")))
+    return false;
+  QWheelEvent wheel(background, window.mapToGlobal(background), {}, QPoint(0, 120),
+                     Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+  QApplication::sendEvent(&window, &wheel);
+  if (!expectTimed(QStringLiteral("Scrolling")))
+    return false;
+  for (const int control : {1, 2, 3, 4, 6}) {
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+                       pinControlRect(window.size(), control).center().toPoint());
+    if (!expectTimed(QStringLiteral("Using control %1").arg(control)))
+      return false;
+  }
+  for (const Qt::Key key : {Qt::Key_C, Qt::Key_L, Qt::Key_E, Qt::Key_R}) {
+    QApplication::sendEvent(&window, &enter);
+    QTest::keyClick(&window, key);
+    if (!expectTimed(QStringLiteral("Using shortcut %1").arg(static_cast<int>(key))))
+      return false;
+  }
+  QTest::keyClick(&window, Qt::Key_C, Qt::ControlModifier);
+  if (!expectTimed(QStringLiteral("Ctrl+C")))
+    return false;
+
+  // Feed the real drag watcher compositor snapshots without moving any window
+  // in the developer's session. Dispatches still fail inside this fixture.
+  QFile hyprctl(runtime.filePath(QStringLiteral("hyprctl")));
+  if (!hyprctl.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+      hyprctl.write("#!/bin/sh\ncase \"$*\" in\n"
+                    "  '-j clients') /bin/cat \"${0%/*}/clients.json\";;\n"
+                    "  '-j monitors') /bin/cat \"${0%/*}/monitors.json\";;\n"
+                    "  *) exit 1;;\nesac\n") < 0) {
+    error = QStringLiteral("Could not prepare the drag compositor fixture");
+    return false;
+  }
+  hyprctl.close();
+  QFile monitors(runtime.filePath(QStringLiteral("monitors.json")));
+  if (!monitors.open(QIODevice::WriteOnly) ||
+      monitors.write("[{\"x\":0,\"y\":0,\"width\":1200,\"height\":900,"
+                     "\"scale\":1,\"focused\":true,\"reserved\":[0,0,0,0]}]") < 0) {
+    error = QStringLiteral("Could not prepare the drag monitor fixture");
+    return false;
+  }
+  monitors.close();
+  const QRect screen(0, 0, 1200, 900);
+  const QRect origin(986, 773, 200, 113);
+  const CompositorPin older{QStringLiteral("omacap-pin older"),
+                            QStringLiteral("0x222"), QRect(986, 640, 200, 113),
+                            true, true};
+  const auto pinsAt = [&](const QRect &rect) {
+    return QVector<CompositorPin>{{window.windowTitle(), QStringLiteral("0x111"),
+                                  rect, true, true}, older};
+  };
+  const auto writePosition = [&](const QRect &rect) {
+    QJsonArray clients;
+    for (const CompositorPin &pin : pinsAt(rect))
+      clients.push_back(QJsonObject{
+          {QStringLiteral("class"), QStringLiteral("omacap")},
+          {QStringLiteral("title"), pin.title},
+          {QStringLiteral("address"), pin.address},
+          {QStringLiteral("at"), QJsonArray{pin.rect.x(), pin.rect.y()}},
+          {QStringLiteral("size"), QJsonArray{pin.rect.width(), pin.rect.height()}},
+          {QStringLiteral("floating"), true}, {QStringLiteral("pinned"), true}});
+    QSaveFile file(runtime.filePath(QStringLiteral("clients.json")));
+    return file.open(QIODevice::WriteOnly) &&
+           file.write(QJsonDocument(clients).toJson(QJsonDocument::Compact)) >= 0 &&
+           file.commit();
+  };
+  const struct {
+    const char *name;
+    QPoint movement;
+    bool waitForPoll;
+    bool superDrag;
+    bool returnToOrigin;
+  } drags[] = {{"Clicking without moving", {}, false, false, false},
+                {"Holding Super without moving", {}, false, true, false},
+                {"Reordering the stack", {0, -160}, true, false, false},
+                {"Dragging away from the stack", {-360, -170}, true, false, false},
+                {"Dropping between polls", {-300, -220}, false, false, false},
+                {"Reordering with Super", {0, -160}, false, true, false},
+                {"Dragging back to the starting spot", {-300, -220}, true, false, true}};
+  for (const auto &drag : drags) {
+    if (!writePosition(origin))
+      return false;
+    window.setPlacementSnapshot(screen, pinsAt(origin));
+    QApplication::sendEvent(&window, &enter);
+    drainActions();
+    if (drag.superDrag)
+      QTest::keyPress(&window, Qt::Key_Meta);
+    else
+      QTest::mousePress(&window, Qt::LeftButton, Qt::NoModifier, background);
+    if (!writePosition(origin.translated(drag.movement)))
+      return false;
+    if (drag.waitForPoll && !QTest::qWaitFor(isKept, 1500)) {
+      error = QStringLiteral("%1 did not pin the preview during movement")
+                  .arg(QString::fromLatin1(drag.name));
+      return false;
+    }
+    if (drag.returnToOrigin && !writePosition(origin))
+      return false;
+    if (drag.superDrag) {
+      QTest::keyRelease(&window, Qt::Key_Meta);
+    } else {
+      QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, background);
+      // The first pointer event after the compositor's move grab ends requests
+      // a final snapshot, including drags shorter than one polling interval.
+      QMouseEvent wake(QEvent::MouseMove, background, window.mapToGlobal(background),
+                       Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+      QApplication::sendEvent(&window, &wake);
+    }
+    drainActions();
+    // Let any failed fixture snap finish its existing placement retries.
+    QTest::qWait(200);
+    drainActions();
+    const bool moved = !drag.movement.isNull();
+    if (isKept() != moved) {
+      error = QStringLiteral("%1 left the preview %2")
+                  .arg(QString::fromLatin1(drag.name),
+                       moved ? QStringLiteral("timed") : QStringLiteral("pinned"));
+      return false;
+    }
+    if (moved) {
+      QTest::keyClick(&window, Qt::Key_P, Qt::ControlModifier);
+      if (!expectTimed(QStringLiteral("Unpinning after a drag")))
+        return false;
+    }
+  }
+  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+                     pinControlRect(window.size(), 5).center().toPoint());
+  if (!isKept()) {
+    error = QStringLiteral("The explicit pin button did not keep the preview");
+    return false;
+  }
+  QTest::keyClick(&window, Qt::Key_P, Qt::ControlModifier);
+  if (!expectTimed(QStringLiteral("Unpinning with Ctrl+P")))
+    return false;
+  QTest::keyClick(&window, Qt::Key_P, Qt::ControlModifier);
+  if (!isKept()) {
+    error = QStringLiteral("Ctrl+P did not keep the preview");
+    return false;
+  }
+  QApplication::sendEvent(&window, &enter);
+  QTest::keyClick(&window, Qt::Key_T);
+  if (!expectTimed(QStringLiteral("Unpinning with T")))
+    return false;
+  QTest::keyClick(&window, Qt::Key_T, Qt::ControlModifier);
+  if (!expectTimed(QStringLiteral("Ctrl+T")))
+    return false;
+  QEvent leave(QEvent::Leave);
+  QApplication::sendEvent(&window, &leave);
+  QTest::keyClick(&window, Qt::Key_T);
+  if (!expectTimed(QStringLiteral("T without hovering")))
+    return false;
+  QApplication::sendEvent(&window, &enter);
+  QTest::keyClick(&window, Qt::Key_T);
+  if (!isKept()) {
+    error = QStringLiteral("T did not keep the hovered preview");
+    return false;
+  }
+  QKeyEvent repeat(QEvent::KeyPress, Qt::Key_T, Qt::NoModifier,
+                   QStringLiteral("t"), true);
+  QApplication::sendEvent(&window, &repeat);
+  if (!isKept()) {
+    error = QStringLiteral("Holding T repeatedly toggled the preview pin");
+    return false;
+  }
+  QToolTip::hideText();
+  return true;
+}

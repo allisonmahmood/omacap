@@ -1,0 +1,2506 @@
+/** @fileoverview Captures, renders, saves, and shares screenshots. */
+#include <QTextLayout>
+#include <QTextOption>
+#include "capture.hpp"
+#include "video-ipc.h"
+#include "pin-file.hpp"
+#include "pin-layout.hpp"
+#include "png.hpp"
+#include "recent-snaps.hpp"
+#include "recording-state.hpp"
+#include "stroke-smoothing.hpp"
+#include "output-config.hpp"
+#include "startup-timing.hpp"
+
+#include <QBuffer>
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QFontDatabase>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
+#include <QLinearGradient>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPoint>
+#include <QPointF>
+#include <QProcess>
+#include <QRandomGenerator>
+#include <QRegularExpression>
+#include <QSaveFile>
+#include <QStandardPaths>
+
+#include <QUrl>
+#include <algorithm>
+#include <array>
+#include <cerrno>
+#include <cmath>
+#include <fcntl.h>
+#include <numbers>
+#include <optional>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+/// Mat a Framed canvas keeps beyond a layer that outgrew the normal frame.
+
+bool loadCaptureFonts() {
+  static const std::array<int, 3> fontIds{
+      QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/Neucha.ttf")),
+      QFontDatabase::addApplicationFont(
+          QStringLiteral(":/fonts/JetBrainsMono-Regular.ttf")),
+      QFontDatabase::addApplicationFont(
+          QStringLiteral(":/fonts/InterDisplay-SemiBold.ttf"))};
+  return std::ranges::all_of(fontIds, [](int id) { return id >= 0; });
+}
+
+QString annotationTextFontName(TextFont textFont) {
+  switch (textFont) {
+  case TextFont::Neucha:
+    return QStringLiteral("Neucha");
+  case TextFont::JetBrainsMono:
+    return QStringLiteral("JetBrains Mono");
+  case TextFont::InterDisplay:
+    return QStringLiteral("Inter Display");
+  }
+  return QStringLiteral("Neucha");
+}
+
+QFont annotationTextFont(qreal size, TextFont textFont) {
+  static_cast<void>(loadCaptureFonts());
+  QFont font(annotationTextFontName(textFont));
+  font.setWeight(textFont == TextFont::InterDisplay ? QFont::DemiBold
+                                                    : QFont::Normal);
+  font.setItalic(false);
+  font.setPixelSize(qRound(std::max<qreal>(18.0, size * 5.0)));
+  return font;
+}
+
+qreal annotationTextWrapWidth(const Annotation &annotation,
+                              qreal canvasWidth) {
+  if (annotation.textWidth > 0.0)
+    return annotation.textWidth;
+  if (canvasWidth <= 0.0)
+    return 0.0;
+  // Room left before the right edge. Narrower than this and the text would be
+  // wrapping to a sliver, so leave it on one line and let it run.
+  const qreal room = canvasWidth - annotation.start.x();
+  return room >= kMinimumTextWrapWidth ? room : 0.0;
+}
+
+QStringList annotationTextLines(const Annotation &annotation,
+                                qreal canvasWidth) {
+  const QStringList paragraphs = annotation.text.split('\n');
+  const qreal wrap = annotationTextWrapWidth(annotation, canvasWidth);
+  if (wrap <= 0.0)
+    return paragraphs;
+  QStringList lines;
+  for (const QString &paragraph : paragraphs) {
+    if (paragraph.isEmpty()) {
+      lines.push_back(paragraph);
+      continue;
+    }
+    QTextLayout layout(paragraph,
+                       annotationTextFont(annotation.size, annotation.textFont));
+    QTextOption option;
+    option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    layout.setTextOption(option);
+    layout.beginLayout();
+    while (true) {
+      QTextLine line = layout.createLine();
+      if (!line.isValid())
+        break;
+      line.setLineWidth(wrap);
+      lines.push_back(paragraph.mid(line.textStart(), line.textLength()));
+    }
+    layout.endLayout();
+  }
+  return lines;
+}
+
+QRectF annotationTextBounds(const Annotation &annotation,
+                           qreal canvasWidth) {
+  const QFontMetricsF metrics(
+      annotationTextFont(annotation.size, annotation.textFont));
+  const QStringList lines = annotationTextLines(annotation, canvasWidth);
+  qreal widestLine = 0.0;
+  for (const QString &line : lines) {
+    // QTextLayout excludes trailing wrap whitespace from naturalTextWidth;
+    // keep indentation, but match that painted width for the pill.
+    QString visible = line;
+    while (!visible.isEmpty() && visible.back().isSpace())
+      visible.chop(1);
+    widestLine = std::max(widestLine, metrics.horizontalAdvance(visible));
+  }
+  const QRectF glyphs(
+      annotation.start.x(), annotation.start.y() - metrics.ascent(),
+      widestLine,
+      metrics.height() +
+          std::max<qsizetype>(0, lines.size() - 1) * metrics.lineSpacing());
+  if (annotation.textBackground != TextBackground::Pill)
+    return glyphs;
+  // The pill has even side/top padding and a bottom pad that grows with the
+  // descender, so commas and tails stay inside the cream.
+  const qreal pad = std::max<qreal>(4.0, metrics.height() * 0.18);
+  const qreal bottom = std::max(pad, metrics.descent() + 2.0);
+  return glyphs.adjusted(-pad, -pad, pad, bottom - metrics.descent());
+}
+
+qreal annotationPenWidth(const Annotation &annotation) {
+  switch (annotation.kind) {
+  case Annotation::Kind::Highlighter:
+    return std::max<qreal>(6.0, annotation.size * 3.0);
+  case Annotation::Kind::Freehand:
+  case Annotation::Kind::Line:
+    return std::max<qreal>(2.0, annotation.size);
+  case Annotation::Kind::Rectangle:
+  case Annotation::Kind::Ellipse:
+    return annotation.filled ? 0.0 : std::max<qreal>(2.0, annotation.size);
+  case Annotation::Kind::Spotlight:
+    return std::max<qreal>(1.0, annotation.size / 2.0);
+  default:
+    return 0.0;
+  }
+}
+
+QRectF annotationPaintedBounds(const Annotation &annotation) {
+  const auto pointBounds = [](const QVector<QPointF> &points) {
+    if (points.isEmpty())
+      return QRectF();
+    qreal left = points.constFirst().x();
+    qreal right = left;
+    qreal top = points.constFirst().y();
+    qreal bottom = top;
+    for (const QPointF &point : points) {
+      left = std::min(left, point.x());
+      right = std::max(right, point.x());
+      top = std::min(top, point.y());
+      bottom = std::max(bottom, point.y());
+    }
+    return QRectF(QPointF(left, top), QPointF(right, bottom));
+  };
+  // Redaction only replaces pixels inside the source frame. Its geometry
+  // can extend past that frame, but there are no painted pixels there for a
+  // larger canvas to reveal.
+  if (annotation.kind == Annotation::Kind::Redaction)
+    return QRectF();
+  if (annotation.kind == Annotation::Kind::Text)
+    return annotationTextBounds(annotation).adjusted(-1, -1, 1, 1);
+  if (annotation.kind == Annotation::Kind::Marker) {
+    const qreal diameter = std::max<qreal>(24.0, annotation.size * 6.0);
+    const qreal antialias =
+        std::max<qreal>(1.0, annotation.size * 0.35) / 2.0 + 1.0;
+    return QRectF(annotation.start.x() - diameter / 2.0,
+                  annotation.start.y() - diameter / 2.0, diameter, diameter)
+        .adjusted(-antialias, -antialias, antialias, antialias);
+  }
+  if (annotation.kind == Annotation::Kind::Freehand ||
+      annotation.kind == Annotation::Kind::Highlighter) {
+    if (annotation.points.size() < 2)
+      return QRectF();
+    const qreal extent = annotationPenWidth(annotation) / 2.0 + 1.0;
+    return pointBounds(annotation.points)
+        .adjusted(-extent, -extent, extent, extent);
+  }
+
+  QRectF bounds(annotation.start, annotation.end);
+  bounds = bounds.normalized();
+  if (annotation.kind == Annotation::Kind::Arrow) {
+    const QRectF visual = arrowVisualBounds(annotation);
+    return visual.isEmpty() ? QRectF() : visual.adjusted(-1, -1, 1, 1);
+  }
+  const qreal extent = annotationPenWidth(annotation) / 2.0 + 1.0;
+  return bounds.adjusted(-extent, -extent, extent, extent);
+}
+
+QRectF annotationsPaintedBounds(const QVector<Annotation> &annotations) {
+  QRectF painted;
+  for (const Annotation &annotation : annotations) {
+    const QRectF bounds = annotationPaintedBounds(annotation);
+    if (!bounds.isNull())
+      painted = painted.isNull() ? bounds : painted.united(bounds);
+  }
+  return painted;
+}
+
+CaptureLayout captureLayout(const QSizeF &sourceFrameSize,
+                            const QVector<Annotation> &annotations,
+                            CanvasBoundaryMode boundaryMode,
+                            const CaptureLook &look) {
+  return captureLayout(sourceFrameSize, annotationsPaintedBounds(annotations),
+                       boundaryMode, look);
+}
+
+bool ensurePrivateDirectory(const QString &path) {
+  if (path.isEmpty())
+    return false;
+
+  const QString cleanPath = QDir::cleanPath(path);
+  const QByteArray encoded = QFile::encodeName(cleanPath);
+  const int fd = ::open(encoded.constData(),
+                        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd >= 0) {
+    struct stat info{};
+    const bool ownedDirectory = ::fstat(fd, &info) == 0 &&
+                                S_ISDIR(info.st_mode) &&
+                                info.st_uid == ::geteuid();
+    const bool secured = ownedDirectory && ::fchmod(fd, S_IRWXU) == 0;
+    ::close(fd);
+    return secured;
+  }
+  if (errno != ENOENT)
+    return false;
+
+  const QString parent = QFileInfo(cleanPath).dir().absolutePath();
+  if (parent.isEmpty() || parent == cleanPath)
+    return false;
+  if (!QFileInfo(parent).isDir() && !ensurePrivateDirectory(parent))
+    return false;
+
+  if (::mkdir(encoded.constData(), S_IRWXU) == 0)
+    return true;
+  return errno == EEXIST && ensurePrivateDirectory(cleanPath);
+}
+
+QString secureRuntimeDirectory() {
+  // OmaCap's runtime directory also holds the video process's socket, lock
+  // and recording marker; screenshot working files stay in their own corner.
+  const QString runtime =
+      QDir(omacapRuntimeDir()).filePath(QStringLiteral("snap"));
+  return ensurePrivateDirectory(runtime) ? QDir::cleanPath(runtime) : QString();
+}
+
+namespace {
+struct ProcessResult {
+  QByteArray output;
+  QByteArray error;
+  int exitCode = -1;
+  bool finished = false;
+};
+
+ProcessResult runProcess(const QString &program, const QStringList &arguments,
+                         const QByteArray &input = {}, int timeoutMs = 10000,
+                         const QProcessEnvironment &environment = {}) {
+  QProcess process;
+  process.setProcessChannelMode(QProcess::SeparateChannels);
+  if (!environment.isEmpty())
+    process.setProcessEnvironment(environment);
+  process.start(program, arguments);
+  if (!process.waitForStarted(2000))
+    return {{}, process.errorString().toUtf8(), -1, false};
+
+  if (!input.isEmpty())
+    process.write(input);
+  process.closeWriteChannel();
+  const bool finished = process.waitForFinished(timeoutMs);
+  if (!finished)
+    process.kill();
+  return {process.readAllStandardOutput(), process.readAllStandardError(),
+          finished ? process.exitCode() : -1, finished};
+}
+
+bool copyToWaylandClipboard(const QString &mimeType, const QByteArray &payload,
+                            QString &error) {
+  QByteArray lastError;
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    const ProcessResult copied =
+        runProcess(QStringLiteral("wl-copy"),
+                   {QStringLiteral("--type"), mimeType}, payload, 5000);
+    if (!copied.finished || copied.exitCode != 0) {
+      lastError = copied.error;
+      continue;
+    }
+
+    const ProcessResult verified = runProcess(
+        QStringLiteral("wl-paste"),
+        {QStringLiteral("--no-newline"), QStringLiteral("--type"), mimeType},
+        {}, 5000);
+    if (verified.finished && verified.exitCode == 0 &&
+        verified.output == payload)
+      return true;
+    lastError = verified.error;
+    if (lastError.isEmpty())
+      lastError = QByteArrayLiteral("clipboard verification did not match");
+  }
+  error = QStringLiteral("Could not persist clipboard: %1")
+              .arg(QString::fromUtf8(lastError).trimmed());
+  return false;
+}
+
+QString runtimePath(const QString &name) {
+  const QString runtime = secureRuntimeDirectory();
+  return runtime.isEmpty() ? QString() : QDir(runtime).filePath(name);
+}
+
+QString suggestedScreenshotPathImpl(const QString &appSlug) {
+  // Precedence: OMACAP_SCREENSHOT_DIR, then [output] directory in the
+  // config, then Omarchy's OMARCHY_SCREENSHOT_DIR, then
+  // ~/Pictures/Screenshots. The filename pattern comes from [output]
+  // filename; its default keeps the date first so the folder always sorts
+  // chronologically.
+  const OutputConfig config = loadOutputConfig(defaultConfigPath());
+  QString root = qEnvironmentVariable("OMACAP_SCREENSHOT_DIR");
+  if (root.isEmpty())
+    root = config.directory;
+  if (root.isEmpty())
+    root = qEnvironmentVariable("OMARCHY_SCREENSHOT_DIR");
+  if (root.isEmpty())
+    root =
+        QDir(QStandardPaths::writableLocation(QStandardPaths::PicturesLocation))
+            .filePath(QStringLiteral("Screenshots"));
+  return QDir(root).filePath(formatScreenshotFilename(
+      config.filename, QDateTime::currentDateTime(), appSlug));
+}
+
+QString screenshotTargetPath(QString &error, const QString &appSlug) {
+  const QString suggested = suggestedScreenshotPathImpl(appSlug);
+  const QFileInfo file(suggested);
+  const QString root = file.absolutePath();
+  if (!QDir().mkpath(root)) {
+    error =
+        QStringLiteral("Could not create screenshot directory: %1").arg(root);
+    return {};
+  }
+
+  const QString fileName = file.fileName();
+  const QString stem = fileName.chopped(4);
+  QString path = QDir(root).filePath(fileName);
+  for (int suffix = 2; QFile::exists(path); ++suffix)
+    path =
+        QDir(root).filePath(QStringLiteral("%1-%2.png").arg(stem).arg(suffix));
+  return path;
+}
+
+// The focused monitor in `hyprctl monitors -j` output, or with `at` (layout
+// coordinates) the one containing that point.
+bool parseMonitor(const QByteArray &json, MonitorInfo &monitor, QString &error,
+                  std::optional<QPoint> at = std::nullopt) {
+  QJsonParseError parseError;
+  const QJsonDocument document = QJsonDocument::fromJson(json, &parseError);
+  if (parseError.error != QJsonParseError::NoError || !document.isArray()) {
+    error = QStringLiteral("Could not parse Hyprland monitors: %1")
+                .arg(parseError.errorString());
+    return false;
+  }
+
+  for (const QJsonValue value : document.array()) {
+    const QJsonObject object = value.toObject();
+    if (!at && !object.value(QStringLiteral("focused")).toBool())
+      continue;
+
+    const qreal scale = object.value(QStringLiteral("scale")).toDouble(1.0);
+    const int rawWidth = object.value(QStringLiteral("width")).toInt();
+    const int rawHeight = object.value(QStringLiteral("height")).toInt();
+    const int transform = object.value(QStringLiteral("transform")).toInt();
+    int logicalWidth = qRound(rawWidth / std::max<qreal>(scale, 0.01));
+    int logicalHeight = qRound(rawHeight / std::max<qreal>(scale, 0.01));
+    if (transform == 1 || transform == 3 || transform == 5 || transform == 7)
+      std::swap(logicalWidth, logicalHeight);
+    const QRect geometry(object.value(QStringLiteral("x")).toInt(),
+                         object.value(QStringLiteral("y")).toInt(), logicalWidth,
+                         logicalHeight);
+    if (at && !geometry.contains(*at))
+      continue;
+
+    monitor.name = object.value(QStringLiteral("name")).toString();
+    monitor.geometry = geometry;
+    monitor.pixelSize = {rawWidth, rawHeight};
+    monitor.scale = scale;
+    monitor.transform = transform;
+    monitor.workspaceId = object.value(QStringLiteral("activeWorkspace"))
+                              .toObject()
+                              .value(QStringLiteral("id"))
+                              .toInt();
+    return !monitor.name.isEmpty() && logicalWidth > 0 && logicalHeight > 0;
+  }
+
+  error = at ? QStringLiteral("No monitor contains %1, %2").arg(at->x()).arg(at->y())
+             : QStringLiteral("Hyprland did not report a focused monitor");
+  return false;
+}
+
+QVector<WindowTarget> parseWindows(const QByteArray &json,
+                                   const MonitorInfo &monitor) {
+  QVector<WindowTarget> result;
+  const QJsonDocument document = QJsonDocument::fromJson(json);
+  if (!document.isArray())
+    return result;
+
+  for (const QJsonValue value : document.array()) {
+    const QJsonObject object = value.toObject();
+    if (object.value(QStringLiteral("workspace"))
+            .toObject()
+            .value(QStringLiteral("id"))
+            .toInt() != monitor.workspaceId)
+      continue;
+
+    const QJsonArray at = object.value(QStringLiteral("at")).toArray();
+    const QJsonArray size = object.value(QStringLiteral("size")).toArray();
+    if (at.size() < 2 || size.size() < 2)
+      continue;
+
+    QRect rect(at.at(0).toInt() - monitor.geometry.x(),
+               at.at(1).toInt() - monitor.geometry.y(), size.at(0).toInt(),
+               size.at(1).toInt());
+    rect = rect.intersected(QRect(QPoint(), monitor.geometry.size()));
+    if (rect.isEmpty())
+      continue;
+
+    QString appClass = object.value(QStringLiteral("class")).toString();
+    QString title = object.value(QStringLiteral("title")).toString();
+    if (title.isEmpty())
+      title = appClass.isEmpty() ? QStringLiteral("window") : appClass;
+    result.push_back({rect, object.value(QStringLiteral("stableId")).toString(),
+                      std::move(title), std::move(appClass)});
+  }
+  return result;
+}
+
+namespace {
+constexpr std::array<qreal, 6> kArrowLineWidths{1.5, 3.0, 5.0, 7.0, 11.0, 16.0};
+constexpr std::array<qreal, 6> kStandardBodyWidths{5.5,  7.0,  11.5,
+                                                   14.5, 19.5, 29.5};
+constexpr std::array<qreal, 6> kStandardBackWidths{1.5, 2.5, 3.5,
+                                                   4.5, 6.0, 8.5};
+constexpr std::array<qreal, 6> kStandardHeadLengths{15.0, 20.0, 31.5,
+                                                    38.0, 52.0, 78.5};
+constexpr std::array<qreal, 6> kStandardHeadHeights{14.0, 18.5, 29.0,
+                                                    36.0, 49.0, 75.0};
+constexpr std::array<qreal, 6> kPointyBodyWidths{8.0,  10.0, 16.0,
+                                                 20.0, 27.0, 41.0};
+constexpr std::array<qreal, 6> kPointyBackWidths{1.5, 1.5, 1.75, 2.0, 2.5, 3.5};
+constexpr std::array<qreal, 6> kPointyHeadLengths{15.5, 22.0, 34.5,
+                                                  43.0, 59.0, 89.5};
+constexpr std::array<qreal, 6> kPointyHeadHeights{15.5, 22.0, 33.0,
+                                                  41.5, 56.5, 85.5};
+constexpr std::array<qreal, 6> kCurvedHeadSides{9.0,  9.0,  15.0,
+                                                19.0, 26.0, 40.0};
+constexpr std::array<qreal, 6> kCurvedShaftWidths{3.0, 3.0,  6.0,
+                                                  7.5, 11.5, 18.5};
+constexpr qreal kStandardShoulderRatio = 0.05;
+constexpr qreal kPointyWingBackRatio = 0.22;
+constexpr qreal kPointyWingHeightRatio = 0.22;
+constexpr qreal kCurveAmount = 0.25;
+constexpr qreal kOpenHeadHalfAngle = std::numbers::pi_v<qreal> / 4.0;
+
+qreal arrowMetric(qreal lineWidth, const std::array<qreal, 6> &values) {
+  const qreal width = std::max<qreal>(0.01, lineWidth);
+  if (width <= kArrowLineWidths.front())
+    return values.front() * width / kArrowLineWidths.front();
+  if (width >= kArrowLineWidths.back())
+    return values.back() * width / kArrowLineWidths.back();
+  const auto upper =
+      std::upper_bound(kArrowLineWidths.begin(), kArrowLineWidths.end(), width);
+  const auto high =
+      static_cast<std::size_t>(std::distance(kArrowLineWidths.begin(), upper));
+  const auto low = high - 1;
+  const qreal amount = (width - kArrowLineWidths.at(low)) /
+                       (kArrowLineWidths.at(high) - kArrowLineWidths.at(low));
+  return std::lerp(values.at(low), values.at(high), amount);
+}
+
+struct ArrowGeometry {
+  QPainterPath fill;
+  QPainterPath stroke;
+  qreal strokeWidth = 0.0;
+};
+
+QPointF arrowPoint(const QPointF &origin, const QPointF &along,
+                   const QPointF &across, qreal x, qreal y) {
+  return origin + along * x + across * y;
+}
+
+QPointF defaultCurveControl(const Annotation &annotation) {
+  const QPointF chord = annotation.end - annotation.start;
+  return (annotation.start + annotation.end) / 2.0 +
+         QPointF(chord.y(), -chord.x()) * kCurveAmount;
+}
+
+QPointF curveControl(const Annotation &annotation) {
+  return annotation.curveControl.value_or(defaultCurveControl(annotation));
+}
+
+QPointF quadraticPoint(const QPointF &start, const QPointF &control,
+                       const QPointF &end, qreal amount) {
+  const qreal remaining = 1.0 - amount;
+  return start * (remaining * remaining) +
+         control * (2.0 * remaining * amount) + end * (amount * amount);
+}
+
+qreal pointToSegmentDistance(const QPointF &point, const QPointF &start,
+                             const QPointF &end) {
+  const QPointF segment = end - start;
+  const qreal lengthSquared = QPointF::dotProduct(segment, segment);
+  if (lengthSquared <= 0.000001)
+    return QLineF(point, start).length();
+  const qreal amount = std::clamp(
+      QPointF::dotProduct(point - start, segment) / lengthSquared, 0.0, 1.0);
+  return QLineF(point, start + segment * amount).length();
+}
+
+void addOpenArrowHead(QPainterPath &path, const QPointF &tip,
+                      const QPointF &direction, qreal sideLength) {
+  const qreal length = QLineF(QPointF(), direction).length();
+  if (length < 0.001)
+    return;
+  const QPointF along = direction / length;
+  const QPointF across(-along.y(), along.x());
+  const qreal back = sideLength * std::cos(kOpenHeadHalfAngle);
+  const qreal side = sideLength * std::sin(kOpenHeadHalfAngle);
+  const QPointF root = tip - along * back;
+  path.moveTo(root + across * side);
+  path.lineTo(tip);
+  path.lineTo(root - across * side);
+}
+
+ArrowGeometry makeArrowGeometry(const Annotation &annotation,
+                                qreal displayScale = 1.0) {
+  ArrowGeometry geometry;
+  const QPointF chord = annotation.end - annotation.start;
+  const qreal length = QLineF(QPointF(), chord).length();
+  if (length < 1.0)
+    return geometry;
+  const QPointF along = chord / length;
+  const QPointF across(-along.y(), along.x());
+
+  if (annotation.arrowStyle == ArrowStyle::Curved ||
+      annotation.arrowStyle == ArrowStyle::Double) {
+    const QPointF control = curveControl(annotation);
+    geometry.stroke.moveTo(annotation.start);
+    geometry.stroke.quadTo(control, annotation.end);
+    const qreal headSide = arrowMetric(annotation.size, kCurvedHeadSides);
+    const auto tangentOrChord = [&](const QPointF &tangent,
+                                    const QPointF &fallback) {
+      return QLineF(QPointF(), tangent).length() < 0.001 ? fallback : tangent;
+    };
+    addOpenArrowHead(geometry.stroke, annotation.end,
+                     tangentOrChord(annotation.end - control, chord), headSide);
+    if (annotation.arrowStyle == ArrowStyle::Double)
+      addOpenArrowHead(geometry.stroke, annotation.start,
+                       tangentOrChord(annotation.start - control, -chord), headSide);
+    geometry.strokeWidth = arrowMetric(annotation.size, kCurvedShaftWidths);
+    return geometry;
+  }
+
+  const bool pointy = annotation.arrowStyle == ArrowStyle::Pointy;
+  const qreal bodyWidth = arrowMetric(
+      annotation.size, pointy ? kPointyBodyWidths : kStandardBodyWidths);
+  const qreal naturalBackWidth = arrowMetric(
+      annotation.size, pointy ? kPointyBackWidths : kStandardBackWidths);
+  // Keep the tail at its 1:1 screen width while zoomed out.
+  // The cap keeps an extreme fit from widening it past the body; at and above
+  // 1:1 this is exactly the calibrated natural geometry.
+  const qreal backWidth =
+      std::min(naturalBackWidth /
+                   std::clamp(displayScale, qreal(0.0001), qreal(1.0)),
+               bodyWidth);
+  qreal headLength = arrowMetric(
+      annotation.size, pointy ? kPointyHeadLengths : kStandardHeadLengths);
+  const qreal headHalfHeight =
+      arrowMetric(annotation.size,
+                  pointy ? kPointyHeadHeights : kStandardHeadHeights) /
+      2.0;
+  headLength = std::min(headLength, length * 0.95);
+  const qreal outerX = length - headLength;
+  const qreal innerX =
+      outerX + (pointy ? 0.0 : headLength * kStandardShoulderRatio);
+  const qreal wingX =
+      pointy ? outerX - headLength * kPointyWingBackRatio : outerX;
+  const qreal wingHalfHeight =
+      pointy ? headHalfHeight * (1.0 + kPointyWingHeightRatio) : headHalfHeight;
+  // Standard gets a same-color rounded outline. Inset its body path so the
+  // visible width after that outline matches the calibrated body width.
+  const qreal bodyHalf =
+      std::max<qreal>(0.0, bodyWidth - (pointy ? 0.0 : backWidth)) / 2.0;
+  const qreal backHalf = pointy ? backWidth / 2.0 : 0.0;
+
+  geometry.fill.moveTo(
+      arrowPoint(annotation.start, along, across, 0.0, backHalf));
+  geometry.fill.lineTo(
+      arrowPoint(annotation.start, along, across, innerX, bodyHalf));
+  geometry.fill.lineTo(
+      arrowPoint(annotation.start, along, across, wingX, wingHalfHeight));
+  geometry.fill.lineTo(annotation.end);
+  geometry.fill.lineTo(
+      arrowPoint(annotation.start, along, across, wingX, -wingHalfHeight));
+  geometry.fill.lineTo(
+      arrowPoint(annotation.start, along, across, innerX, -bodyHalf));
+  geometry.fill.lineTo(
+      arrowPoint(annotation.start, along, across, 0.0, -backHalf));
+  geometry.fill.closeSubpath();
+  if (!pointy) {
+    geometry.stroke = geometry.fill;
+    geometry.strokeWidth = backWidth;
+  }
+  return geometry;
+}
+
+QRectF strokedBounds(const QPainterPath &path, qreal width) {
+  if (path.isEmpty())
+    return {};
+  const qreal radius = width / 2.0;
+  return path.boundingRect().adjusted(-radius, -radius, radius, radius);
+}
+} // namespace
+
+QRectF arrowVisualBoundsInternal(const Annotation &annotation,
+                                 qreal displayScale) {
+  const ArrowGeometry geometry = makeArrowGeometry(annotation, displayScale);
+  QRectF bounds = geometry.fill.boundingRect();
+  const QRectF stroke = strokedBounds(geometry.stroke, geometry.strokeWidth);
+  if (bounds.isEmpty())
+    bounds = stroke;
+  else if (!stroke.isEmpty())
+    bounds = bounds.united(stroke);
+  return bounds;
+}
+
+bool arrowContainsPointInternal(const Annotation &annotation,
+                                const QPointF &point, qreal tolerance) {
+  const QPointF chord = annotation.end - annotation.start;
+  if (QPointF::dotProduct(chord, chord) < 1.0)
+    return false;
+
+  const bool pointy = annotation.arrowStyle == ArrowStyle::Pointy;
+  const qreal headLength = arrowMetric(
+      annotation.size, pointy ? kPointyHeadLengths : kStandardHeadLengths);
+  if (annotation.arrowStyle == ArrowStyle::Standard || pointy) {
+    const qreal bodyWidth = arrowMetric(
+        annotation.size, pointy ? kPointyBodyWidths : kStandardBodyWidths);
+    const qreal pick = std::max(bodyWidth, headLength) / 2.0 + tolerance;
+    return pointToSegmentDistance(point, annotation.start, annotation.end) <=
+           pick;
+  }
+
+  const qreal shaftWidth = arrowMetric(annotation.size, kCurvedShaftWidths);
+  const qreal pick = std::max(shaftWidth, headLength) / 2.0 + tolerance;
+  const QPointF control = curveControl(annotation);
+  constexpr int segments = 24;
+  QPointF previous = annotation.start;
+  for (int index = 1; index <= segments; ++index) {
+    const QPointF next = quadraticPoint(annotation.start, control,
+                                        annotation.end,
+                                        qreal(index) / qreal(segments));
+    if (pointToSegmentDistance(point, previous, next) <= pick)
+      return true;
+    previous = next;
+  }
+  return false;
+}
+
+void drawAnnotation(QPainter &painter, const Annotation &annotation,
+                    qreal arrowDisplayScale) {
+  // Redactions replace source pixels in renderCapture before ordinary vector
+  // annotations are painted. They must never be approximated by a translucent
+  // overlay here because that could leave recoverable source data in exports.
+  if (annotation.kind == Annotation::Kind::Redaction ||
+      annotation.kind == Annotation::Kind::Spotlight)
+    return;
+
+  const qreal width = std::max<qreal>(2.0, annotation.size);
+  QPen pen(annotation.color, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+  painter.setPen(pen);
+  painter.setBrush(annotation.color);
+
+  if (annotation.kind == Annotation::Kind::Rectangle ||
+      annotation.kind == Annotation::Kind::Ellipse) {
+    // Filled shapes are a flat silhouette of the shape (no stroke), hollow
+    // ones a stroke band centered on its outline.
+    const QRectF bounds = QRectF(annotation.start, annotation.end).normalized();
+    if (annotation.filled)
+      painter.setPen(Qt::NoPen);
+    else
+      painter.setBrush(Qt::NoBrush);
+    if (annotation.kind == Annotation::Kind::Ellipse) {
+      painter.drawEllipse(bounds);
+    } else if (annotation.cornerRadius > 0.0) {
+      const qreal radius =
+          std::min({annotation.cornerRadius, bounds.width() / 2.0,
+                    bounds.height() / 2.0});
+      painter.drawRoundedRect(bounds, radius, radius);
+    } else {
+      painter.drawRect(bounds);
+    }
+    return;
+  }
+
+  if (annotation.kind == Annotation::Kind::Line) {
+    painter.drawLine(annotation.start, annotation.end);
+    return;
+  }
+
+  if (annotation.kind == Annotation::Kind::Freehand ||
+      annotation.kind == Annotation::Kind::Highlighter) {
+    if (annotation.points.size() < 2)
+      return;
+    QPainterPath stroke(annotation.points.first());
+    if (annotation.kind == Annotation::Kind::Freehand) {
+      // Release-time Chaikin points already describe the curve. Connecting
+      // them directly matches its geometry in preview, hit-testing and export
+      // instead of applying a second, unrelated quadratic approximation.
+      for (qsizetype index = 1; index < annotation.points.size(); ++index)
+        stroke.lineTo(annotation.points.at(index));
+    } else {
+      for (int index = 1; index + 1 < annotation.points.size(); ++index) {
+        const QPointF midpoint =
+            (annotation.points.at(index) + annotation.points.at(index + 1)) /
+            2.0;
+        stroke.quadTo(annotation.points.at(index), midpoint);
+      }
+      if (annotation.points.size() > 1)
+        stroke.lineTo(annotation.points.last());
+    }
+    painter.setBrush(Qt::NoBrush);
+    if (annotation.kind == Annotation::Kind::Highlighter) {
+      QColor ink = annotation.color;
+      if (ink.alpha() >= 255)
+        ink.setAlpha(120);
+      const qreal highlightWidth = std::max<qreal>(6.0, annotation.size * 3.0);
+      painter.setPen(QPen(ink, highlightWidth, Qt::SolidLine, Qt::RoundCap,
+                          Qt::RoundJoin));
+    }
+    painter.drawPath(stroke);
+    return;
+  }
+
+  if (annotation.kind == Annotation::Kind::Arrow) {
+    const ArrowGeometry geometry =
+        makeArrowGeometry(annotation, arrowDisplayScale);
+    painter.save();
+    if (!geometry.fill.isEmpty()) {
+      painter.setPen(Qt::NoPen);
+      painter.setBrush(annotation.color);
+      painter.drawPath(geometry.fill);
+    }
+    if (!geometry.stroke.isEmpty()) {
+      painter.setPen(QPen(annotation.color, geometry.strokeWidth,
+                          Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+      painter.setBrush(Qt::NoBrush);
+      painter.drawPath(geometry.stroke);
+    }
+    painter.restore();
+    return;
+  }
+
+  if (annotation.kind == Annotation::Kind::Marker) {
+    const qreal diameter = std::max<qreal>(24.0, annotation.size * 6.0);
+    const QRectF marker(annotation.start.x() - diameter / 2.0,
+                        annotation.start.y() - diameter / 2.0, diameter,
+                        diameter);
+    painter.setPen(
+        QPen(Qt::white, std::max<qreal>(1.0, annotation.size * 0.35)));
+    painter.setBrush(annotation.color);
+    painter.drawEllipse(marker);
+    QFont font(QStringLiteral("Noto Sans"));
+    font.setBold(true);
+    font.setPixelSize(
+        static_cast<int>(std::max<qreal>(11.0, annotation.size * 3.2)));
+    painter.setFont(font);
+    painter.setPen(Qt::white);
+    painter.drawText(marker, Qt::AlignCenter,
+                     QString::number(annotation.number));
+    return;
+  }
+
+  const QFont font = annotationTextFont(annotation.size, annotation.textFont);
+  if (annotation.textBackground == TextBackground::Pill) {
+    // A cream pill under the glyphs keeps text readable on any capture or
+    // shape beneath it (the default text background).
+    const QRectF pill = annotationTextBounds(annotation);
+    const qreal radius = std::min(pill.height() / 4.0, 6.0);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(248, 245, 235));
+    painter.drawRoundedRect(pill, radius, radius);
+  }
+  painter.setFont(font);
+  painter.setPen(annotation.color);
+  painter.setBrush(Qt::NoBrush);
+  const QFontMetricsF metrics(font);
+  const QStringList lines = annotationTextLines(annotation);
+  if (annotation.textBackground == TextBackground::Outline) {
+    // A white halo whatever the color: screenshots are mostly light UI, where
+    // a dark halo reads as a drop shadow rather than a cut-out, and white
+    // holds any palette color together over a busy background.
+    QPainterPath glyphs;
+    for (qsizetype index = 0; index < lines.size(); ++index)
+      glyphs.addText(annotation.start +
+                         QPointF(0, index * metrics.lineSpacing()),
+                     font, lines.at(index));
+    painter.setPen(QPen(QColor(255, 255, 255, 235), font.pixelSize() * 0.17,
+                        Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.drawPath(glyphs);
+    painter.fillPath(glyphs, annotation.color);
+    return;
+  }
+  for (qsizetype index = 0; index < lines.size(); ++index)
+    painter.drawText(annotation.start + QPointF(0, index * metrics.lineSpacing()),
+                     lines.at(index));
+}
+
+quint32 nextRedactionRandom(quint32 &state) {
+  if (state == 0)
+    state = 0x6d2b79f5U;
+  state ^= state << 13;
+  state ^= state >> 17;
+  state ^= state << 5;
+  return state;
+}
+
+QRect redactionPixelRect(const Annotation &annotation, const QSize &imageSize,
+                         qreal scaleX, qreal scaleY,
+                         const QPointF &originOffset) {
+  const QRectF logical(annotation.start, annotation.end);
+  const QRectF normalized = logical.normalized();
+  const int left = static_cast<int>(
+      std::floor(normalized.left() * scaleX + originOffset.x()));
+  const int top = static_cast<int>(
+      std::floor(normalized.top() * scaleY + originOffset.y()));
+  const int right = static_cast<int>(
+      std::ceil(normalized.right() * scaleX + originOffset.x()));
+  const int bottom = static_cast<int>(
+      std::ceil(normalized.bottom() * scaleY + originOffset.y()));
+  return QRect(left, top, std::max(0, right - left), std::max(0, bottom - top))
+      .intersected(QRect(QPoint(), imageSize));
+}
+
+QVector<QColor> aggregateRedactionPalette(const QImage &image,
+                                          const QRect &region) {
+  struct Bucket {
+    quint64 red = 0;
+    quint64 green = 0;
+    quint64 blue = 0;
+    quint64 count = 0;
+  };
+  std::array<Bucket, 64> buckets{};
+  // A bounded, uniform sample keeps live dragging responsive on 4K captures.
+  // Coordinates are used only to choose samples; their positions are discarded
+  // before the synthetic mosaic is generated.
+  constexpr int maximumSamples = 4096;
+  const qreal regionArea =
+      static_cast<qreal>(region.width()) * static_cast<qreal>(region.height());
+  const qreal sampleStride = std::max<qreal>(
+      1.0, std::sqrt(regionArea / static_cast<qreal>(maximumSamples)));
+  for (qreal sampleY = region.top() + sampleStride / 2.0;
+       sampleY < region.bottom() + 1.0; sampleY += sampleStride) {
+    for (qreal sampleX = region.left() + sampleStride / 2.0;
+         sampleX < region.right() + 1.0; sampleX += sampleStride) {
+      const QColor color = image.pixelColor(
+          std::clamp(static_cast<int>(sampleX), region.left(), region.right()),
+          std::clamp(static_cast<int>(sampleY), region.top(), region.bottom()));
+      const int bucketIndex = (color.red() >> 6) * 16 +
+                              (color.green() >> 6) * 4 + (color.blue() >> 6);
+      Bucket &bucket = buckets.at(static_cast<std::size_t>(bucketIndex));
+      bucket.red += static_cast<quint64>(color.red());
+      bucket.green += static_cast<quint64>(color.green());
+      bucket.blue += static_cast<quint64>(color.blue());
+      ++bucket.count;
+    }
+  }
+
+  std::array<int, 64> order{};
+  for (int index = 0; index < static_cast<int>(order.size()); ++index)
+    order.at(static_cast<std::size_t>(index)) = index;
+  std::ranges::sort(order, [&buckets](int first, int second) {
+    return buckets.at(static_cast<std::size_t>(first)).count >
+           buckets.at(static_cast<std::size_t>(second)).count;
+  });
+
+  QVector<QColor> palette;
+  palette.reserve(6);
+  for (const int bucketIndex : order) {
+    const Bucket &bucket = buckets.at(static_cast<std::size_t>(bucketIndex));
+    if (bucket.count == 0)
+      break;
+    palette.push_back(QColor(static_cast<int>(bucket.red / bucket.count),
+                             static_cast<int>(bucket.green / bucket.count),
+                             static_cast<int>(bucket.blue / bucket.count),
+                             255));
+    if (palette.size() == 6)
+      break;
+  }
+  if (palette.isEmpty())
+    palette.push_back(QColor(QStringLiteral("#121216")));
+  return palette;
+}
+
+void applyRedactions(QImage &image, const QVector<Annotation> &annotations,
+                     qreal scaleX, qreal scaleY,
+                     const QPointF &originOffset = {}) {
+  for (const Annotation &annotation : annotations) {
+    if (annotation.kind != Annotation::Kind::Redaction)
+      continue;
+    const QRect region = redactionPixelRect(annotation, image.size(), scaleX,
+                                            scaleY, originOffset);
+    if (region.isEmpty())
+      continue;
+    QVector<QColor> palette;
+    if (annotation.redactionStyle == RedactionStyle::Pixelate)
+      palette = aggregateRedactionPalette(image, region);
+
+    // Finish all source reads before activating a painter on the same image.
+    QPainter painter(&image);
+    painter.setCompositionMode(QPainter::CompositionMode_Source);
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    if (annotation.redactionStyle == RedactionStyle::Solid) {
+      painter.fillRect(region, QColor(QStringLiteral("#121216")));
+      continue;
+    }
+
+    quint32 randomState = annotation.redactionSeed;
+    if (randomState == 0) {
+      randomState = static_cast<quint32>(region.x()) * 73856093U ^
+                    static_cast<quint32>(region.y()) * 19349663U ^
+                    static_cast<quint32>(region.width()) * 83492791U ^
+                    static_cast<quint32>(region.height()) * 2654435761U;
+    }
+    const int blockWidth = std::max(1, qRound(12.0 * scaleX));
+    const int blockHeight = std::max(1, qRound(12.0 * scaleY));
+    for (int y = region.top(); y <= region.bottom(); y += blockHeight) {
+      for (int x = region.left(); x <= region.right(); x += blockWidth) {
+        const QColor color = palette.at(
+            static_cast<qsizetype>(nextRedactionRandom(randomState) %
+                                   static_cast<quint32>(palette.size())));
+        painter.fillRect(QRect(x, y,
+                               std::min(blockWidth, region.right() - x + 1),
+                               std::min(blockHeight, region.bottom() - y + 1)),
+                         color);
+      }
+    }
+  }
+}
+
+QSizeF captureOutputScale(const CaptureData &capture) {
+  if (capture.monitor.scale > 1.0 && !capture.preserveSourceResolution)
+    return {capture.monitor.scale, capture.monitor.scale};
+  return {capture.source.width() / static_cast<qreal>(capture.previewSize.width()),
+          capture.source.height() / static_cast<qreal>(capture.previewSize.height())};
+}
+
+QRect pixelSelection(const CaptureData &capture, const QRectF &selection) {
+  const QRectF bounded = selection.normalized().intersected(
+      QRectF(QPointF(), capture.previewSize));
+  const qreal scaleX =
+      capture.source.width() / static_cast<qreal>(capture.previewSize.width());
+  const qreal scaleY =
+      capture.source.height() / static_cast<qreal>(capture.previewSize.height());
+  const int left =
+      std::clamp(static_cast<int>(std::floor(bounded.left() * scaleX)), 0,
+                 capture.source.width());
+  const int top =
+      std::clamp(static_cast<int>(std::floor(bounded.top() * scaleY)), 0,
+                 capture.source.height());
+  const int right =
+      std::clamp(static_cast<int>(std::ceil(bounded.right() * scaleX)), left,
+                 capture.source.width());
+  const int bottom =
+      std::clamp(static_cast<int>(std::ceil(bounded.bottom() * scaleY)), top,
+                 capture.source.height());
+  return QRect(QPoint(left, top), QPoint(right - 1, bottom - 1));
+}
+
+} // namespace
+
+QRectF arrowVisualBounds(const Annotation &annotation, qreal displayScale) {
+  return arrowVisualBoundsInternal(annotation, displayScale);
+}
+
+QPointF arrowCurveHandlePoint(const Annotation &annotation) {
+  return quadraticPoint(annotation.start, curveControl(annotation),
+                        annotation.end, 0.5);
+}
+
+bool arrowContainsPoint(const Annotation &annotation, const QPointF &point,
+                        qreal tolerance) {
+  return arrowContainsPointInternal(annotation, point, tolerance);
+}
+
+void paintAnnotation(QPainter &painter, const Annotation &annotation,
+                     qreal arrowDisplayScale) {
+  drawAnnotation(painter, annotation, arrowDisplayScale);
+}
+
+QPainterPath spotlightPath(const Annotation &annotation) {
+  const QRectF bounds = QRectF(annotation.start, annotation.end).normalized();
+  QPainterPath path;
+  if (annotation.spotlightShape == SpotlightShape::Ellipse) {
+    path.addEllipse(bounds);
+  } else if (annotation.spotlightShape == SpotlightShape::RoundedRectangle) {
+    const qreal shorterEdge = std::min(bounds.width(), bounds.height());
+    const qreal radius =
+        std::min(shorterEdge / 2.0, std::clamp(shorterEdge * 0.12, 3.0, 28.0));
+    path.addRoundedRect(bounds, radius, radius);
+  } else {
+    path.addRect(bounds);
+  }
+  return path;
+}
+
+bool spotlightOpens(const Annotation &annotation, const QRectF &bounds) {
+  if (annotation.kind != Annotation::Kind::Spotlight)
+    return false;
+  const QRectF lens =
+      QRectF(annotation.start, annotation.end).normalized().intersected(bounds);
+  return lens.width() >= 1 && lens.height() >= 1;
+}
+
+namespace {
+/** Source pixels a spotlight's lens magnifies, when `sourceRect` is the
+ *  composed canvas that maps onto `targetBounds`. */
+QRectF spotlightSample(const Annotation &annotation,
+                       const QRectF &targetBounds, const QRectF &sourceRect) {
+  const QRectF lens = QRectF(annotation.start, annotation.end).normalized();
+  const qreal magnification = std::clamp(annotation.magnification, 1.0, 4.0);
+  QSizeF sampleSize(sourceRect.width() * lens.width() / targetBounds.width() /
+                        magnification,
+                    sourceRect.height() * lens.height() /
+                        targetBounds.height() / magnification);
+  sampleSize.setWidth(std::min(sampleSize.width(), sourceRect.width()));
+  sampleSize.setHeight(std::min(sampleSize.height(), sourceRect.height()));
+  const QPointF normalizedCenter(
+      (lens.center().x() - targetBounds.left()) / targetBounds.width(),
+      (lens.center().y() - targetBounds.top()) / targetBounds.height());
+  const QPointF sampleCenter(
+      sourceRect.left() + normalizedCenter.x() * sourceRect.width(),
+      sourceRect.top() + normalizedCenter.y() * sourceRect.height());
+  QRectF sample(sampleCenter.x() - sampleSize.width() / 2.0,
+                sampleCenter.y() - sampleSize.height() / 2.0,
+                sampleSize.width(), sampleSize.height());
+  sample.moveLeft(std::clamp(sample.left(), sourceRect.left(),
+                             sourceRect.right() - sample.width()));
+  sample.moveTop(std::clamp(sample.top(), sourceRect.top(),
+                            sourceRect.bottom() - sample.height()));
+  return sample;
+}
+} // namespace
+
+QRectF spotlightSampleBounds(const QVector<Annotation> &annotations,
+                             const QRectF &targetBounds,
+                             const QRectF &sourceRect) {
+  QRectF bounds;
+  if (targetBounds.isEmpty() || sourceRect.isEmpty())
+    return bounds;
+  for (const Annotation &annotation : annotations) {
+    if (spotlightOpens(annotation, targetBounds))
+      bounds = bounds.united(
+          spotlightSample(annotation, targetBounds, sourceRect));
+  }
+  return bounds;
+}
+
+void paintSpotlights(QPainter &painter, const QImage &source,
+                     const QRectF &targetBounds, const QRectF &sourceRect,
+                     const QVector<Annotation> &annotations,
+                     const QPoint &sourceOrigin) {
+  if (source.isNull() || targetBounds.isEmpty() || sourceRect.isEmpty())
+    return;
+
+  QVector<const Annotation *> spotlights;
+  QPainterPath dimmed;
+  dimmed.addRect(targetBounds);
+  for (const Annotation &annotation : annotations) {
+    if (!spotlightOpens(annotation, targetBounds))
+      continue;
+    QPainterPath opening = spotlightPath(annotation);
+    QPainterPath targetClip;
+    targetClip.addRect(targetBounds);
+    opening = opening.intersected(targetClip);
+    dimmed = dimmed.subtracted(opening);
+    spotlights.push_back(&annotation);
+  }
+  if (spotlights.isEmpty())
+    return;
+
+  painter.save();
+  painter.setClipRect(targetBounds, Qt::IntersectClip);
+  painter.fillPath(dimmed, QColor(0, 0, 0, 154));
+  for (const Annotation *annotation : spotlights) {
+    const QRectF lens = QRectF(annotation->start, annotation->end).normalized();
+    // `source` may hold only the part of the canvas the lenses read; a whole
+    // pixel offset moves the sample into it without disturbing its phase.
+    const QRectF sample = spotlightSample(*annotation, targetBounds, sourceRect)
+                              .translated(-QPointF(sourceOrigin));
+
+    const QPainterPath lensClip = spotlightPath(*annotation);
+    painter.save();
+    painter.setClipPath(lensClip, Qt::IntersectClip);
+    painter.drawImage(lens, source, sample);
+    painter.restore();
+
+    // A zero border is a clean spotlight: the dimming alone isolates the
+    // region, with no ring drawn over the content at its edge.
+    if (annotation->size <= 0.0)
+      continue;
+    const QColor outline =
+        annotation->color.isValid() ? annotation->color : QColor(Qt::white);
+    painter.setPen(QPen(outline, std::max<qreal>(1.0, annotation->size / 2.0),
+                        Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawPath(lensClip);
+  }
+  painter.restore();
+}
+
+void paintDefaultLayer(QPainter &painter, const QImage &redacted,
+                       const QRectF &logicalBounds,
+                       const QVector<Annotation> &annotations,
+                       qreal arrowDisplayScale, const QRectF &sourceRect,
+                       const QPoint &sourceOrigin) {
+  paintSpotlights(painter, redacted, logicalBounds,
+                  sourceRect.isNull() ? QRectF(redacted.rect()) : sourceRect,
+                  annotations, sourceOrigin);
+  // What a capture is annotated *with* goes over what it is annotated *on*:
+  // text, then counters, after everything else. A label buried under a
+  // rectangle is a label nobody can read, and the number that points at it
+  // belongs above even that. Within each pass the stored order holds, which is
+  // the order things were drawn or last picked up in.
+  const auto passOver = [&](bool (*belongs)(Annotation::Kind)) {
+    for (const Annotation &annotation : annotations) {
+      if (belongs(annotation.kind))
+        paintAnnotation(painter, annotation, arrowDisplayScale);
+    }
+  };
+  passOver([](Annotation::Kind kind) {
+    return kind != Annotation::Kind::Text && kind != Annotation::Kind::Marker;
+  });
+  passOver([](Annotation::Kind kind) { return kind == Annotation::Kind::Text; });
+  passOver(
+      [](Annotation::Kind kind) { return kind == Annotation::Kind::Marker; });
+}
+
+bool probeFocusedMonitor(MonitorInfo &monitor, QString &error) {
+  StartupTimingScope timing("hyprctl monitors + parse");
+  const ProcessResult monitors =
+      runProcess(QStringLiteral("hyprctl"),
+                 {QStringLiteral("monitors"), QStringLiteral("-j")});
+  if (!monitors.finished || monitors.exitCode != 0 ||
+      !parseMonitor(monitors.output, monitor, error)) {
+    if (error.isEmpty())
+      error = QString::fromUtf8(monitors.error).trimmed();
+    return false;
+  }
+  return true;
+}
+
+bool probeMonitorAt(QPoint at, MonitorInfo &monitor, QString &error) {
+  const ProcessResult monitors =
+      runProcess(QStringLiteral("hyprctl"),
+                 {QStringLiteral("monitors"), QStringLiteral("-j")});
+  if (!monitors.finished || monitors.exitCode != 0 ||
+      !parseMonitor(monitors.output, monitor, error, at)) {
+    if (error.isEmpty())
+      error = QString::fromUtf8(monitors.error).trimmed();
+    return false;
+  }
+  return true;
+}
+
+std::optional<QPoint> probePointer() {
+  const ProcessResult cursor =
+      runProcess(QStringLiteral("hyprctl"),
+                 {QStringLiteral("cursorpos"), QStringLiteral("-j")}, {}, 2000);
+  const QJsonObject position = QJsonDocument::fromJson(cursor.output).object();
+  if (!cursor.finished || cursor.exitCode != 0 ||
+      !position.contains(QStringLiteral("x")) ||
+      !position.contains(QStringLiteral("y")))
+    return std::nullopt;
+  return QPoint(
+      static_cast<int>(std::floor(position.value(QStringLiteral("x")).toDouble())),
+      static_cast<int>(std::floor(position.value(QStringLiteral("y")).toDouble())));
+}
+
+bool captureMonitorPixels(const MonitorInfo &monitor, CaptureData &capture,
+                          bool includeWindows, QString &error) {
+  StartupTimingScope timing("monitor pixels + window discovery");
+  capture.monitor = monitor;
+  capture.preserveSourceResolution = false;
+  const QRect geometry = capture.monitor.geometry;
+  if (geometry.size().isEmpty()) {
+    error = QStringLiteral("Focused monitor reported an empty geometry");
+    return false;
+  }
+
+  // Window discovery is independent of the screen grab, so let the hyprctl
+  // round trip overlap the in-process output capture.
+  QProcess clients;
+  if (includeWindows) {
+    clients.setProcessChannelMode(QProcess::SeparateChannels);
+    clients.start(QStringLiteral("hyprctl"),
+                  {QStringLiteral("clients"), QStringLiteral("-j")});
+    clients.closeWriteChannel();
+    startupTimingMark("hyprctl clients launched");
+  }
+
+  const QString testCapture = qEnvironmentVariable("OMACAP_TEST_CAPTURE");
+  if (!testCapture.isEmpty()) {
+    if (!capture.source.load(testCapture)) {
+      error = QStringLiteral("Screen capture failed: could not load test "
+                             "capture %1")
+                  .arg(testCapture);
+      return false;
+    }
+  } else if (!captureOutputSurface(monitor, capture.source, error)) {
+    if (!error.startsWith(QStringLiteral("Screen capture failed:")))
+      error = QStringLiteral("Screen capture failed: %1").arg(error);
+    return false;
+  }
+  startupTimingMark("output pixels available");
+
+  capture.previewSize = geometry.size();
+
+  if (includeWindows) {
+    if (!clients.waitForFinished(10000))
+      clients.kill();
+    else if (clients.exitCode() == 0)
+      capture.windows =
+          parseWindows(clients.readAllStandardOutput(), capture.monitor);
+    startupTimingMark("hyprctl clients collected");
+  }
+  return true;
+}
+
+bool captureFocusedMonitor(CaptureData &capture, bool includeWindows,
+                           QString &error) {
+  if (!probeFocusedMonitor(capture.monitor, error))
+    return false;
+  return captureMonitorPixels(capture.monitor, capture, includeWindows, error);
+}
+
+QImage renderCapture(const CaptureData &capture, const QRectF &selection,
+                     const QVector<Annotation> &annotations,
+                     const CaptureLook &look, CanvasBoundaryMode boundaryMode,
+                     const QImage &picture) {
+  const QRect pixels = pixelSelection(capture, selection);
+  if (pixels.isEmpty())
+    return {};
+
+  QImage cropped = capture.source.copy(pixels).convertToFormat(
+      QImage::Format_ARGB32_Premultiplied);
+  const qreal sourceScaleX =
+      capture.source.width() / static_cast<qreal>(capture.previewSize.width());
+  const qreal sourceScaleY =
+      capture.source.height() / static_cast<qreal>(capture.previewSize.height());
+  // A document already has its final pixels. Its integer logical size can
+  // round at fractional scales; do not resize the image to undo that rounding.
+  const bool highDpi = capture.monitor.scale > 1.0 && !capture.preserveSourceResolution;
+  const QSizeF outputScale = captureOutputScale(capture);
+  const qreal scaleX = outputScale.width();
+  const qreal scaleY = outputScale.height();
+  const QPointF sourceOriginOffset(
+      selection.left() * sourceScaleX - pixels.left(),
+      selection.top() * sourceScaleY - pixels.top());
+  bool resized = false;
+  if (highDpi) {
+    const QSize impliedSize(std::max(1, qRound(selection.width() * scaleX)),
+                            std::max(1, qRound(selection.height() * scaleY)));
+    if (cropped.size() != impliedSize) {
+      // Remove sensitive source pixels before SmoothTransformation can blend
+      // them outside the final redaction boundary. The crop may begin between
+      // native pixels, so preserve that fractional origin in local coordinates.
+      applyRedactions(cropped, annotations, sourceScaleX, sourceScaleY,
+                      sourceOriginOffset);
+      cropped = cropped.scaled(impliedSize, Qt::IgnoreAspectRatio,
+                               Qt::SmoothTransformation);
+      resized = true;
+    }
+  }
+  applyRedactions(cropped, annotations, resized ? scaleX : sourceScaleX,
+                  resized ? scaleY : sourceScaleY,
+                  resized ? QPointF{} : sourceOriginOffset);
+  const QRectF sourceFrame(QPointF(), selection.size());
+  const CaptureLayout layout =
+      captureLayout(selection.size(), annotations, boundaryMode, look);
+  const QRectF &canvas = layout.canvas;
+  // The canvas and the card are laid out separately and the canvas is
+  // rendered from the stable source on every frame, so repeated growth can
+  // never leave seams or drift pixels. Integer logical canvas edges make the
+  // settle after a drag deterministic at every display scale.
+  const int growLeft =
+      std::max(0, static_cast<int>(std::ceil(-canvas.left() * scaleX)));
+  const int growTop =
+      std::max(0, static_cast<int>(std::ceil(-canvas.top() * scaleY)));
+  const int growRight = std::max(
+      0, static_cast<int>(std::ceil((canvas.right() - sourceFrame.right()) *
+                                    scaleX)));
+  const int growBottom = std::max(
+      0, static_cast<int>(std::ceil((canvas.bottom() - sourceFrame.bottom()) *
+                                    scaleY)));
+  QImage output(cropped.width() + growLeft + growRight,
+                cropped.height() + growTop + growBottom,
+                QImage::Format_ARGB32_Premultiplied);
+  output.fill(Qt::transparent);
+
+  QPainter painter(&output);
+  painter.setRenderHints(QPainter::Antialiasing |
+                         QPainter::SmoothPixmapTransform |
+                         QPainter::TextAntialiasing);
+  paintCaptureBase(painter, layout, look, picture, output.rect(),
+                   QRectF(growLeft, growTop, cropped.width(), cropped.height()),
+                   cropped, outputScale);
+  painter.end();
+
+  const bool hasSpotlight = std::any_of(
+      annotations.cbegin(), annotations.cend(), [](const Annotation &item) {
+        return item.kind == Annotation::Kind::Spotlight;
+      });
+  // A spotlight samples the fully composed canvas. Avoid detaching/copying
+  // the whole output for the common case where annotations only paint over
+  // it, and never copy an image while a painter is active on that device.
+  const QImage layerSource = hasSpotlight ? output.copy() : cropped;
+  const QRectF layerBounds = hasSpotlight ? canvas : sourceFrame;
+  QPainter layerPainter(&output);
+  layerPainter.setRenderHints(QPainter::Antialiasing |
+                              QPainter::SmoothPixmapTransform |
+                              QPainter::TextAntialiasing);
+  layerPainter.translate(growLeft, growTop);
+  layerPainter.scale(scaleX, scaleY);
+  layerPainter.setClipRect(canvas);
+  paintDefaultLayer(layerPainter, layerSource, layerBounds, annotations);
+  layerPainter.end();
+  setPngLogicalSize(output, renderedCaptureLogicalSize(capture, output.size()));
+  return output;
+}
+
+QSize renderedCaptureLogicalSize(const CaptureData &capture,
+                                 const QSize &renderedSize) {
+  if (renderedSize.isEmpty() || capture.source.isNull() ||
+      capture.previewSize.isEmpty())
+    return {};
+  const QSizeF scale = captureOutputScale(capture);
+  return QSizeF(renderedSize.width() / scale.width(),
+                renderedSize.height() / scale.height()).toSize();
+}
+
+QImage renderSelectionBase(const CaptureData &capture, const QRectF &selection,
+                           const QSize &targetSize) {
+  const QRect pixels = pixelSelection(capture, selection);
+  if (pixels.isEmpty() || targetSize.isEmpty())
+    return {};
+  QImage cropped = capture.source.copy(pixels).convertToFormat(
+      QImage::Format_ARGB32_Premultiplied);
+  if (cropped.size() != targetSize)
+    cropped = cropped.scaled(targetSize, Qt::IgnoreAspectRatio,
+                             Qt::SmoothTransformation);
+  return cropped;
+}
+
+QImage applyRedactionsScaled(QImage image, const QVector<Annotation> &redactions,
+                             const QRectF &selection, const QSizeF &targetSize) {
+  if (image.isNull() || redactions.isEmpty() || selection.isEmpty() ||
+      targetSize.isEmpty())
+    return image;
+  const qreal scaleX = targetSize.width() / selection.width();
+  const qreal scaleY = targetSize.height() / selection.height();
+  // The image already starts at the selection origin and redactions are
+  // selection-relative, so scaling alone maps them onto the layer.
+  applyRedactions(image, redactions, scaleX, scaleY);
+  return image;
+}
+
+bool loadClipboardImage(QImage &image, QString &error) {
+  image = {};
+  error.clear();
+
+  const ProcessResult listed =
+      runProcess(QStringLiteral("wl-paste"), {QStringLiteral("--list-types")},
+                 {}, 5000);
+  if (!listed.finished || listed.exitCode != 0) {
+    const QString detail = QString::fromUtf8(listed.error).trimmed();
+    error = detail.isEmpty()
+                ? QStringLiteral("Could not read the Wayland clipboard")
+                : QStringLiteral("Could not read the Wayland clipboard: %1")
+                      .arg(detail);
+    return false;
+  }
+
+  const QStringList offered =
+      QString::fromUtf8(listed.output)
+          .split('\n', Qt::SkipEmptyParts, Qt::CaseSensitive);
+  QStringList imageTypes;
+  const QStringList preferred{QStringLiteral("image/png"),
+                              QStringLiteral("image/jpeg"),
+                              QStringLiteral("image/webp"),
+                              QStringLiteral("image/bmp")};
+  for (const QString &mimeType : preferred) {
+    if (offered.contains(mimeType))
+      imageTypes.append(mimeType);
+  }
+  for (const QString &mimeType : offered) {
+    const QString trimmed = mimeType.trimmed();
+    if (trimmed.startsWith(QStringLiteral("image/")) &&
+        !imageTypes.contains(trimmed))
+      imageTypes.append(trimmed);
+  }
+  if (imageTypes.isEmpty()) {
+    error = QStringLiteral("Clipboard does not contain an image");
+    return false;
+  }
+
+  bool receivedImageData = false;
+  QString readError;
+  for (const QString &mimeType : imageTypes) {
+    const ProcessResult pasted = runProcess(
+        QStringLiteral("wl-paste"),
+        {QStringLiteral("--no-newline"), QStringLiteral("--type"), mimeType},
+        {}, 5000);
+    if (!pasted.finished || pasted.exitCode != 0) {
+      const QString detail = QString::fromUtf8(pasted.error).trimmed();
+      if (!detail.isEmpty())
+        readError = detail;
+      continue;
+    }
+    receivedImageData = true;
+    image = QImage::fromData(pasted.output);
+    if (!image.isNull())
+      return true;
+  }
+
+  if (!receivedImageData) {
+    error = readError.isEmpty()
+                ? QStringLiteral("Could not read clipboard image")
+                : QStringLiteral("Could not read clipboard image: %1")
+                      .arg(readError);
+    return false;
+  }
+  error = QStringLiteral("Clipboard image could not be decoded");
+  return false;
+}
+
+bool copyPngFileToClipboard(const QString &path, QString &error) {
+  StartupTimingScope timing("copy PNG to clipboard");
+  QFile input(path);
+  if (!input.open(QIODevice::ReadOnly)) {
+    error = QStringLiteral("Could not read screenshot snapshot: %1").arg(path);
+    return false;
+  }
+  const QByteArray png = input.readAll();
+  if (png.isEmpty()) {
+    error = QStringLiteral("Screenshot snapshot is empty: %1").arg(path);
+    return false;
+  }
+  return copyToWaylandClipboard(QStringLiteral("image/png"), png, error);
+}
+
+bool copyImageToClipboard(const QImage &image, QString &error) {
+  QByteArray png;
+  QBuffer buffer(&png);
+  if (!buffer.open(QIODevice::WriteOnly) || !writePng(image, buffer)) {
+    error = QStringLiteral("Could not encode screenshot as PNG");
+    return false;
+  }
+  return copyToWaylandClipboard(QStringLiteral("image/png"), png, error);
+}
+
+bool quickOutput(QImage image, QuickOutputMode mode, QString &error,
+                 const QSize &logicalSize) {
+  if (image.isNull() || mode == QuickOutputMode::None ||
+      mode == QuickOutputMode::CopyAndPreview) {
+    error = QStringLiteral("Could not prepare screenshot snapshot");
+    return false;
+  }
+  OperationLog log;
+  log.previewSize = logicalSize.isEmpty() ? image.size() : logicalSize;
+  setPngLogicalSize(image, log.previewSize);
+  QString recentError;
+  if (!recordRecentSnap(image, log, image, recentError))
+    qWarning().noquote() << recentError;
+  if (mode == QuickOutputMode::Copy) {
+    if (!copyImageToClipboard(image, error))
+      return false;
+    sendCaptureNotification(QStringLiteral("Screenshot copied to clipboard"));
+    return true;
+  }
+  const QString path = temporarySnapshotPath();
+  if (path.isEmpty() || !saveTemporarySnapshot(image, path, error))
+    return false;
+
+  if (mode == QuickOutputMode::Copy || mode == QuickOutputMode::Both) {
+    if (!copyPngFileToClipboard(path, error)) {
+      QFile::remove(path);
+      return false;
+    }
+  }
+  if (mode == QuickOutputMode::Save || mode == QuickOutputMode::Both) {
+    const QString saved = moveSnapshotToScreenshots(path, error);
+    if (saved.isEmpty())
+      return false;
+    if (mode == QuickOutputMode::Save)
+      sendCaptureNotification(QStringLiteral("Screenshot saved"), saved);
+    else
+      sendCaptureNotification(QStringLiteral("Screenshot saved and copied"),
+                              saved);
+  } else {
+    QFile::remove(path);
+    sendCaptureNotification(QStringLiteral("Screenshot copied to clipboard"));
+  }
+  return true;
+}
+
+QString appFilenameSlug(const QString &appClass) {
+  // Reverse-DNS classes (org.gnome.Nautilus) name the app in their last
+  // segment; everything before it is noise in a filename.
+  QString base = appClass;
+  if (const qsizetype dot = base.lastIndexOf(QLatin1Char('.')); dot >= 0)
+    base = base.mid(dot + 1);
+  QString slug;
+  bool pendingDash = false;
+  for (const QChar ch : base.toLower()) {
+    const bool keep = (ch >= QLatin1Char('a') && ch <= QLatin1Char('z')) ||
+                      (ch >= QLatin1Char('0') && ch <= QLatin1Char('9'));
+    if (keep) {
+      if (pendingDash && !slug.isEmpty())
+        slug += QLatin1Char('-');
+      pendingDash = false;
+      slug += ch;
+    } else {
+      pendingDash = true;
+    }
+  }
+  slug.truncate(24);
+  while (slug.endsWith(QLatin1Char('-')))
+    slug.chop(1);
+  return slug;
+}
+
+QString dominantAppClass(const QVector<WindowTarget> &windows,
+                         const QRectF &selection) {
+  QString best;
+  qreal bestArea = 0.0;
+  for (const WindowTarget &window : windows) {
+    if (window.appClass.isEmpty())
+      continue;
+    const QRectF overlap = QRectF(window.rect).intersected(selection);
+    const qreal area = overlap.width() * overlap.height();
+    if (area > bestArea) {
+      bestArea = area;
+      best = window.appClass;
+    }
+  }
+  return best;
+}
+
+QString suggestedScreenshotPath(const QString &appSlug) {
+  return suggestedScreenshotPathImpl(appSlug);
+}
+
+namespace {
+// The umask, read before main() while nothing else can be creating files:
+// reading it means setting it for a moment.
+const mode_t kUmask = [] {
+  const mode_t mask = ::umask(0);
+  ::umask(mask);
+  return mask;
+}();
+
+/// A working snapshot is private; the screenshot it becomes is for sharing,
+/// with the permissions any new file of the user's would have.
+QString shareScreenshot(const QString &path) {
+  ::chmod(QFile::encodeName(path).constData(), 0666 & ~kUmask);
+  return path;
+}
+} // namespace
+
+QString moveSnapshotToScreenshots(const QString &sourcePath, QString &error,
+                                  const QString &appSlug) {
+  const QString targetPath = screenshotTargetPath(error, appSlug);
+  if (targetPath.isEmpty())
+    return {};
+  if (QFile::rename(sourcePath, targetPath))
+    return shareScreenshot(targetPath);
+  if (QFile::copy(sourcePath, targetPath)) {
+    QFile::remove(sourcePath);
+    return shareScreenshot(targetPath);
+  }
+  error = QStringLiteral("Could not move screenshot snapshot to: %1")
+              .arg(targetPath);
+  return {};
+}
+
+QString copySnapshotToScreenshots(const QString &sourcePath, QString &error) {
+  const QString targetPath = screenshotTargetPath(error, {});
+  if (targetPath.isEmpty())
+    return {};
+  if (QFile::copy(sourcePath, targetPath))
+    return shareScreenshot(targetPath);
+  error = QStringLiteral("Could not save screenshot to: %1").arg(targetPath);
+  return {};
+}
+
+QString temporarySnapshotPath() {
+  // Stable per process so repeated saves overwrite one working snapshot.
+  static const quint32 nonce = QRandomGenerator::global()->generate();
+  return runtimePath(QStringLiteral("snapshot-%1-%2.png")
+                         .arg(QCoreApplication::applicationPid())
+                         .arg(nonce, 8, 16, QChar('0')));
+}
+
+QString temporaryExportPath() {
+  return runtimePath(QStringLiteral("export-%1-%2.png")
+                         .arg(QCoreApplication::applicationPid())
+                         .arg(QRandomGenerator::global()->generate64(), 16, 16,
+                              QChar('0')));
+}
+
+QString operationLogPath(const QString &imagePath) {
+  const QFileInfo info(imagePath);
+  return info.dir().filePath(info.completeBaseName() + QStringLiteral(".json"));
+}
+
+QString pinnedSnapshotPath(int index) {
+  // A fresh nonce prevents collisions when the editor PID is recycled.
+  return runtimePath(QStringLiteral("pin-%1-%2-%3.png")
+                         .arg(QCoreApplication::applicationPid())
+                         .arg(index)
+                         .arg(QRandomGenerator::global()->generate64(), 16, 16,
+                              QChar('0')));
+}
+
+void prunePinnedSnapshots() {
+  const QString runtime = secureRuntimeDirectory();
+  if (runtime.isEmpty())
+    return;
+  const QDateTime cutoff = QDateTime::currentDateTime().addDays(-1);
+  const QFileInfoList stale =
+      QDir(runtime).entryInfoList({QStringLiteral("pin-*.png")}, QDir::Files);
+  for (const QFileInfo &entry : stale) {
+    if (entry.lastModified() >= cutoff || !PinSnapshotFile::isOwnedPath(entry.absoluteFilePath()))
+      continue;
+    // The source lock protects the entire document, including its sidecar
+    // and edited preview. Never prune those independently of an active pin.
+    const PinSnapshotFile snapshot(entry.absoluteFilePath());
+  }
+}
+
+QString editorHandoffPath() {
+  return runtimePath(QStringLiteral("edit-%1-%2.png")
+                         .arg(QCoreApplication::applicationPid())
+                         .arg(QRandomGenerator::global()->generate64(), 16, 16,
+                              QChar('0')));
+}
+
+bool saveEditorHandoff(const QImage &source, const QString &path,
+                       const OperationLog &log, const QString &token,
+                       QString &error) {
+  if (!saveTemporarySnapshot(source, path, error) ||
+      !saveOperationLog(operationLogPath(path), log, error))
+    return false;
+  QSaveFile marker(path + QStringLiteral(".handoff"));
+  const QByteArray bytes = token.toUtf8();
+  if (bytes.size() != 32 || !marker.open(QIODevice::WriteOnly) ||
+      !marker.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner) ||
+      marker.write(bytes) != bytes.size() || !marker.commit()) {
+    error = QStringLiteral("Could not record editor handoff ownership");
+    return false;
+  }
+  return true;
+}
+
+bool removeEditorHandoff(const QString &path, const QString &token) {
+  const QString runtime = secureRuntimeDirectory();
+  const QFileInfo file(path);
+  static const QRegularExpression name(QStringLiteral("^edit-[0-9]+-[0-9a-f]{16}\\.png$"));
+  if (token.size() != 32 || runtime.isEmpty() || file.absolutePath() != runtime ||
+      !name.match(file.fileName()).hasMatch())
+    return false;
+  QFile marker(path + QStringLiteral(".handoff"));
+  if (!marker.open(QIODevice::ReadOnly) || marker.read(33) != token.toUtf8())
+    return false;
+  marker.close();
+  const QString log = operationLogPath(path);
+  const bool sourceRemoved = !QFile::exists(path) || QFile::remove(path);
+  const bool logRemoved = !QFile::exists(log) || QFile::remove(log);
+  return sourceRemoved && logRemoved && marker.remove();
+}
+
+void pruneEditorHandoffs() {
+  const QString runtime = secureRuntimeDirectory();
+  if (runtime.isEmpty())
+    return;
+  const QDateTime cutoff = QDateTime::currentDateTime().addDays(-1);
+  const QFileInfoList stale =
+      QDir(runtime).entryInfoList({QStringLiteral("edit-*.png"),
+                                   QStringLiteral("edit-*.json"),
+                                   QStringLiteral("edit-*.png.handoff")},
+                                  QDir::Files);
+  for (const QFileInfo &entry : stale) {
+    if (entry.lastModified() < cutoff)
+      QFile::remove(entry.absoluteFilePath());
+  }
+}
+
+QSize editorWindowSize(const QSize &preview, const QSize &available,
+                       int legendHeight) {
+  // The capture at its natural size plus the editor's chrome: the key
+  // guide band as measured, the toolbar and handle clearance, the status
+  // band below, and the mat margins, so the image reads at 100% in a
+  // window that hugs it and the guide never covers anything. Clamped to
+  // the screen for captures too large to hug.
+  QSize size(preview.width() + 128, preview.height() + legendHeight + 210);
+  const QSize room = available.isEmpty()
+                         ? QSize(1728, 1080)
+                         : QSize(qRound(available.width() * 0.9),
+                                 qRound(available.height() * 0.9));
+  if (size.width() > room.width() || size.height() > room.height())
+    size.scale(room, Qt::KeepAspectRatio);
+  return {std::max(size.width(), 640), std::max(size.height(), 420)};
+}
+
+bool savePinnedSnapshot(QImage image, const QString &path,
+                        const QSize &logicalSize, QString &error,
+                        const QString &recentId, const QString &savedPath) {
+  if (savedPath.isEmpty()) {
+    setPngLogicalSize(image, logicalSize);
+    if (!saveTemporarySnapshot(image, path, error))
+      return false;
+  } else {
+    // Reuse the PNG that was just saved instead of encoding it a second time.
+    // An owned runtime copy lets expiry/drag-out leave the user's file intact.
+    if (!QFile::copy(savedPath, path)) {
+      error = QStringLiteral("Screenshot saved, but could not prepare its preview");
+      return false;
+    }
+  }
+  // The snapshot holds device pixels; the sidecar records the logical size
+  // the capture was presented at, the same way a shelf entry's log does, so
+  // a later edit of the pin reconstructs the scale instead of opening the
+  // image blown up.
+  OperationLog sidecar;
+  sidecar.previewSize = logicalSize;
+  sidecar.recentId = recentId;
+  if (!savedPath.isEmpty())
+    sidecar.savedPath = QFileInfo(savedPath).absoluteFilePath();
+  if (!logicalSize.isEmpty() &&
+      !saveOperationLog(operationLogPath(path), sidecar, error)) {
+    QFile::remove(path);
+    return false;
+  }
+  return true;
+}
+
+QString launchPinnedCapture(
+    const QImage &image, const QSize &logicalSize, bool copy,
+    PinLifetime lifetime, QString &error,
+    const std::function<bool(const QString &, const QStringList &)> &launcher,
+    const QString &recentId, const QString &savedPath) {
+  StartupTimingScope timing("prepare and launch pin");
+  prunePinnedSnapshots();
+  const QString path = pinnedSnapshotPath(1);
+  if (path.isEmpty()) {
+    error = QStringLiteral("Could not create private runtime directory");
+    return {};
+  }
+  if (!savePinnedSnapshot(image, path, logicalSize, error, recentId, savedPath))
+    return {};
+  const auto cleanup = [&] {
+    QFile::remove(path);
+    QFile::remove(operationLogPath(path));
+    QFile::remove(PinSnapshotFile::thumbnailPath(path));
+  };
+  // The child only needs card-sized pixels to map its first frame. Its
+  // clipboard, file sharing, and editor still use the full-resolution PNG.
+  if (!saveTemporarySnapshot(pinDisplayImage(image),
+                             PinSnapshotFile::thumbnailPath(path), error)) {
+    cleanup();
+    return {};
+  }
+  if (copy && !copyPngFileToClipboard(path, error)) {
+    cleanup();
+    return {};
+  }
+  const QString program = QCoreApplication::applicationFilePath();
+  const QStringList arguments{lifetime == PinLifetime::Timed
+                                  ? QStringLiteral("--preview") : QStringLiteral("--pin"), path};
+  if (!(launcher ? launcher(program, arguments)
+                 : QProcess::startDetached(program, arguments))) {
+    cleanup();
+    error = copy ? QStringLiteral("Screenshot copied, but could not start pinned capture")
+                 : QStringLiteral("Could not start pinned capture");
+    return {};
+  }
+  return path;
+}
+
+bool saveTemporarySnapshot(const QImage &image, QString path, QString &error) {
+  StartupTimingScope timing("encode and save PNG");
+  if (image.isNull()) {
+    error = QStringLiteral("Temporary snapshot is empty");
+    return false;
+  }
+  const QString runtime = secureRuntimeDirectory();
+  if (runtime.isEmpty()) {
+    error = QStringLiteral("Could not create private runtime directory");
+    return false;
+  }
+  if (path.isEmpty())
+    path = temporarySnapshotPath();
+  path = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+  if (QFileInfo(path).absolutePath() != runtime) {
+    error =
+        QStringLiteral("Temporary snapshots must stay inside %1").arg(runtime);
+    return false;
+  }
+
+  // Working snapshots are private, like the directory they are in.
+  return savePngFile(image, path, error,
+                     QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+}
+
+bool savePngFile(const QImage &image, const QString &path, QString &error,
+                 QFileDevice::Permissions permissions) {
+  if (image.isNull() || path.isEmpty()) {
+    error = QStringLiteral("Cannot save an empty image or filename");
+    return false;
+  }
+  QSaveFile file(path);
+  file.setDirectWriteFallback(false);
+  if (!file.open(QIODevice::WriteOnly) ||
+      (permissions != QFileDevice::Permissions() &&
+       !file.setPermissions(permissions))) {
+    error = QStringLiteral("Could not open PNG file: %1")
+                .arg(file.errorString());
+    return false;
+  }
+
+  if (!writePng(image, file)) {
+    file.cancelWriting();
+    error = QStringLiteral("Could not save PNG: %1").arg(path);
+    return false;
+  }
+  if (!file.commit()) {
+    error = QStringLiteral("Could not replace PNG: %1")
+                .arg(file.errorString());
+    return false;
+  }
+  return true;
+}
+
+namespace {
+QJsonArray pointArray(const QPointF &point) {
+  return QJsonArray{point.x(), point.y()};
+}
+
+QJsonArray rectArray(const QRectF &rect) {
+  return QJsonArray{rect.x(), rect.y(), rect.width(), rect.height()};
+}
+
+QPointF pointFromArray(const QJsonValue &value) {
+  const QJsonArray array = value.toArray();
+  if (array.size() < 2)
+    return {};
+  return {array.at(0).toDouble(), array.at(1).toDouble()};
+}
+
+QRectF rectFromArray(const QJsonValue &value) {
+  const QJsonArray array = value.toArray();
+  if (array.size() < 4)
+    return {};
+  return {array.at(0).toDouble(), array.at(1).toDouble(), array.at(2).toDouble(),
+          array.at(3).toDouble()};
+}
+
+QString annotationToolName(Annotation::Kind kind) {
+  switch (kind) {
+  case Annotation::Kind::Arrow:
+    return QStringLiteral("arrow");
+  case Annotation::Kind::Line:
+    return QStringLiteral("line");
+  case Annotation::Kind::Freehand:
+    return QStringLiteral("freehand");
+  case Annotation::Kind::Highlighter:
+    return QStringLiteral("highlighter");
+  case Annotation::Kind::Marker:
+    return QStringLiteral("marker");
+  case Annotation::Kind::Rectangle:
+    return QStringLiteral("rectangle");
+  case Annotation::Kind::Ellipse:
+    return QStringLiteral("ellipse");
+  case Annotation::Kind::Text:
+    return QStringLiteral("text");
+  case Annotation::Kind::Redaction:
+    return QStringLiteral("redaction");
+  case Annotation::Kind::Spotlight:
+    return QStringLiteral("spotlight");
+  }
+  return QStringLiteral("arrow");
+}
+
+bool annotationKindFromName(const QString &name, Annotation::Kind &kind) {
+  if (name == QStringLiteral("arrow"))
+    kind = Annotation::Kind::Arrow;
+  else if (name == QStringLiteral("line"))
+    kind = Annotation::Kind::Line;
+  else if (name == QStringLiteral("freehand"))
+    kind = Annotation::Kind::Freehand;
+  else if (name == QStringLiteral("highlighter"))
+    kind = Annotation::Kind::Highlighter;
+  else if (name == QStringLiteral("marker"))
+    kind = Annotation::Kind::Marker;
+  else if (name == QStringLiteral("rectangle"))
+    kind = Annotation::Kind::Rectangle;
+  else if (name == QStringLiteral("ellipse"))
+    kind = Annotation::Kind::Ellipse;
+  else if (name == QStringLiteral("text"))
+    kind = Annotation::Kind::Text;
+  else if (name == QStringLiteral("redaction"))
+    kind = Annotation::Kind::Redaction;
+  else if (name == QStringLiteral("spotlight"))
+    kind = Annotation::Kind::Spotlight;
+  else
+    return false;
+  return true;
+}
+
+QString arrowStyleName(ArrowStyle style) {
+  switch (style) {
+  case ArrowStyle::Standard:
+    return QStringLiteral("standard");
+  case ArrowStyle::Pointy:
+    return QStringLiteral("pointy");
+  case ArrowStyle::Curved:
+    return QStringLiteral("curved");
+  case ArrowStyle::Double:
+    return QStringLiteral("double");
+  }
+  return QStringLiteral("standard");
+}
+
+ArrowStyle arrowStyleFromName(const QString &name) {
+  if (name == QStringLiteral("pointy"))
+    return ArrowStyle::Pointy;
+  if (name == QStringLiteral("curved"))
+    return ArrowStyle::Curved;
+  if (name == QStringLiteral("double"))
+    return ArrowStyle::Double;
+  return ArrowStyle::Standard;
+}
+
+} // namespace
+
+namespace {
+
+QString textFontStyleName(TextFont textFont) {
+  switch (textFont) {
+  case TextFont::Neucha:
+    return QStringLiteral("neucha");
+  case TextFont::JetBrainsMono:
+    return QStringLiteral("jetbrains-mono");
+  case TextFont::InterDisplay:
+    return QStringLiteral("inter-display");
+  }
+  return QStringLiteral("neucha");
+}
+
+TextFont textFontFromStyleName(const QString &name) {
+  if (name == QStringLiteral("jetbrains-mono"))
+    return TextFont::JetBrainsMono;
+  if (name == QStringLiteral("inter-display"))
+    return TextFont::InterDisplay;
+  return TextFont::Neucha;
+}
+
+QString canvasBoundaryModeName(CanvasBoundaryMode mode) {
+  switch (mode) {
+  case CanvasBoundaryMode::Framed:
+    return QStringLiteral("framed");
+  case CanvasBoundaryMode::Overflow:
+    return QStringLiteral("overflow");
+  case CanvasBoundaryMode::Image:
+    return QStringLiteral("image");
+  }
+  return QStringLiteral("framed");
+}
+
+bool canvasBoundaryModeFromName(const QString &name,
+                                CanvasBoundaryMode &mode) {
+  if (name == QStringLiteral("framed"))
+    mode = CanvasBoundaryMode::Framed;
+  else if (name == QStringLiteral("overflow"))
+    mode = CanvasBoundaryMode::Overflow;
+  else if (name == QStringLiteral("image"))
+    mode = CanvasBoundaryMode::Image;
+  else
+    return false;
+  return true;
+}
+
+QJsonObject annotationToJson(const Annotation &annotation) {
+  QJsonObject object;
+  object.insert(QStringLiteral("id"), QString::number(annotation.id));
+  object.insert(QStringLiteral("tool"), annotationToolName(annotation.kind));
+  object.insert(QStringLiteral("start"), pointArray(annotation.start));
+  object.insert(QStringLiteral("end"), pointArray(annotation.end));
+  object.insert(QStringLiteral("color"),
+                annotation.color.name(QColor::HexArgb));
+  object.insert(QStringLiteral("size"), annotation.size);
+  if (annotation.kind == Annotation::Kind::Arrow) {
+    object.insert(QStringLiteral("arrowStyle"),
+                  arrowStyleName(annotation.arrowStyle));
+    if (annotation.curveControl)
+      object.insert(QStringLiteral("curveControl"),
+                    pointArray(*annotation.curveControl));
+  }
+  if (annotation.kind == Annotation::Kind::Text)
+    object.insert(QStringLiteral("textWidth"), annotation.textWidth);
+  if (!annotation.text.isEmpty())
+    object.insert(QStringLiteral("text"), annotation.text);
+  if (annotation.kind == Annotation::Kind::Text)
+    object.insert(QStringLiteral("textFont"),
+                  textFontStyleName(annotation.textFont));
+  if (annotation.number > 0)
+    object.insert(QStringLiteral("number"), annotation.number);
+  if (!annotation.points.isEmpty()) {
+    QJsonArray points;
+    for (const QPointF &point : annotation.points)
+      points.push_back(pointArray(point));
+    object.insert(QStringLiteral("points"), points);
+  }
+  if (annotation.kind == Annotation::Kind::Freehand) {
+    QJsonArray rawPoints;
+    for (const QPointF &point : annotation.rawPoints)
+      rawPoints.push_back(pointArray(point));
+    object.insert(QStringLiteral("rawPoints"), rawPoints);
+    object.insert(QStringLiteral("smoothingLevel"),
+                  annotation.smoothingLevel);
+  }
+  if (annotation.kind == Annotation::Kind::Redaction) {
+    object.insert(QStringLiteral("redactionStyle"),
+                  annotation.redactionStyle == RedactionStyle::Solid
+                      ? QStringLiteral("solid")
+                      : QStringLiteral("pixelate"));
+    object.insert(QStringLiteral("seed"),
+                  QString::number(annotation.redactionSeed));
+  }
+  if (annotation.filled)
+    object.insert(QStringLiteral("filled"), true);
+  if (annotation.cornerRadius > 0.0)
+    object.insert(QStringLiteral("cornerRadius"), annotation.cornerRadius);
+  if (annotation.textBackground == TextBackground::Plain)
+    object.insert(QStringLiteral("textBackground"), QStringLiteral("plain"));
+  else if (annotation.textBackground == TextBackground::Outline)
+    object.insert(QStringLiteral("textBackground"), QStringLiteral("outline"));
+  if (annotation.kind == Annotation::Kind::Spotlight) {
+    object.insert(QStringLiteral("magnification"), annotation.magnification);
+    object.insert(QStringLiteral("spotlightShape"),
+                  annotation.spotlightShape == SpotlightShape::Rectangle
+                      ? QStringLiteral("rectangle")
+                      : annotation.spotlightShape ==
+                                SpotlightShape::RoundedRectangle
+                            ? QStringLiteral("rounded")
+                            : QStringLiteral("ellipse"));
+  }
+  return object;
+}
+
+bool annotationFromJson(const QJsonObject &object, Annotation &annotation,
+                        QString &error) {
+  if (!annotationKindFromName(object.value(QStringLiteral("tool")).toString(),
+                              annotation.kind)) {
+    error = QStringLiteral("Operation log has an unknown annotation tool");
+    return false;
+  }
+  annotation.id =
+      object.value(QStringLiteral("id")).toString().toULongLong();
+  annotation.start = pointFromArray(object.value(QStringLiteral("start")));
+  annotation.end = pointFromArray(object.value(QStringLiteral("end")));
+  annotation.color = QColor(object.value(QStringLiteral("color")).toString());
+  annotation.size = object.value(QStringLiteral("size")).toDouble(4.0);
+  annotation.arrowStyle =
+      arrowStyleFromName(object.value(QStringLiteral("arrowStyle")).toString());
+  annotation.curveControl.reset();
+  if (annotation.kind == Annotation::Kind::Arrow &&
+      object.value(QStringLiteral("curveControl")).isArray())
+    annotation.curveControl =
+        pointFromArray(object.value(QStringLiteral("curveControl")));
+  annotation.text = object.value(QStringLiteral("text")).toString();
+  annotation.textWidth = object.value(QStringLiteral("textWidth")).toDouble(0.0);
+  annotation.textFont = textFontFromStyleName(
+      object.value(QStringLiteral("textFont")).toString());
+  annotation.number = object.value(QStringLiteral("number")).toInt();
+  annotation.points.clear();
+  for (const QJsonValue point : object.value(QStringLiteral("points")).toArray())
+    annotation.points.push_back(pointFromArray(point));
+  annotation.rawPoints.clear();
+  for (const QJsonValue point :
+       object.value(QStringLiteral("rawPoints")).toArray())
+    annotation.rawPoints.push_back(pointFromArray(point));
+  annotation.smoothingLevel = std::clamp(
+      object.value(QStringLiteral("smoothingLevel")).toInt(0),
+      stroke::minimumSmoothingLevel, stroke::maximumSmoothingLevel);
+  const QString redactionStyle =
+      object.value(QStringLiteral("redactionStyle")).toString();
+  annotation.redactionStyle = redactionStyle == QStringLiteral("solid")
+                                  ? RedactionStyle::Solid
+                                  : RedactionStyle::Pixelate;
+  annotation.redactionSeed =
+      object.value(QStringLiteral("seed")).toString().toUInt();
+  annotation.filled = object.value(QStringLiteral("filled")).toBool(false);
+  annotation.cornerRadius =
+      object.value(QStringLiteral("cornerRadius")).toDouble(0.0);
+  const QString textBackground =
+      object.value(QStringLiteral("textBackground")).toString();
+  annotation.textBackground =
+      textBackground == QStringLiteral("plain")    ? TextBackground::Plain
+      : textBackground == QStringLiteral("outline") ? TextBackground::Outline
+                                                    : TextBackground::Pill;
+  annotation.magnification =
+      object.value(QStringLiteral("magnification")).toDouble(2.0);
+  const QString spotlightShape =
+      object.value(QStringLiteral("spotlightShape")).toString();
+  annotation.spotlightShape =
+      spotlightShape == QStringLiteral("rectangle")
+          ? SpotlightShape::Rectangle
+          : spotlightShape == QStringLiteral("rounded")
+                ? SpotlightShape::RoundedRectangle
+                : SpotlightShape::Ellipse;
+  return true;
+}
+
+QJsonObject operationToJson(const Operation &operation) {
+  QJsonObject object;
+  switch (operation.type) {
+  case Operation::Type::Crop:
+    object.insert(QStringLiteral("type"), QStringLiteral("crop"));
+    object.insert(QStringLiteral("rect"), rectArray(operation.crop));
+    break;
+  case Operation::Type::Look:
+    object.insert(QStringLiteral("type"), QStringLiteral("look"));
+    object.insert(QStringLiteral("look"), lookToJson(operation.look));
+    break;
+  case Operation::Type::CanvasBoundary:
+    object.insert(QStringLiteral("type"), QStringLiteral("canvas-boundary"));
+    object.insert(QStringLiteral("mode"),
+                  canvasBoundaryModeName(operation.canvasBoundary));
+    break;
+  case Operation::Type::Annotate:
+    object.insert(QStringLiteral("type"), QStringLiteral("annotate"));
+    if (!operation.annotations.isEmpty())
+      object.insert(QStringLiteral("annotation"),
+                    annotationToJson(operation.annotations.constFirst()));
+    break;
+  case Operation::Type::Patch: {
+    object.insert(QStringLiteral("type"), QStringLiteral("patch"));
+    QJsonArray annotations;
+    for (const Annotation &annotation : operation.annotations)
+      annotations.push_back(annotationToJson(annotation));
+    object.insert(QStringLiteral("annotations"), annotations);
+    break;
+  }
+  case Operation::Type::Delete: {
+    object.insert(QStringLiteral("type"), QStringLiteral("delete"));
+    QJsonArray ids;
+    for (const quint64 id : operation.ids)
+      ids.push_back(QString::number(id));
+    object.insert(QStringLiteral("ids"), ids);
+    break;
+  }
+  case Operation::Type::Cut:
+    object.insert(QStringLiteral("type"), QStringLiteral("cut"));
+    object.insert(QStringLiteral("orientation"),
+                  operation.cut.orientation == Qt::Horizontal
+                      ? QStringLiteral("horizontal")
+                      : QStringLiteral("vertical"));
+    object.insert(QStringLiteral("sourceStart"), operation.cut.sourceStart);
+    object.insert(QStringLiteral("sourceEnd"), operation.cut.sourceEnd);
+    object.insert(QStringLiteral("logicalStart"), operation.cut.logicalStart);
+    object.insert(QStringLiteral("logicalEnd"), operation.cut.logicalEnd);
+    if (operation.cut.insert)
+      object.insert(QStringLiteral("insert"), true);
+    break;
+  }
+  return object;
+}
+
+bool operationFromJson(const QJsonObject &object, Operation &operation,
+                       QString &error) {
+  const QString type = object.value(QStringLiteral("type")).toString();
+  if (type == QStringLiteral("crop")) {
+    operation.type = Operation::Type::Crop;
+    operation.crop = rectFromArray(object.value(QStringLiteral("rect")));
+    return true;
+  }
+  if (type == QStringLiteral("look")) {
+    operation.type = Operation::Type::Look;
+    operation.look = lookFromJson(object.value(QStringLiteral("look")).toObject());
+    return true;
+  }
+  if (type == QStringLiteral("canvas-boundary")) {
+    operation.type = Operation::Type::CanvasBoundary;
+    if (!canvasBoundaryModeFromName(
+            object.value(QStringLiteral("mode")).toString(),
+            operation.canvasBoundary)) {
+      error = QStringLiteral("Operation log has an unknown canvas boundary");
+      return false;
+    }
+    return true;
+  }
+  if (type == QStringLiteral("annotate")) {
+    operation.type = Operation::Type::Annotate;
+    Annotation annotation;
+    if (!annotationFromJson(object.value(QStringLiteral("annotation")).toObject(),
+                            annotation, error))
+      return false;
+    operation.annotations = {annotation};
+    return true;
+  }
+  if (type == QStringLiteral("patch")) {
+    operation.type = Operation::Type::Patch;
+    for (const QJsonValue value :
+         object.value(QStringLiteral("annotations")).toArray()) {
+      Annotation annotation;
+      if (!annotationFromJson(value.toObject(), annotation, error))
+        return false;
+      operation.annotations.push_back(annotation);
+    }
+    return true;
+  }
+  if (type == QStringLiteral("delete")) {
+    operation.type = Operation::Type::Delete;
+    for (const QJsonValue value : object.value(QStringLiteral("ids")).toArray())
+      operation.ids.push_back(value.toString().toULongLong());
+    return true;
+  }
+  if (type == QStringLiteral("cut")) {
+    operation.type = Operation::Type::Cut;
+    const QString orientation =
+        object.value(QStringLiteral("orientation")).toString();
+    operation.cut.orientation = orientation == QStringLiteral("vertical")
+                                    ? Qt::Vertical
+                                    : Qt::Horizontal;
+    operation.cut.sourceStart =
+        object.value(QStringLiteral("sourceStart")).toInt();
+    operation.cut.sourceEnd = object.value(QStringLiteral("sourceEnd")).toInt();
+    operation.cut.logicalStart =
+        object.value(QStringLiteral("logicalStart")).toInt();
+    operation.cut.logicalEnd =
+        object.value(QStringLiteral("logicalEnd")).toInt();
+    operation.cut.insert = object.value(QStringLiteral("insert")).toBool();
+    return true;
+  }
+  error = QStringLiteral("Operation log has an unknown operation type");
+  return false;
+}
+
+} // namespace
+
+bool saveOperationLog(const QString &path, const OperationLog &log,
+                      QString &error) {
+  if (path.isEmpty()) {
+    error = QStringLiteral("Operation log path is empty");
+    return false;
+  }
+  QJsonArray ops;
+  for (const Operation &operation : log.ops)
+    ops.push_back(operationToJson(operation));
+  QJsonObject root;
+  root.insert(QStringLiteral("version"), 1);
+  root.insert(QStringLiteral("index"), log.index);
+  root.insert(QStringLiteral("nextId"), QString::number(log.nextId));
+  root.insert(QStringLiteral("nextMarker"), log.nextMarker);
+  if (!log.recentId.isEmpty())
+    root.insert(QStringLiteral("recentId"), log.recentId);
+  if (!log.savedPath.isEmpty())
+    root.insert(QStringLiteral("savedPath"), log.savedPath);
+  if (log.previewSize.isValid()) {
+    root.insert(QStringLiteral("previewWidth"), log.previewSize.width());
+    root.insert(QStringLiteral("previewHeight"), log.previewSize.height());
+  }
+  root.insert(QStringLiteral("ops"), ops);
+
+  QSaveFile file(path);
+  file.setDirectWriteFallback(false);
+  if (!file.open(QIODevice::WriteOnly) ||
+      !file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
+    error = QStringLiteral("Could not open operation log: %1")
+                .arg(file.errorString());
+    return false;
+  }
+  file.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
+  file.putChar('\n');
+  if (!file.commit()) {
+    error = QStringLiteral("Could not write operation log: %1")
+                .arg(file.errorString());
+    return false;
+  }
+  return true;
+}
+
+bool loadOperationLog(const QString &path, OperationLog &log, QString &error) {
+  QFile file(path);
+  if (!file.open(QIODevice::ReadOnly)) {
+    error = QStringLiteral("Could not read operation log: %1").arg(path);
+    return false;
+  }
+  QJsonParseError parseError;
+  const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+  if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+    error = QStringLiteral("Could not parse operation log: %1")
+                .arg(parseError.errorString());
+    return false;
+  }
+  const QJsonObject root = document.object();
+  if (root.value(QStringLiteral("version")).toInt() != 1) {
+    error = QStringLiteral("Unsupported operation log version");
+    return false;
+  }
+  OperationLog loaded;
+  loaded.index = root.value(QStringLiteral("index")).toInt();
+  loaded.nextId = root.value(QStringLiteral("nextId")).toString().toULongLong();
+  loaded.nextMarker = root.value(QStringLiteral("nextMarker")).toInt(1);
+  loaded.recentId = root.value(QStringLiteral("recentId")).toString();
+  loaded.savedPath = root.value(QStringLiteral("savedPath")).toString();
+  loaded.previewSize =
+      QSize(root.value(QStringLiteral("previewWidth")).toInt(),
+            root.value(QStringLiteral("previewHeight")).toInt());
+  if (loaded.previewSize.isEmpty())
+    loaded.previewSize = QSize();
+  if (loaded.nextId == 0)
+    loaded.nextId = 1;
+  if (loaded.nextMarker < 1)
+    loaded.nextMarker = 1;
+  for (const QJsonValue value : root.value(QStringLiteral("ops")).toArray()) {
+    Operation operation;
+    if (!operationFromJson(value.toObject(), operation, error))
+      return false;
+    loaded.ops.push_back(std::move(operation));
+  }
+  loaded.index = std::clamp(loaded.index, 0, static_cast<int>(loaded.ops.size()));
+  log = std::move(loaded);
+  return true;
+}
+
+bool copyTextToClipboard(const QString &text, QString &error) {
+  if (text.isEmpty()) {
+    error = QStringLiteral("No text found in selection");
+    return false;
+  }
+  return copyToWaylandClipboard(QStringLiteral("text/plain;charset=utf-8"),
+                                text.toUtf8(), error);
+}
+
+QString recognizeText(const QImage &image, QString &error) {
+  QByteArray payload;
+  QBuffer buffer(&payload);
+  if (!buffer.open(QIODevice::WriteOnly) || !image.save(&buffer, "PNG")) {
+    error = QStringLiteral("Could not prepare image for OCR");
+    return {};
+  }
+
+  QString languages = qEnvironmentVariable("OMACAP_OCR_LANGS");
+  if (languages.isEmpty())
+    languages =
+        qEnvironmentVariable("OMARCHY_OCR_LANGS", QStringLiteral("eng"));
+  languages = languages.trimmed();
+  // Tesseract's OpenMP build starts a thread per core and spins them; on a
+  // screenshot that costs about three times the CPU and adds wall time
+  // instead of saving it. One thread reads the same text faster.
+  QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+  environment.insert(QStringLiteral("OMP_THREAD_LIMIT"), QStringLiteral("1"));
+  const ProcessResult result = runProcess(
+      QStringLiteral("tesseract"),
+      {QStringLiteral("stdin"), QStringLiteral("stdout"),
+       QStringLiteral("--oem"), QStringLiteral("1"),
+       QStringLiteral("--psm"), QStringLiteral("6"),
+       QStringLiteral("-l"), languages,
+       QStringLiteral("--dpi"), QStringLiteral("300"),
+       QStringLiteral("-c"), QStringLiteral("preserve_interword_spaces=1")},
+      payload, 30000, environment);
+  if (!result.finished || result.exitCode != 0) {
+    error = QStringLiteral("OCR failed for languages %1: %2")
+                .arg(languages, QString::fromUtf8(result.error).trimmed());
+    return {};
+  }
+  const QString text = QString::fromUtf8(result.output).trimmed();
+  if (text.isEmpty())
+    error = QStringLiteral("No text found in selection");
+  return text;
+}
+
+QStringList captureNotificationArguments(const QString &message,
+                                         const QString &imagePath) {
+  // -p prints the new notification's id, which sendCaptureNotification keeps.
+  // The summary is "OmaCap", as each OmaCap notification's is: a recording
+  // takes them down on Omarchy by that. The message is the body, which the
+  // shell reads as markup.
+  QString body = message.toHtmlEscaped();
+  if (!imagePath.isEmpty())
+    body += QStringLiteral("\nClick to edit");
+  QStringList arguments{QStringLiteral("-p"), QStringLiteral("-g"), QStringLiteral(""),
+                        QStringLiteral("--app-name"), QStringLiteral("OmaCap"),
+                        QStringLiteral("-t"), QStringLiteral("4500"),
+                        QStringLiteral("OmaCap"), body};
+  if (!imagePath.isEmpty()) {
+    const QString imageUrl =
+        QUrl::fromLocalFile(imagePath).toString(QUrl::FullyEncoded);
+    // --exec consumes the rest of the command line as the click command's
+    // argv, which omarchy-notification-send runs without shell parsing. It
+    // must come last and be given as separate words, never one quoted string.
+    arguments << QStringLiteral("--image") << imagePath << QStringLiteral("--exec")
+              << QCoreApplication::applicationFilePath() << imageUrl;
+  }
+  return arguments;
+}
+
+void sendCaptureNotification(const QString &message, const QString &imagePath) {
+  // A notification would show up in OmaCap's own recording.
+  if (recordingInProgress()) {
+    qInfo().noquote() << message;
+    return;
+  }
+  // One sent just before a recording could still be up once it starts: the
+  // recorder takes OmaCap's notifications file then and takes them down. A
+  // detached shell lists it there as sendNotification() does: under the
+  // file's lock, it checks the marker again, appends `?`, sends within
+  // notificationSendMs (killing a send that takes longer, so the lock is never
+  // held for long), and appends the id. A send that timed out or printed no
+  // id may be up all the same, so its `?` stays; one that failed takes it
+  // back. A recording either sees the notification listed or starts before it
+  // is sent at all. Neither this thread nor this process's exit waits for it.
+  static constexpr auto keepId = R"sh(
+ids=$1 marker=$2 seconds=$3; shift 3
+exec 9>>"$ids" && flock -w 3 9 || exit
+if [ -f "$marker" ]; then
+  while read -r pid; do kill -0 "$pid" 2>/dev/null && exit; done < "$marker"
+fi
+listed=$(stat -c %s "$ids") && printf '?\n' >&9 || exit
+id=$(timeout -k 0.5 "$seconds" "$@")
+case $? in
+0) case $id in '' | *[!0-9]* | 0) ;; *) printf '%s\n' "$id" >&9 ;; esac ;;
+124 | 137) ;;
+*) truncate -s "$listed" "$ids" ;;
+esac)sh";
+  QProcess::startDetached(
+      QStringLiteral("sh"),
+      QStringList{QStringLiteral("-c"), QString::fromLatin1(keepId),
+                  QStringLiteral("sh"), notificationIdsPath(),
+                  recordingMarkerPath(),
+                  QString::number(notificationSendMs / 1000.0),
+                  QStringLiteral("omarchy-notification-send")} +
+          captureNotificationArguments(message, imagePath));
+}
+
+void describeFileCapture(CaptureData &capture, QImage image,
+                         const OperationLog &log) {
+  capture = CaptureData();
+  capture.previewSize = image.size();
+  capture.monitor.scale = 1.0;
+  QSize logicalSize = pngLogicalSize(image);
+  // Editable documents take precedence: their operations use the source
+  // canvas's coordinates, whereas a PNG tag describes its flattened pixels.
+  if (log.previewSize.isValid() && !log.previewSize.isEmpty() &&
+      log.previewSize.width() <= image.width() &&
+      log.previewSize.height() <= image.height()) {
+    logicalSize = log.previewSize;
+  }
+  if (!logicalSize.isEmpty()) {
+    capture.previewSize = logicalSize;
+    capture.monitor.scale =
+        image.width() / static_cast<qreal>(logicalSize.width());
+  }
+  capture.monitor.pixelSize = image.size();
+  capture.monitor.geometry = QRect(QPoint(0, 0), capture.previewSize);
+  capture.source = std::move(image);
+  capture.preserveSourceResolution = true;
+}

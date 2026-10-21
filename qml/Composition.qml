@@ -1,6 +1,9 @@
 import QtQuick
 import QtQuick.Effects
 
+// One styled frame: the backdrop, the padded window with its corners, shadow and
+// transparency, the zoom, and the camera. The editor's preview, the card and the offscreen
+// exporter all draw it, so what you see is what exports.
 Item {
     id: scene
 
@@ -25,17 +28,6 @@ Item {
     property real cameraX: Math.min(width - cameraW, Math.max(0, (edit.cameraX ?? 0.79) * width))
     property real cameraY: Math.min(height - cameraH, Math.max(0, (edit.cameraY ?? 0.75) * height))
     property real cameraRadius: edit.cameraShape === "circle" ? cameraW / 2 : Math.min(cameraW, cameraH) * (edit.cameraCorners ?? 0.12)
-    // Annotations are stored in source pixels; these map them onto the frame.
-    property size sourcePixels: Qt.size(1920, 1080)
-    property real markScale: frameW / (crop[2] * sourcePixels.width)
-    property real markX: frameX - crop[0] * sourcePixels.width * markScale
-    property real markY: frameY - crop[1] * sourcePixels.height * markScale
-    property alias hiddenAnnotation: marks.hiddenId
-
-    // The area annotation `index` covers, in source pixels.
-    function markBox(index) {
-        return marks.boxOf(index);
-    }
 
     width: 1920
     height: 1080
@@ -49,8 +41,7 @@ Item {
         anchors.fill: parent
         source: scene.edit.background ? "file:" + scene.edit.background : ""
         fillMode: Image.PreserveAspectCrop
-        // Cover screenshot canvases larger than 1080p, but cap the decode at 4K: a very
-        // tall or wide canvas would otherwise demand an enormous image.
+        // Decode at least 1080p, and no more than the largest (4K) export needs.
         sourceSize: Qt.size(Math.min(3840, Math.max(1920, scene.width)), Math.min(2160, Math.max(1080, scene.height)))
         asynchronous: false
     }
@@ -130,24 +121,6 @@ Item {
         maskEnabled: true
         maskSource: mask
         autoPaddingEnabled: false
-    }
-
-    // Above the window's opacity, so annotations stay fully opaque. They may overhang the
-    // padding, up to the canvas edge.
-    Item {
-        anchors.fill: parent
-        clip: true
-
-        Annotations {
-            id: marks
-
-            annotations: scene.edit.annotations || []
-            x: scene.markX
-            y: scene.markY
-            scale: scene.markScale
-            transformOrigin: Item.TopLeft
-        }
-
     }
 
     Image {
