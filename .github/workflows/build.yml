@@ -54,7 +54,7 @@ jobs:
         run: |
           source packaging/PKGBUILD.in
           pacman -S --noconfirm --needed "${depends[@]}" "${makedepends[@]}" \
-            python-numpy mesa xorg-server-xvfb xorg-xauth ttf-dejavu desktop-file-utils
+            python-numpy gst-libav mesa xorg-server-xvfb xorg-xauth ttf-dejavu desktop-file-utils
           useradd --create-home builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
       - name: Build release package
@@ -72,7 +72,7 @@ jobs:
           } > dist/BUILD-INFO.txt
       - name: Test capture, editing and exports
         run: |
-          for script in scripts/*.sh; do bash -n "$script"; done
+          for script in scripts/*.sh tests/*.sh; do bash -n "$script"; done
           python -m compileall -q scripts tests
           desktop-file-validate packaging/omacap.desktop
           mkdir -p tests/out

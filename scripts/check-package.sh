@@ -29,3 +29,12 @@ test "$status" -eq 124
 if grep -E 'qrc:/qml/.*(Error|undefined|Cannot)' "$test_state/launch.log"; then
   exit 1
 fi
+
+# The installed exporter renders an edit with a blurred camera, on nothing but the package's
+# declared dependencies.
+repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+for kind in mp4 gif; do
+  XDG_DATA_HOME="$test_state/data" XDG_CONFIG_HOME="$test_state/config" \
+    XDG_CACHE_HOME="$test_state/cache" XDG_RUNTIME_DIR="$test_state/runtime" LIBGL_ALWAYS_SOFTWARE=1 \
+    dbus-run-session -- xvfb-run -a "$repo/tests/packaged-export.sh" /usr/bin/omacap "$test_state/export" "$kind"
+done

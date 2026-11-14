@@ -196,15 +196,17 @@ C++20 and Qt 6, built with CMake and Ninja. `snap/` is the Omasnap-derived captu
 ./scripts/test.sh
 ```
 
-Tests also need `python-numpy`. `test.sh` runs Omasnap's smoke tests offscreen, then the integration suite: synthetic capture, timeline gestures, waveforms, recovery, preview/export consistency, cancellation and audio/video timing. CI builds packages against Omarchy stable and latest Arch, runs the tests under Xvfb, and installs and launches each package in a fresh container. Recording through the real portal is tested locally, as below.
+Tests also need `python-numpy` and `gst-libav`. `test.sh` runs Omasnap's smoke tests offscreen, then the integration suite: synthetic capture on every encoder path, timeline gestures, waveforms, recovery, preview/export consistency, cancellation and audio/video timing. CI builds packages against Omarchy stable and latest Arch on every pull request and every night, runs the tests under Xvfb, then installs each package in a fresh container, opens its editor and exports with it.
 
-To try OmaCap on a real compositor without touching your session, `scripts/nested-hyprland.sh start <dir>` runs a nested Hyprland in a hidden window and prints the `WAYLAND_DISPLAY` and `HYPRLAND_INSTANCE_SIGNATURE` to use. `scripts/nested-portal.sh start <dir>` adds a private screen-cast portal with a scripted picker, and `tests/record-nested.py <dir>` records through it and checks that no OmaCap pixel is saved. Give OmaCap its own `OMACAP_RUNTIME_DIR` and XDG directories there, so it can't reach a running OmaCap. The headers of these scripts explain the rest.
+No container can record a screen. `./scripts/verify-desktop.sh <package or build/omacap>` does that on your desktop without touching your session: it records through the real portal in a hidden nested Hyprland, through display changes, and exports through your display. `./scripts/doctor.sh` checks that the desktop can record and export at all. [Verifying OmaCap](docs/verifying.md) says which change needs which proof.
+
+The pieces can be run by hand. `scripts/nested-hyprland.sh start <dir>` runs a nested Hyprland in a hidden window and prints the `WAYLAND_DISPLAY` and `HYPRLAND_INSTANCE_SIGNATURE` to use. `scripts/nested-portal.sh start <dir>` adds a private screen-cast portal with a scripted picker, and `tests/record-nested.py <dir>` records through it and checks that no OmaCap pixel is saved. Give OmaCap its own `OMACAP_RUNTIME_DIR` and XDG directories there, so it can't reach a running OmaCap. The headers of these scripts explain the rest.
 
 In T3 Code, import **Build and run** and **Run tests** from **From t3.json** in the project scripts menu. The shared configuration also sets the OmaCap project icon. Both actions run on demand in the current thread's checkout.
 
 For a per-user install, run `./scripts/install-local.sh` instead of installing the Arch package. It builds OmaCap and ends by printing the installed version. Its `~/.local/bin/omacap` and desktop entry take precedence over the package, so remove them when you switch to the package.
 
-See [Releasing OmaCap](docs/releasing.md) for preparing a draft release and publishing it on GitHub.
+See [Releasing OmaCap](docs/releasing.md) for preparing a draft release, verifying it on a desktop and publishing it on GitHub.
 
 ## License
 

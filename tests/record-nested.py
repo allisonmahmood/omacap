@@ -93,13 +93,17 @@ picks = state / "portal/picker.log"
 picked = len(picks.read_text().splitlines()) if picks.exists() else 0
 marker = run / "runtime/recording"
 mode = f'{monitor["width"]}x{monitor["height"]}@{monitor["refreshRate"]:.2f}'
-rule = f'{monitor["name"]},{{}},{monitor["x"]}x{monitor["y"]},{{}}'
-restore = rule.format(mode, scale)
 
 
-def set_monitor(value):
-    subprocess.run(["hyprctl", "keyword", "monitor", value], env=env, check=True,
-                   stdout=subprocess.DEVNULL)
+def set_monitor(mode, scale, transform=0):
+    """Gives the recorded monitor a new rule, as a settings panel does. Hyprland answers "ok"
+    even to a request it doesn't know, so the answer is checked: a change that didn't happen
+    would pass for a recording that survived one."""
+    rule = (f'hl.monitor({{ output = "{monitor["name"]}", mode = "{mode}", '
+            f'position = "{monitor["x"]}x{monitor["y"]}", scale = {scale}, transform = {transform} }})')
+    answer = subprocess.run(["hyprctl", "eval", rule], env=env, check=True, capture_output=True,
+                            text=True).stdout.strip()
+    assert answer == "ok", answer
 
 
 def layers():
@@ -112,11 +116,11 @@ if a.stale:
     # The area was picked before the monitor changed: placing the chrome for the old one could
     # put it in the area, so OmaCap refuses before showing anything.
     try:
-        set_monitor(rule.format(mode, scale * 2))
+        set_monitor(mode, scale * 2)
         refused = subprocess.run([a.omacap, "--record-request", json.dumps(request)], env=env,
                                  capture_output=True, text=True, timeout=30)
     finally:
-        set_monitor(restore)
+        set_monitor(mode, scale)
     assert refused.returncode == 1, refused
     assert "The display changed; pick the area again." in refused.stderr, refused.stderr
     assert not marker.exists() and not list((run / "videos").glob("*")), refused
@@ -171,14 +175,13 @@ if a.interrupt == "kill-owner":
     assert not os.path.exists(f"/proc/{pids[1]}"), "the worker outlived its owner"
 elif a.interrupt:
     # Each ends the recording by itself; the monitor is put back afterwards.
-    changed = {"scale": rule.format(mode, scale * 2),
-               "mode": rule.format(f'{monitor["width"] * 4 // 5}x{monitor["height"] * 4 // 5}',
-                                   scale),
-               "transform": rule.format(mode, scale) + ",transform,4"}[a.interrupt]
+    changed = {"scale": (mode, scale * 2),
+               "mode": (f'{monitor["width"] * 4 // 5}x{monitor["height"] * 4 // 5}', scale),
+               "transform": (mode, scale, 4)}[a.interrupt]
     try:
         if a.stall_owner:
             owner.send_signal(signal.SIGSTOP)
-        set_monitor(changed)
+        set_monitor(*changed)
         if a.stall_owner:
             time.sleep(2)
             owner.send_signal(signal.SIGCONT)
@@ -188,7 +191,7 @@ elif a.interrupt:
         assert not marker.exists(), "the recording went on after the display changed"
     finally:
         owner.send_signal(signal.SIGCONT)
-        set_monitor(restore)
+        set_monitor(mode, scale)
 else:
     stop = subprocess.run([a.omacap, "--record"], env=env, timeout=10)
     assert stop.returncode == 0

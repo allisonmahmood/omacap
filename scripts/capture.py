@@ -49,6 +49,7 @@ p.add_argument("--camera", default="")
 p.add_argument("--synthetic", action="store_true", help="test sources instead of devices")
 p.add_argument("--seconds", type=int, default=0, help="start at once, stop after this long")
 p.add_argument("--break-after", default="", help="synthetic: SOURCE:SECONDS into the recording, it fails")
+p.add_argument("--encoder", default="", help="tests: an ENCODERS name or a pipeline for the screen")
 Gst.init(None)
 dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
 loop = GLib.MainLoop()
@@ -81,6 +82,12 @@ HOLD = Gst.SECOND
 POLL, POLL_TIMEOUT = 0.1, 0.3
 # How long a stop waits for an answer newer than its cut before cutting at the last one.
 SETTLE = Gst.SECOND
+# The screen's encoders. A recording uses NVIDIA's when the machine has it; synthetic sources
+# use vp8enc, so tests give the same file anywhere unless they name another with --encoder.
+ENCODERS = {
+    "nvh264enc": "nvh264enc preset=p1 bitrate=12000 gop-size=60 ! h264parse",
+    "vp8enc": "videoconvert ! vp8enc deadline=1 cpu-used=6 threads=4 target-bitrate=12000000",
+}
 # The sources besides the screen, as a failure names them.
 DEVICES = {"mic": "microphone", "desktop": "desktop audio", "camera": "camera"}
 # The video process that started this worker; once it dies, this process is re-parented.
@@ -678,11 +685,12 @@ def start(node=None, props=None):
     hold = f"queue max-size-buffers=0 max-size-bytes=0 max-size-time={5 * HOLD} min-threshold-time={HOLD}"
     out_width, out_height = encoded_size(width - left - right, height - top - bottom)
     # Element properties are assigned below; device names and output paths never enter pipeline syntax.
-    enc = (
-        "nvh264enc preset=p1 bitrate=12000 gop-size=60 ! h264parse"
-        if not a.synthetic and Gst.ElementFactory.find("nvh264enc")
-        else "videoconvert ! vp8enc deadline=1 cpu-used=6 threads=4 target-bitrate=12000000"
-    )
+    if a.encoder:
+        enc = ENCODERS.get(a.encoder, a.encoder)
+    elif not a.synthetic and Gst.ElementFactory.find("nvh264enc"):
+        enc = ENCODERS["nvh264enc"]
+    else:
+        enc = ENCODERS["vp8enc"]
     desc = (
         "matroskamux name=mux ! filesink name=output async=false "
         f"{source} ! identity name=screen_gate ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! "
