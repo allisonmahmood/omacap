@@ -551,6 +551,15 @@ def screen_events(pad, info, size):
     return Gst.PadProbeReturn.DROP
 
 
+def captured(pad, buf):
+    """When an encoded buffer was captured, on the clock the cut and the display watch use. Its
+    own timestamp may not say: nvh264enc restamps its buffers to start at 1000 hours. Encoders
+    keep the running time, which the gates' offsets count from the first kept frame."""
+    segment = pad.get_sticky_event(Gst.EventType.SEGMENT, 0).parse_segment()
+    sign, running = segment.to_running_time_full(Gst.Format.TIME, buf.pts)
+    return cut.epoch + sign * running
+
+
 def written(pad, info, name):
     """After the hold: drops what a later cut excludes, and counts the screen frames saved. A
     screen frame the display watch hasn't caught up with ends the recording before it: the
@@ -558,10 +567,11 @@ def written(pad, info, name):
     global count
     buf = info.get_buffer()
     if buf.pts != Gst.CLOCK_TIME_NONE:
-        if name == "screen" and cut.keeps(buf.pts) and not display.covers(buf.pts):
+        at = captured(pad, buf)
+        if name == "screen" and cut.keeps(at) and not display.covers(at):
             display.cut_back()
             GLib.idle_add(interrupt, "OmaCap couldn't check the display, so it stopped recording.")
-        if not cut.keeps(buf.pts):
+        if not cut.keeps(at):
             return Gst.PadProbeReturn.DROP
     if name == "screen":
         count += 1

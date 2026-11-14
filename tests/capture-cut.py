@@ -67,6 +67,30 @@ for flush in [Gst.Event.new_flush_start(), Gst.Event.new_flush_stop(True)]:
     info.event = flush
     assert capture.screen_events(None, info, (1920, 1080)) == DROP
 
+# After an encoder, a buffer's capture time comes from its running time, not its timestamp:
+# nvh264enc starts its buffers at 1000 hours and moves the segment to match.
+HOURS = 3600 * Gst.SECOND
+
+
+class Restamped:
+    """The pad after an encoder that restamped a recording whose first kept frame was `epoch`."""
+
+    def __init__(self, epoch):
+        segment = Gst.Segment()
+        segment.init(Gst.Format.TIME)
+        segment.start, segment.offset = 1000 * HOURS - epoch, epoch
+        self.event = Gst.Event.new_segment(segment)
+
+    def get_sticky_event(self, _type, _index):
+        return self.event
+
+
+capture.cut = capture.Cut()
+capture.cut.epoch = 7 * HOURS
+frame = Gst.Buffer.new()
+frame.pts = 1000 * HOURS + 66_000_000
+assert capture.captured(Restamped(7 * HOURS), frame) == 7 * HOURS + 66_000_000
+
 capture.a = capture.p.parse_args(["--output", "x", "--crop", "100,50,640,480"])
 assert capture.crop_box(1920, 1080) == (100, 50, 1180, 550)
 capture.a.crop = "1800,1000,640,480"  # clamped to the frame
