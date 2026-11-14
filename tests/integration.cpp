@@ -62,6 +62,15 @@ class Integration : public QObject {
                 return match;
         return nullptr;
     }
+    // How much detail a region of an image holds: the mean step between neighbouring pixels.
+    static double detail(const QImage &image, const QRect &region) {
+        double steps = 0;
+        for (int y = region.top(); y <= region.bottom(); y++)
+            for (int x = region.left(); x <= region.right(); x++)
+                steps += std::abs(qGray(image.pixel(x, y)) - qGray(image.pixel(x + 1, y))) +
+                         std::abs(qGray(image.pixel(x, y)) - qGray(image.pixel(x, y + 1)));
+        return steps / (region.width() * region.height());
+    }
     // Opens the editor on `path` and waits for it to be on screen and focused.
     static QQuickWindow *openEditor(Studio &studio, const QString &path) {
         studio.backend.loadFile(QDir::current().absoluteFilePath(path));
@@ -1111,19 +1120,13 @@ class Integration : public QObject {
         const QImage portrait("tests/fixtures/portrait.jpg");
         QVERIFY(!portrait.isNull());
         BackgroundBlur blur;
-        QCOMPARE(blur.apply(portrait, 0, 0), portrait);
-        const QImage blurred = blur.apply(portrait, .6, 0);
+        QCOMPARE(blur.apply(portrait, 0), portrait);
+        const QImage blurred = blur.apply(portrait, .6);
         QCOMPARE(blurred.size(), portrait.size());
+        // The same frame again, as when the slider moves while paused, keeps its outline.
+        blur.apply(portrait, .3);
+        QCOMPARE(blur.apply(portrait, .6), blurred);
         blurred.save("tests/out/background-blur.png");
-        // How much detail a region holds: the mean step between neighbouring pixels.
-        const auto detail = [](const QImage &image, const QRect &region) {
-            double steps = 0;
-            for (int y = region.top(); y <= region.bottom(); y++)
-                for (int x = region.left(); x <= region.right(); x++)
-                    steps += std::abs(qGray(image.pixel(x, y)) - qGray(image.pixel(x + 1, y))) +
-                             std::abs(qGray(image.pixel(x, y)) - qGray(image.pixel(x, y + 1)));
-            return steps / (region.width() * region.height());
-        };
         const QRect face(118, 35, 34, 40), door(240, 10, 70, 90);
         QVERIFY2(detail(blurred, face) > .9 * detail(portrait, face),
                  qPrintable(QString::number(detail(blurred, face))));
@@ -1162,11 +1165,17 @@ class Integration : public QObject {
         QVERIFY(QTest::qWaitForWindowExposed(s.stage.editorWindow()));
         auto composition = find(s.stage.editorWindow()->contentItem(), "composition");
         QVERIFY(composition);
-        // Blurring the camera's background redraws the frame on show, and every export below
-        // blurs it as the preview does.
+        // Blurring the camera's background redraws the frame on show, with most of its detail
+        // gone, and every export below blurs it as the preview does.
         const QImage recorded = s.frames->camera;
+        const int revision = b.cameraRevision;
         b.setValue("cameraBlur", .6);
-        QVERIFY(s.frames->camera != recorded);
+        QCOMPARE(b.cameraRevision, revision + 1);
+        const QImage softened = s.frames->camera;
+        QVERIFY2(
+            detail(softened, softened.rect().adjusted(0, 0, -1, -1)) <
+                .5 * detail(recorded, recorded.rect().adjusted(0, 0, -1, -1)),
+            qPrintable(QString::number(detail(softened, softened.rect().adjusted(0, 0, -1, -1)))));
         struct Style {
             QString mode, shape;
             bool gif;

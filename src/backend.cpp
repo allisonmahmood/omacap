@@ -746,7 +746,7 @@ void Backend::presentCamera() {
                 image.scaled(640, 480, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
             image = image.copy((image.width() - 640) / 2, (image.height() - 480) / 2, 640, 480);
         }
-        image = cameraBlur.apply(image, blur, source);
+        image = cameraBlur.apply(image, blur);
     } catch (const std::exception &e) {
         // The export fails with the same reason; the preview shows the camera as recorded.
         qWarning("%s", e.what());
@@ -793,6 +793,8 @@ void Backend::applySeek() {
     syncPlayers(true);
 }
 void Backend::seek(double t) {
+    // The camera frame shown next does not follow the one shown now.
+    cameraBlur.reset();
     pendingSeek = std::clamp(t, 0., std::max(0., duration() - .001));
     seeking = true;
     m_position = pendingSeek;

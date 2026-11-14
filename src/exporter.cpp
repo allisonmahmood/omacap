@@ -194,11 +194,11 @@ int exportRecording(const QString &jobPath) {
             decode(screen, dir + "/screen.mkv", sw, sh);
             if (hasCamera)
                 decode(cam, dir + "/camera.mkv", 640, 480);
+            cameraBlur.reset(); // the camera's frames across a cut do not follow each other
             for (int i = 0; i < count; i++, index++) {
                 frames->put(false, readFrame(screen, sw, sh));
                 if (hasCamera)
-                    frames->put(true, cameraBlur.apply(readFrame(cam, 640, 480), edit.cameraBlur,
-                                                       sampleTime(index)));
+                    frames->put(true, cameraBlur.apply(readFrame(cam, 640, 480), edit.cameraBlur));
                 double x = .5, y = .5, z = edit.zoomAt(sampleTime(index), x, y);
                 root->setProperty("zoom", z);
                 root->setProperty("focusX", x);

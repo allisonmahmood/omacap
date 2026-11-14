@@ -75,9 +75,14 @@ struct BackgroundBlur::Model {
 };
 BackgroundBlur::BackgroundBlur() = default;
 BackgroundBlur::~BackgroundBlur() = default;
-QImage BackgroundBlur::apply(const QImage &frame, double amount, double time) {
+void BackgroundBlur::reset() {
+    previous.clear();
+}
+QImage BackgroundBlur::apply(const QImage &frame, double amount) {
     if (amount <= 0 || frame.isNull())
         return frame;
+    if (frame == lastFrame)
+        return blend(frame, lastMask, amount);
     try {
         if (!model)
             model = std::make_unique<Model>();
@@ -93,13 +98,11 @@ QImage BackgroundBlur::apply(const QImage &frame, double amount, double time) {
         std::vector<float> person = model->run(pixels);
         // The model decides each frame alone, so where it is unsure (hair, a hand) its answer
         // flickers. There, lean on the last frame's; where it is sure, take the new one.
-        if (previous.size() == person.size() && time >= previousTime && time - previousTime < .25)
+        if (previous.size() == person.size())
             for (size_t i = 0; i < person.size(); i++) {
                 const float unsure = 1 - std::abs(person[i] - .5f) * 2;
                 person[i] += (previous[i] - person[i]) * .7f * unsure;
             }
-        previous = person;
-        previousTime = time;
         QImage mask(side, side, QImage::Format_Grayscale8);
         for (int y = 0; y < side; y++) {
             uchar *line = mask.scanLine(y);
@@ -109,6 +112,9 @@ QImage BackgroundBlur::apply(const QImage &frame, double amount, double time) {
                 line[x] = uchar(std::lround(t * t * (3 - 2 * t) * 255));
             }
         }
+        previous = std::move(person);
+        lastFrame = frame;
+        lastMask = mask;
         return blend(frame, mask, amount);
     } catch (const Ort::Exception &e) {
         throw std::runtime_error(std::string("Could not find the person in the camera: ") +
