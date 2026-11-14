@@ -722,8 +722,11 @@ void Backend::presentScreen(const QVideoFrame &v) {
     emit frameChanged();
 }
 void Backend::presentCamera() {
-    if (!latestCameraFrame.isValid() || latestCameraSerial == shownCameraSerial || seeking ||
-        seekTimer.isActive())
+    // The frame on show is shown again when its background blur changes. A hidden camera
+    // is not blurred.
+    const double blur = state.camera ? state.cameraBlur : 0;
+    if (!latestCameraFrame.isValid() || seeking || seekTimer.isActive() ||
+        (latestCameraSerial == shownCameraSerial && blur == shownCameraBlur))
         return;
     const auto stamp = latestCameraFrame.startTime();
     const double source = (stamp >= 0 ? stamp / 1000000. : camera.position() / 1000.) + cameraStart;
@@ -734,7 +737,21 @@ void Backend::presentCamera() {
     if (source > target + .12 || end < target - .12)
         return;
     shownCameraSerial = latestCameraSerial;
-    frames->put(true, latestCameraFrame.toImage());
+    shownCameraBlur = blur;
+    QImage image = latestCameraFrame.toImage();
+    try {
+        // The exporter decodes the camera to fill 640×480; blur the same picture here.
+        if (blur > 0 && image.size() != QSize(640, 480)) {
+            image =
+                image.scaled(640, 480, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+            image = image.copy((image.width() - 640) / 2, (image.height() - 480) / 2, 640, 480);
+        }
+        image = cameraBlur.apply(image, blur, source);
+    } catch (const std::exception &e) {
+        // The export fails with the same reason; the preview shows the camera as recorded.
+        qWarning("%s", e.what());
+    }
+    frames->put(true, image);
     ++cameraRevision;
     emit cameraFrameChanged();
 }
@@ -864,7 +881,7 @@ void Backend::edited() {
     QVariantMap look;
     auto current = state.json().toVariantMap();
     for (auto key : QStringList{"padding", "corners", "shadow", "cameraSize", "cameraX", "cameraY",
-                                "cameraShape", "cameraCorners", "cameraShadow"})
+                                "cameraShape", "cameraCorners", "cameraShadow", "cameraBlur"})
         look[key] = current[key];
     settings.setValue("appearance", look);
     emit editChanged();
@@ -874,6 +891,7 @@ void Backend::edited() {
     if (!grouping)
         checkpoint();
     syncPlayers();
+    presentCamera();
 }
 void Backend::setValue(QString k, QVariant v) {
     // QML arrays reach QVariant as QJSValue; unwrap them before JSON conversion.
@@ -885,7 +903,7 @@ void Backend::setValue(QString k, QVariant v) {
         "padding",       "corners",     "shadow",        "cameraSize",   "cameraX",
         "cameraY",       "camera",      "mic",           "desktop",      "crop",
         "color",         "cameraShape", "cameraCorners", "cameraShadow", "windowTransparency",
-        "windowOpacity"};
+        "windowOpacity", "cameraBlur"};
     if (!allowed.contains(k))
         return;
     auto o = state.json();

@@ -1,4 +1,5 @@
 #include "exporter.h"
+#include "background-blur.h"
 #include "frames.h"
 #include "model.h"
 #include <QCoreApplication>
@@ -147,6 +148,7 @@ int exportRecording(const QString &jobPath) {
         int sw = std::min(3840, job["sourceWidth"].toInt(1920));
         int sh = std::max(2, int(std::round(sw / aspect)));
         bool hasCamera = edit.camera && QFileInfo::exists(dir + "/camera.mkv");
+        BackgroundBlur cameraBlur;
         QElapsedTimer timer;
         timer.start();
         double renderMs = 0;
@@ -195,7 +197,8 @@ int exportRecording(const QString &jobPath) {
             for (int i = 0; i < count; i++, index++) {
                 frames->put(false, readFrame(screen, sw, sh));
                 if (hasCamera)
-                    frames->put(true, readFrame(cam, 640, 480));
+                    frames->put(true, cameraBlur.apply(readFrame(cam, 640, 480), edit.cameraBlur,
+                                                       sampleTime(index)));
                 double x = .5, y = .5, z = edit.zoomAt(sampleTime(index), x, y);
                 root->setProperty("zoom", z);
                 root->setProperty("focusX", x);

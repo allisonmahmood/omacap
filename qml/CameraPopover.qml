@@ -1,7 +1,8 @@
 import QtQuick
 import QtQuick.Layouts
 
-// The camera overlay: shown or hidden, size, shape, corners, shadow and position.
+// The camera overlay: shown or hidden, size, shape, corners, shadow, background blur and
+// position.
 Popover {
     id: popover
 
@@ -62,6 +63,14 @@ Popover {
         label: "Shadow"
         fieldName: "cameraShadow"
         current: backend.edit.cameraShadow ?? 0.45
+    }
+
+    // Blurs the room behind you, not you; 0% leaves the camera as recorded.
+    ChromeSetting {
+        objectName: "cameraBlur"
+        label: "Blur"
+        fieldName: "cameraBlur"
+        current: backend.edit.cameraBlur ?? 0
     }
 
     PopoverRow {

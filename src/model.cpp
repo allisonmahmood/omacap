@@ -161,6 +161,7 @@ QJsonObject Edit::json() const {
             {"cameraShape", cameraShape},
             {"cameraCorners", cameraCorners},
             {"cameraShadow", cameraShadow},
+            {"cameraBlur", cameraBlur},
             {"cameraSize", cameraSize},
             {"cameraX", cameraX},
             {"cameraY", cameraY},
@@ -216,6 +217,7 @@ Edit Edit::fromJson(const QJsonObject &o) {
     NUM(cameraSize, .08, .4);
     NUM(cameraCorners, 0., .5);
     NUM(cameraShadow, 0., 1.);
+    NUM(cameraBlur, 0., 1.);
     e.cameraShape = o["cameraShape"] == "circle" ? "circle" : "rectangle";
     NUM(cameraX, 0., 1.);
     NUM(cameraY, 0., 1.);

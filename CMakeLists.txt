@@ -10,6 +10,8 @@ find_package(Qt6 6.8 REQUIRED COMPONENTS
   Concurrent Core DBus Gui Widgets Qml Quick QuickControls2 Multimedia OpenGL Network Test)
 # The capture overlay and the recording chrome are layer-shell surfaces.
 find_package(LayerShellQt REQUIRED)
+# Runs the model that finds the person in camera frames (src/background-blur.*).
+find_package(onnxruntime REQUIRED)
 
 # Contracts between the capture overlay and the video process.
 add_library(omacap-ipc STATIC
@@ -26,6 +28,7 @@ add_subdirectory(snap)
 # The video editor: recording, edit model, timeline and exports.
 add_library(omacap-video STATIC
   src/backend.cpp src/backend.h
+  src/background-blur.cpp src/background-blur.h
   src/chrome-items.cpp src/chrome-items.h
   src/exporter.cpp src/exporter.h
   src/frames.h
@@ -46,6 +49,7 @@ target_compile_options(omacap-video PRIVATE -Wall -Wextra)
 target_link_libraries(omacap-video PUBLIC omacap-ipc omasnap-core
   Qt6::Core Qt6::DBus Qt6::Gui Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickControls2
   Qt6::Multimedia Qt6::OpenGL Qt6::Network)
+target_link_libraries(omacap-video PRIVATE onnxruntime::onnxruntime)
 
 qt_add_executable(omacap
   src/main.cpp
@@ -70,5 +74,6 @@ install(FILES packaging/omacap.svg DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/h
 install(FILES LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/omacap")
 install(FILES snap/LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/omacap" RENAME Omasnap-LICENSE)
 install(FILES snap/assets/OFL.txt DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/omacap" RENAME Neucha-OFL.txt)
+install(FILES models/LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/omacap" RENAME person-model-Apache-2.0.txt)
 install(FILES snap/assets/JetBrainsMono-OFL.txt snap/assets/Inter-OFL.txt snap/assets/Lucide-ISC.txt
   DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/omacap")
