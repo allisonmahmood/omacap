@@ -12,9 +12,10 @@ class BackgroundBlur {
     // `frame` with its background blurred by `amount`, from 0 (the frame as it is) to 1.
     // Give it a recording's frames in order: each steadies its outline with the one before.
     // The same frame again (a new amount while paused, or a slow camera in a fast export)
-    // keeps the outline it had. Throws std::runtime_error when the model can't run.
+    // keeps the outline it had, and a frame left as it is ends the sequence. Throws
+    // std::runtime_error when the model can't run.
     QImage apply(const QImage &frame, double amount);
-    // The next frame does not follow the last one: a seek, or the far side of a cut.
+    // The next frame does not follow the last one: the camera moved, or a cut was crossed.
     void reset();
     // The blur itself: `mask` says how much of each pixel is the person (Grayscale8, any
     // size). The person stays sharp and adds nothing to the blur around them.

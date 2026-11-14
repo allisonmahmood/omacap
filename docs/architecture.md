@@ -127,8 +127,9 @@ sets it, and it is kept for new recordings with the rest of the camera's look.
   `models/README.md`) runs through ONNX Runtime on the CPU, in about 5 ms a frame on one
   thread. It is built into the binary as a resource and loaded by the first frame that needs
   it, so nothing else pays for it. Where the model is unsure, the mask leans on the frame
-  before, which keeps hair and hands from flickering. A seek in the preview and a cut in the
-  export start afresh (`reset()`), and the same frame again keeps the mask it had, so moving
+  before, which keeps hair and hands from flickering. A moved camera in the preview (a seek, or
+  playback resuming), a cut in the export and a frame left unblurred start afresh
+  (`reset()`), and the same frame again keeps the mask it had, so moving
   the slider while paused or exporting faster than the camera's rate changes no outline. A
   frame reached by seeking has no frame before it, so its outline at hair and hands can
   differ slightly from the same frame in playback or in the export.

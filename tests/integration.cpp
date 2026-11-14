@@ -1121,6 +1121,8 @@ class Integration : public QObject {
         QVERIFY(!portrait.isNull());
         BackgroundBlur blur;
         QCOMPARE(blur.apply(portrait, 0), portrait);
+        // A frame before it, so the portrait's outline is steadied as it is in a recording.
+        blur.apply(portrait.mirrored(true, false), .6);
         const QImage blurred = blur.apply(portrait, .6);
         QCOMPARE(blurred.size(), portrait.size());
         // The same frame again, as when the slider moves while paused, keeps its outline.

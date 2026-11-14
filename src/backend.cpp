@@ -649,6 +649,9 @@ void Backend::openPlayers() {
     });
 }
 void Backend::syncPlayers(bool force) {
+    // A moved camera's next frame does not follow the one on show.
+    if (force)
+        cameraBlur.reset();
     const qint64 commonTime = qRound64(state.sourceTime(m_position) * 1000);
     for (auto p : {&camera, &mic, &desktop}) {
         if (p->source().isEmpty())
@@ -793,8 +796,6 @@ void Backend::applySeek() {
     syncPlayers(true);
 }
 void Backend::seek(double t) {
-    // The camera frame shown next does not follow the one shown now.
-    cameraBlur.reset();
     pendingSeek = std::clamp(t, 0., std::max(0., duration() - .001));
     seeking = true;
     m_position = pendingSeek;

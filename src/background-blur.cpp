@@ -79,8 +79,10 @@ void BackgroundBlur::reset() {
     previous.clear();
 }
 QImage BackgroundBlur::apply(const QImage &frame, double amount) {
-    if (amount <= 0 || frame.isNull())
+    if (amount <= 0 || frame.isNull()) {
+        reset(); // frames that pass unblurred break the sequence
         return frame;
+    }
     if (frame == lastFrame)
         return blend(frame, lastMask, amount);
     try {
