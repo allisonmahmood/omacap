@@ -18,6 +18,8 @@ struct Edit {
     QRectF crop{0, 0, 1, 1};
     double padding = .07, corners = .015, shadow = .45, cameraSize = .18, cameraX = .79,
            cameraY = .75, cameraCorners = .12, cameraShadow = .45;
+    // How much the camera's background is blurred behind the person; 0 leaves it alone.
+    double cameraBlur = 0;
     QString cameraShape = "rectangle";
     QString windowTransparency = "off";
     double windowOpacity = .96;

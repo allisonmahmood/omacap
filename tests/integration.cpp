@@ -62,6 +62,15 @@ class Integration : public QObject {
                 return match;
         return nullptr;
     }
+    // How much detail a region of an image holds: the mean step between neighbouring pixels.
+    static double detail(const QImage &image, const QRect &region) {
+        double steps = 0;
+        for (int y = region.top(); y <= region.bottom(); y++)
+            for (int x = region.left(); x <= region.right(); x++)
+                steps += std::abs(qGray(image.pixel(x, y)) - qGray(image.pixel(x + 1, y))) +
+                         std::abs(qGray(image.pixel(x, y)) - qGray(image.pixel(x, y + 1)));
+        return steps / (region.width() * region.height());
+    }
     // Opens the editor on `path` and waits for it to be on screen and focused.
     static QQuickWindow *openEditor(Studio &studio, const QString &path) {
         studio.backend.loadFile(QDir::current().absoluteFilePath(path));
@@ -1106,6 +1115,37 @@ class Integration : public QObject {
         QCOMPARE(b.state.crop, cropped);
         b.discard();
     }
+    void backgroundBlur() {
+        // A painted portrait (tests/fixtures/README.md): a face before a curtain and a door.
+        const QImage portrait("tests/fixtures/portrait.jpg");
+        QVERIFY(!portrait.isNull());
+        BackgroundBlur blur;
+        QCOMPARE(blur.apply(portrait, 0), portrait);
+        // A frame before it, so the portrait's outline is steadied as it is in a recording.
+        blur.apply(portrait.transformed(QTransform().scale(-1, 1)), .6);
+        const QImage blurred = blur.apply(portrait, .6);
+        QCOMPARE(blurred.size(), portrait.size());
+        // The same frame again, as when the slider moves while paused, keeps its outline.
+        blur.apply(portrait, .3);
+        QCOMPARE(blur.apply(portrait, .6), blurred);
+        blurred.save("tests/out/background-blur.png");
+        const QRect face(118, 35, 34, 40), door(240, 10, 70, 90);
+        QVERIFY2(detail(blurred, face) > .9 * detail(portrait, face),
+                 qPrintable(QString::number(detail(blurred, face))));
+        QVERIFY2(detail(blurred, door) < .5 * detail(portrait, door),
+                 qPrintable(QString::number(detail(blurred, door))));
+        // The person adds nothing to the blur beside them, so no halo of their colours forms:
+        // a white person stays white, and the black beside them stays black.
+        QImage halves(320, 240, QImage::Format_RGB32), person(320, 240, QImage::Format_Grayscale8);
+        halves.fill(Qt::black);
+        person.fill(Qt::black);
+        for (auto image : {&halves, &person})
+            QPainter(image).fillRect(0, 0, 160, 240, Qt::white);
+        const QImage kept = BackgroundBlur::blend(halves, person, 1);
+        QCOMPARE(kept.pixelColor(80, 120), QColor(Qt::white));
+        QVERIFY2(kept.pixelColor(176, 120).red() < 16,
+                 qPrintable(QString::number(kept.pixelColor(176, 120).red())));
+    }
     void styledPreviewMatchesExport() {
         Studio s;
         auto &b = s.backend;
@@ -1127,6 +1167,17 @@ class Integration : public QObject {
         QVERIFY(QTest::qWaitForWindowExposed(s.stage.editorWindow()));
         auto composition = find(s.stage.editorWindow()->contentItem(), "composition");
         QVERIFY(composition);
+        // Blurring the camera's background redraws the frame on show, with most of its detail
+        // gone, and every export below blurs it as the preview does.
+        const QImage recorded = s.frames->camera;
+        const int revision = b.cameraRevision;
+        b.setValue("cameraBlur", .6);
+        QCOMPARE(b.cameraRevision, revision + 1);
+        const QImage softened = s.frames->camera;
+        QVERIFY2(
+            detail(softened, softened.rect().adjusted(0, 0, -1, -1)) <
+                .5 * detail(recorded, recorded.rect().adjusted(0, 0, -1, -1)),
+            qPrintable(QString::number(detail(softened, softened.rect().adjusted(0, 0, -1, -1)))));
         struct Style {
             QString mode, shape;
             bool gif;
@@ -1163,18 +1214,38 @@ class Integration : public QObject {
             QVERIFY(ffmpeg.waitForFinished(15000));
             const auto exported = QImage::fromData(ffmpeg.readAllStandardOutput());
             QCOMPARE(exported.size(), preview.size());
-            double error = 0;
-            for (int y = 0; y < preview.height(); y += 4)
-                for (int x = 0; x < preview.width(); x += 4) {
-                    const auto p = preview.pixelColor(x, y), e = exported.pixelColor(x, y);
-                    error += std::abs(p.red() - e.red()) + std::abs(p.green() - e.green()) +
-                             std::abs(p.blue() - e.blue());
-                }
-            error /= preview.width() * preview.height() * 3. / 16;
-            qInfo() << "PREVIEW_EXPORT" << name << "mean_channel_error=" << error;
+            // The mean difference per channel, over every fourth pixel of a region.
+            const auto difference = [&](const QRect &region) {
+                double error = 0;
+                int samples = 0;
+                for (int y = region.top(); y <= region.bottom(); y += 4)
+                    for (int x = region.left(); x <= region.right(); x += 4, samples += 3) {
+                        const auto p = preview.pixelColor(x, y), e = exported.pixelColor(x, y);
+                        error += std::abs(p.red() - e.red()) + std::abs(p.green() - e.green()) +
+                                 std::abs(p.blue() - e.blue());
+                    }
+                return error / samples;
+            };
+            const double error = difference(preview.rect());
+            // The middle of the camera, which is a small part of the whole frame.
+            const double scale = preview.width() / composition->width();
+            const QRectF camera(composition->property("cameraX").toDouble() * scale,
+                                composition->property("cameraY").toDouble() * scale,
+                                composition->property("cameraW").toDouble() * scale,
+                                composition->property("cameraH").toDouble() * scale);
+            const double cameraError =
+                difference(camera
+                               .adjusted(camera.width() / 4, camera.height() / 4,
+                                         -camera.width() / 4, -camera.height() / 4)
+                               .toRect());
+            qInfo() << "PREVIEW_EXPORT" << name << "mean_channel_error=" << error
+                    << "camera=" << cameraError;
             preview.save("tests/out/preview-" + name + ".png");
             exported.save("tests/out/export-" + name + ".png");
             QVERIFY2(error < 5, qPrintable(QString::number(error)));
+            // A GIF's palette can't hold a blur's smooth gradients, so its camera is not compared.
+            if (!style.gif)
+                QVERIFY2(cameraError < 6, qPrintable(QString::number(cameraError)));
         }
         b.discard();
     }

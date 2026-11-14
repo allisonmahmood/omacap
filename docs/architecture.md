@@ -117,6 +117,30 @@ recording. XDPH may still share something else, so the worker checks the stream 
 `mapping_id`, source type and size) and fails clearly when it isn't the requested
 monitor. Rotated monitors are refused for now.
 
+## Camera background blur
+
+`BackgroundBlur` (`src/background-blur.*`) blurs what is behind the person in a camera frame.
+The edit's `cameraBlur` (0 to 1, 0 is off) sets how much; the Camera popover's Blur slider
+sets it, and it is kept for new recordings with the rest of the camera's look.
+
+- **Finding the person.** `models/person.onnx` (MediaPipe's selfie segmenter, see
+  `models/README.md`) runs through ONNX Runtime on the CPU, in about 5 ms a frame on one
+  thread. It is built into the binary as a resource and loaded by the first frame that needs
+  it, so nothing else pays for it. Where the model is unsure, the mask leans on the frame
+  before, which keeps hair and hands from flickering. A moved camera in the preview (a seek, or
+  playback resuming), a cut in the export and a frame left unblurred start afresh
+  (`reset()`), and the same frame again keeps the mask it had, so moving
+  the slider while paused or exporting faster than the camera's rate changes no outline. A
+  frame reached by seeking has no frame before it, so its outline at hair and hands can
+  differ slightly from the same frame in playback or in the export.
+- **Blurring.** The background is blurred on a 160-pixel-wide copy, each pixel weighted by how
+  much of it is background, so the person never smears into the blur around them. All of it
+  costs about 8 ms a frame.
+- **One picture for preview and export.** The frame is blurred before `Composition.qml` sees
+  it: by `Backend::presentCamera()` for the preview and the card, and by the exporter for
+  each frame it reads. Both blur the camera at 640×480. A failure fails the export; the
+  preview logs it and shows the camera as recorded.
+
 ## Video process commands
 
 `src/video-ipc.h` defines the socket protocol; `src/video-owner.cpp` answers by phase:

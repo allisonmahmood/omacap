@@ -1,4 +1,5 @@
 #pragma once
+#include "background-blur.h"
 #include "frames.h"
 #include "model.h"
 #include "record-request.h"
@@ -180,6 +181,8 @@ class Backend : public QObject {
     void presentScreen(const QVideoFrame &frame);
     QVideoFrame latestCameraFrame;
     quint64 latestCameraSerial = 0, shownCameraSerial = 0;
+    BackgroundBlur cameraBlur;
+    double shownCameraBlur = 0;
     void presentCamera();
     void applySeek();
     void updateDisplay();

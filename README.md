@@ -18,7 +18,7 @@ OmaCap is built on [Omasnap](https://github.com/omacom/omasnap), Omarchy's scree
 - **Make it look right.** A backdrop (your Omarchy wallpaper by default), padding, rounded corners, a shadow and optional window transparency. New screenshots start with the look you used last.
 - **Keep the useful parts.** Trim the ends, split and delete mistakes in the middle, and undo when you change your mind.
 - **Zoom on purpose.** Add a zoom at the playhead and aim it on the preview. OmaCap pans smoothly between zooms.
-- **Include yourself when you want.** Record your microphone, desktop audio and camera. Place the camera, choose a rectangle or circle, and mute either audio track.
+- **Include yourself when you want.** Record your microphone, desktop audio and camera. Place the camera, choose a rectangle or circle, blur the room behind you, and mute either audio track.
 - **Mark up screenshots.** Arrows, boxes, text, numbered steps, highlighter, spotlight, redaction, cut-out bands, OCR, scrolling capture and pins, all from Omasnap.
 - **Take the file anywhere.** MP4 or GIF at your chosen size and frame rate. No account, upload or project library.
 
@@ -146,7 +146,7 @@ The card fades after 10 seconds unless you hover it, keep it or export. The reco
 The editor draws over your desktop like the screenshot editor; `W` moves it into a window and OmaCap remembers which you prefer. The toolbar holds undo and redo, the look (backdrop, frame, glass, camera), the tools (select, crop, zoom, cut), and export and close.
 
 - **Crop** opens the whole recording. Drag the corners to resize the selection, or drag inside it to move it, then **Confirm crop**. Reopening Crop always shows the full recording, so you can expand an earlier crop.
-- **Look**: the backdrop is your wallpaper, an image or a colour; the frame sets padding, corners and shadow; glass shows the backdrop through the recorded window. The camera stays opaque. If you recorded a camera, its popover sets its size, shape, corners and shadow, and you can drag it in the preview. New recordings keep your last frame and camera settings.
+- **Look**: the backdrop is your wallpaper, an image or a colour; the frame sets padding, corners and shadow; glass shows the backdrop through the recorded window. The camera stays opaque. If you recorded a camera, its popover sets its size, shape, corners and shadow, and you can drag it in the preview. **Blur** softens the room behind you and keeps you sharp, as video calls do; it is worked out on your computer, in the preview and in the export. New recordings keep your last frame and camera settings, the blur included.
 - **Trim and cut.** Drag across a lane to select a range, then **Keep range** or **Delete**. `S` splits at the playhead. The cut tool (`C`) splits a track where you click; `V` returns to select. Click a clip and press Delete to remove it. The microphone and speaker buttons mute either track.
 - **Zoom.** Press `Z`, or click an empty part of the Zooms lane. Select a zoom and the preview lights the area it zooms to: drag it to aim, and use the wheel or a corner to change the amount. Drag the zoom on the timeline, or its ends, to time it. Touching zooms move straight from one target to the next.
 
@@ -208,4 +208,4 @@ See [Releasing OmaCap](docs/releasing.md) for preparing a draft release and publ
 
 ## License
 
-[MIT](https://github.com/allisonmahmood/omacap/blob/main/LICENSE). `snap/` is derived from [Omasnap](https://github.com/omacom/omasnap), MIT licensed, © 2026 Tobi Lütke ([its licence](snap/LICENSE)); its bundled fonts keep their OFL licences and its Lucide icons their ISC licence. Multimedia dependencies retain their own licenses. OmaCap is independent and contains no Cap code or assets.
+[MIT](https://github.com/allisonmahmood/omacap/blob/main/LICENSE). `snap/` is derived from [Omasnap](https://github.com/omacom/omasnap), MIT licensed, © 2026 Tobi Lütke ([its licence](snap/LICENSE)); its bundled fonts keep their OFL licences and its Lucide icons their ISC licence. The model behind the camera's background blur is MediaPipe's selfie segmenter, © Google, under the Apache License 2.0 ([details](models/README.md)). Multimedia dependencies retain their own licenses. OmaCap is independent and contains no Cap code or assets.
