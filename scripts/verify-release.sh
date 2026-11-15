@@ -33,8 +33,9 @@ trap 'rm -rf -- "$assets"' EXIT
 gh release download "$tag" --dir "$assets"
 rm -f -- "$assets/$evidence"
 verified=$(cd "$assets" && sha256sum -- * | sort)
-[[ $(held) == "$verified" ]] ||
-  { echo "The files downloaded for $tag are not the ones draft $release holds." >&2; exit 1; }
+# Whether the draft still holds exactly the verified files. A failed request is a no.
+unchanged() { now=$(held) && [[ $now == "$verified" ]]; }
+unchanged || { echo "The files downloaded for $tag are not the ones draft $release holds." >&2; exit 1; }
 (cd "$assets" && sha256sum --check SHA256SUMS)
 commit=$(sed -n 's/^Commit: //p' "$assets/BUILD-INFO.txt")
 [[ $(git rev-parse HEAD) == "$commit" ]] ||
@@ -50,11 +51,11 @@ if ! $publish; then
   echo "Verified, not published. Run again with --publish."
   exit 0
 fi
-unchanged() { now=$(held) && [[ $now == "$verified" ]]; }
 unchanged || { echo "$tag changed while it was being verified; nothing was published." >&2; exit 1; }
 gh release upload "$tag" "$evidence" --clobber
 # The upload went by tag: check it reached this draft, and that nothing else moved meanwhile.
 attached=$(gh api "$api" --jq ".assets[] | select(.name == \"$evidence\") | .digest")
-[[ $attached == "sha256:$(sha256sum "$evidence" | cut -d' ' -f1)" ]] && unchanged ||
+local_digest=$(sha256sum "$evidence" | cut -d' ' -f1)
+[[ $attached == "sha256:$local_digest" ]] && unchanged ||
   { echo "$tag changed while it was being verified; nothing was published." >&2; exit 1; }
 gh api --method PATCH "$api" -F draft=false -f make_latest=true --jq '"Published \(.html_url)"'
