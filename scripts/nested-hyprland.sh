@@ -39,6 +39,12 @@ stop)
   [[ -f $state/env ]] || exit 0
   # shellcheck disable=SC1091
   instance=$(sed -n 's/^HYPRLAND_INSTANCE_SIGNATURE=//p' "$state/env")
+  # Everything below acts on this name. An empty one would address the live session's Hyprland
+  # and its runtime directory.
+  if [[ ! $instance =~ ^[0-9a-f]+_[0-9]+_[0-9]+$ ]]; then
+    echo "$state/env names no Hyprland instance; nothing was stopped" >&2
+    exit 1
+  fi
   # Hyprland removes its lock, which holds its pid, when it exits.
   lock=$XDG_RUNTIME_DIR/hypr/$instance/hyprland.lock
   pid=$(head -1 "$lock" 2>/dev/null || true)

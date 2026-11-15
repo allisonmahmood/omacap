@@ -20,10 +20,18 @@ unset LD_LIBRARY_PATH
 work=$(mktemp -d)
 state=$work/nested
 report=$work/VERIFICATION.txt
+# A nested Hyprland that won't stop fails the run, whatever else passed: it keeps rendering on
+# a hidden workspace of the desktop this was meant to leave alone.
 cleanup() {
+  status=$?
   "$repo/scripts/nested-portal.sh" stop "$state" >/dev/null 2>&1 || true
-  "$repo/scripts/nested-hyprland.sh" stop "$state" || echo "stop the nested Hyprland by hand: see $state" >&2
-  [[ -e $state/env ]] || rm -rf -- "$work"
+  if "$repo/scripts/nested-hyprland.sh" stop "$state"; then
+    rm -rf -- "$work"
+  else
+    echo "FAIL: the nested Hyprland is still running; its state is kept in $state" >&2
+    status=1
+  fi
+  exit "$status"
 }
 trap cleanup EXIT
 step() { printf '\n== %s\n' "$1" | tee -a "$report"; }

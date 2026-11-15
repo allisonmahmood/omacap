@@ -31,7 +31,8 @@ fi
 # The exporter draws through Xwayland. Qt finds the display by its socket file, which can go
 # missing while the X server lives on; every export then fails with "No OpenGL context".
 display=${DISPLAY:-}
-socket=/tmp/.X11-unix/X${display#:}
+number=${display#*:} # ":0.0" and "host:0" both name display 0
+socket=/tmp/.X11-unix/X${number%%.*}
 if [[ -n $display ]] && python - "$socket" <<'PY' 2>/dev/null; then
 import socket, sys
 with socket.socket(socket.AF_UNIX) as s:
