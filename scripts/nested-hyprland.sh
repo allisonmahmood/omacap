@@ -41,7 +41,7 @@ stop)
   instance=$(sed -n 's/^HYPRLAND_INSTANCE_SIGNATURE=//p' "$state/env")
   # Everything below acts on this name. An empty one would address the live session's Hyprland
   # and its runtime directory.
-  if [[ ! $instance =~ ^[0-9a-f]+_[0-9]+_[0-9]+$ ]]; then
+  if [[ ! $instance =~ ^[[:alnum:]]+_[0-9]+_[0-9]+$ ]]; then
     echo "$state/env names no Hyprland instance; nothing was stopped" >&2
     exit 1
   fi

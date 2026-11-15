@@ -5,45 +5,56 @@
 #
 # Downloads the draft's files, checks them, and runs scripts/verify-desktop.sh on the package
 # the release will ship. Run it from a clean checkout of the release's commit, so the tests are
-# the ones that commit has. With --publish, the evidence is attached to the release and the
-# release goes public, provided it is still the draft and the package that were verified; a
-# failure leaves the draft as it was.
+# the ones that commit has. With --publish, the evidence is attached and the release goes
+# public. What is published is the release that was verified: a tag can come to name another
+# draft while the checks run, so the draft is held by its id and its files by their checksums.
+# A failure leaves the draft as it was.
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo"
 publish=false
 [[ ${1:-} == --publish ]] && { publish=true; shift; }
 version=${1:?the version to verify, e.g. 0.2.1}
 tag=v$version
+evidence=VERIFICATION.txt
 
-# The release this run verifies: still a draft, and the same one, when it is published.
-draft() { gh release view "$tag" --json databaseId,isDraft --jq 'select(.isDraft) | .databaseId'; }
-release=$(draft)
+release=$(gh release view "$tag" --json databaseId,isDraft --jq 'select(.isDraft) | .databaseId')
 [[ -n $release ]] || { echo "$tag is not a draft; published releases are never changed." >&2; exit 1; }
+api="repos/{owner}/{repo}/releases/$release"
+# The draft's files as GitHub holds them, one "checksum  name" a line as sha256sum prints
+# them, without the evidence. Nothing once it is no longer a draft.
+held() {
+  gh api "$api" --jq "select(.draft) | .assets[] | select(.name != \"$evidence\")
+    | \"\\(.digest | ltrimstr(\"sha256:\"))  \\(.name)\"" | sort
+}
+
 assets=$(mktemp -d)
 trap 'rm -rf -- "$assets"' EXIT
 gh release download "$tag" --dir "$assets"
+rm -f -- "$assets/$evidence"
+verified=$(cd "$assets" && sha256sum -- * | sort)
+[[ $(held) == "$verified" ]] ||
+  { echo "The files downloaded for $tag are not the ones draft $release holds." >&2; exit 1; }
 (cd "$assets" && sha256sum --check SHA256SUMS)
 commit=$(sed -n 's/^Commit: //p' "$assets/BUILD-INFO.txt")
-[[ $(git -C "$repo" rev-parse HEAD) == "$commit" ]] ||
+[[ $(git rev-parse HEAD) == "$commit" ]] ||
   { echo "Check out the release's commit first: git switch --detach $commit" >&2; exit 1; }
 # Edited tests or scripts would verify something the commit doesn't.
-[[ -z $(git -C "$repo" status --porcelain) ]] ||
-  { echo "This checkout has changes; verify from a clean checkout of $commit." >&2; exit 1; }
-name=omacap-$version-1-x86_64.pkg.tar.zst
-package=$assets/$name
+changes=$(git status --porcelain)
+[[ -z $changes ]] || { echo "This checkout has changes; verify from a clean checkout of $commit." >&2; exit 1; }
 
-"$repo/scripts/verify-desktop.sh" "$package"
-grep -q "^OmaCap $version " "$repo/VERIFICATION.txt"
+"$repo/scripts/verify-desktop.sh" "$assets/omacap-$version-1-x86_64.pkg.tar.zst"
+grep -q "^OmaCap $version " "$evidence"
 
-if $publish; then
-  # The draft may have been rebuilt or published while the checks ran.
-  mkdir "$assets/now"
-  [[ $(draft) == "$release" ]] && gh release download "$tag" --pattern "$name" --dir "$assets/now" &&
-    cmp -s "$package" "$assets/now/$name" ||
-    { echo "$tag changed while it was being verified; nothing was published." >&2; exit 1; }
-  gh release upload "$tag" "$repo/VERIFICATION.txt" --clobber
-  gh release edit "$tag" --draft=false --latest >/dev/null
-  echo "Published $(gh release view "$tag" --json url --jq .url)"
-else
+if ! $publish; then
   echo "Verified, not published. Run again with --publish."
+  exit 0
 fi
+unchanged() { now=$(held) && [[ $now == "$verified" ]]; }
+unchanged || { echo "$tag changed while it was being verified; nothing was published." >&2; exit 1; }
+gh release upload "$tag" "$evidence" --clobber
+# The upload went by tag: check it reached this draft, and that nothing else moved meanwhile.
+attached=$(gh api "$api" --jq ".assets[] | select(.name == \"$evidence\") | .digest")
+[[ $attached == "sha256:$(sha256sum "$evidence" | cut -d' ' -f1)" ]] && unchanged ||
+  { echo "$tag changed while it was being verified; nothing was published." >&2; exit 1; }
+gh api --method PATCH "$api" -F draft=false -f make_latest=true --jq '"Published \(.html_url)"'
