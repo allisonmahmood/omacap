@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    # Every night, against whatever Arch and Omarchy stable ship by then: a dependency update
+    # that breaks OmaCap shows up here, not in a release or on someone's desktop.
+    - cron: "17 4 * * *"
 
 permissions:
   contents: read
@@ -35,3 +39,28 @@ jobs:
         env:
           BUILD_RESULT: ${{ needs.build.result }}
         run: test "$BUILD_RESULT" = success
+
+  report:
+    # A failed nightly run has no pull request to turn red, so it opens an issue, or adds to the
+    # one still open from an earlier night.
+    name: Report a failed nightly run
+    needs: required
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open or update the issue
+        run: |
+          title="Nightly CI is failing"
+          body="The nightly run failed on \`main\` with no change to OmaCap, so a dependency moved: $RUN_URL"
+          number=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
+          if [[ -n $number ]]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

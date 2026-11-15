@@ -23,9 +23,16 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       channel: omarchy-stable
+  rolling:
+    # The package is built for Omarchy stable, but it is installed on machines that have moved
+    # on to newer packages, so the same commit has to pass on current Arch too.
+    needs: validate
+    uses: ./.github/workflows/build.yml
+    with:
+      channel: arch
   draft:
     name: Prepare draft for publication
-    needs: build
+    needs: [build, rolling]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -50,4 +57,8 @@ jobs:
             --draft --target "$GITHUB_SHA" --title "OmaCap $VERSION" \
             --notes-file "releases/$VERSION.md"
           url=$(gh release view "v$VERSION" --json url --jq .url)
-          echo "Draft ready: $url. Review it and click Publish release." >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "Draft ready: $url."
+            echo "CI can't record a screen. Before publishing, verify the draft on an Omarchy desktop:"
+            echo "\`git switch --detach $GITHUB_SHA && ./scripts/verify-release.sh --publish $VERSION\`"
+          } >> "$GITHUB_STEP_SUMMARY"

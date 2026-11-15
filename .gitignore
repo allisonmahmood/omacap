@@ -9,3 +9,4 @@ __pycache__/
 /packaging/pkg/
 /packaging/src/
 /packaging/*.pkg.tar.*
+VERIFICATION.txt

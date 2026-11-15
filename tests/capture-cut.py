@@ -274,16 +274,16 @@ os.environ |= hyprland.env
 
 
 def watched_recording(name, *args, change=None, at=1.5):
-    """Records against `hyprland` from 0.3 s after streaming. `at` seconds after streaming,
-    `change(hyprland)` runs, or else the recording is stopped. Returns the start, that time,
-    the errors, the duration and the file."""
+    """Records against `hyprland` with `encoder`, from 0.3 s after streaming. `at` seconds after
+    streaming, `change(hyprland)` runs, or else the recording is stopped. Returns the start, that
+    time, the errors, the duration and the file."""
     global worker
-    path = out / f"{name}.mkv"
+    path = out / f"{name}-{encoder.split()[-1]}.mkv"
     path.unlink(missing_ok=True)
     hyprland.monitors, hyprland.delay, hyprland.hang = [hyprland.monitor], 0, False
     worker = subprocess.Popen(
         ["/usr/bin/python", str(repo / "scripts/capture.py"), "--synthetic", "--output", str(path),
-         "--monitor", "TEST-1", "--display", hyprland.baseline(), *args],
+         "--monitor", "TEST-1", "--display", hyprland.baseline(), "--encoder", encoder, *args],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=hyprland.env,
     )
     expect("streaming")
@@ -308,23 +308,8 @@ def rescale(hyprland):
     hyprland.monitors = [hyprland.monitor | {"scale": 2}]
 
 
-# A stop waits for the watch to catch up, then keeps everything up to it.
-start, _, errors, kept, _ = watched_recording("watched-stop", at=1.3)
-assert not errors and 0.9 < kept < 1.1, (errors, kept)
-# A display change ends the recording before it, though frames since have been encoded.
-start, changed, errors, kept, _ = watched_recording("display-change", change=rescale)
-assert errors == ["The display changed, so OmaCap stopped recording."], errors
-assert (changed - start) / 1e9 - 0.5 < kept < (changed - start) / 1e9 + 0.04, (kept, changed - start)
-
-
 def stall(hyprland):
     hyprland.hang = True
-
-
-# A watch that gets no answers keeps nothing it hasn't seen.
-start, changed, errors, kept, _ = watched_recording("stalled-watch", change=stall)
-assert errors == ["OmaCap couldn't check the display, so it stopped recording."], errors
-assert kept < (changed - start) / 1e9 + 0.04, (kept, changed - start)
 
 
 def unseen_change(hyprland):
@@ -332,21 +317,44 @@ def unseen_change(hyprland):
     hyprland.delay = 0.29  # answers just in time, after the screen breaks
 
 
-# The screen breaks off (as XDPH's does on a mode change) 0.15 s after a change the watch
-# hasn't reported yet: what is held back waits for it, so nothing since the change is kept.
-start, changed, errors, kept, _ = watched_recording(
-    "screen-break", "--break-after", "screen:1.15", change=unseen_change, at=1.3)
-assert errors == ["The screen stream ended, as it does when the display changes, so OmaCap "
-                  "stopped recording."], errors
-assert kept < (changed - start) / 1e9 + 0.04, (kept, changed - start)
+# The watched recordings run once for every way the screen can be encoded, since what is kept
+# is decided after the encoder. vp8enc keeps each buffer's timestamp. gst-libav's encoders
+# restamp theirs, as nvh264enc does (0.2.0 lost every NVIDIA recording to that), so one stands
+# in for it where there is no NVIDIA hardware, and nvh264enc itself runs where there is.
+assert Gst.ElementFactory.find("avenc_mpeg4"), "gst-libav is needed: its encoder restamps buffers"
+encoders = ["vp8enc", "videoconvert ! avenc_mpeg4"]
+if Gst.ElementFactory.find("nvh264enc"):
+    encoders.append("nvh264enc")
+for encoder in encoders:
+    # A stop waits for the watch to catch up, then keeps everything up to it.
+    start, _, errors, kept, _ = watched_recording("watched-stop", at=1.3)
+    assert not errors and 0.9 < kept < 1.1, (errors, kept)
+    # A display change ends the recording before it, though frames since have been encoded.
+    start, changed, errors, kept, _ = watched_recording("display-change", change=rescale)
+    assert errors == ["The display changed, so OmaCap stopped recording."], errors
+    assert (changed - start) / 1e9 - 0.5 < kept < (changed - start) / 1e9 + 0.04, (kept, changed - start)
 
-# A microphone that fails ends the recording and keeps every track up to then.
-start, _, errors, kept, path = watched_recording(
-    "mic-break", "--mic", "test", "--desktop", "--camera", "test", "--break-after", "mic:1.2",
-    change=lambda _: None)
-assert errors == ["The microphone stopped working, so OmaCap stopped recording."], errors
-types = [s["codec_type"] for s in json.loads(subprocess.check_output(
-    ["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(path)]))["streams"]]
-assert types == ["video", "video", "audio", "audio"] and 1.1 < kept < 1.3, (types, kept)
+    # A watch that gets no answers keeps nothing it hasn't seen.
+    start, changed, errors, kept, _ = watched_recording("stalled-watch", change=stall)
+    assert errors == ["OmaCap couldn't check the display, so it stopped recording."], errors
+    assert kept < (changed - start) / 1e9 + 0.04, (kept, changed - start)
+
+    # The screen breaks off (as XDPH's does on a mode change) 0.15 s after a change the watch
+    # hasn't reported yet: what is held back waits for it, so nothing since the change is kept.
+    start, changed, errors, kept, _ = watched_recording(
+        "screen-break", "--break-after", "screen:1.15", change=unseen_change, at=1.3)
+    assert errors == ["The screen stream ended, as it does when the display changes, so OmaCap "
+                      "stopped recording."], errors
+    assert kept < (changed - start) / 1e9 + 0.04, (kept, changed - start)
+
+    # A microphone that fails ends the recording and keeps every track up to then.
+    start, _, errors, kept, path = watched_recording(
+        "mic-break", "--mic", "test", "--desktop", "--camera", "test", "--break-after", "mic:1.2",
+        change=lambda _: None)
+    assert errors == ["The microphone stopped working, so OmaCap stopped recording."], errors
+    types = [s["codec_type"] for s in json.loads(subprocess.check_output(
+        ["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(path)]))["streams"]]
+    assert types == ["video", "video", "audio", "audio"] and 1.1 < kept < 1.3, (types, kept)
 print(f"PASS: worker cut {duration:.3f}s, track starts {starts}; a late stop "
-      f"{late_duration:.3f}s, an orphan {orphan_duration:.3f}s; the display watch")
+      f"{late_duration:.3f}s, an orphan {orphan_duration:.3f}s; the display watch with "
+      f"{', '.join(e.split()[-1] for e in encoders)}")
